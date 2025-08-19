@@ -1,240 +1,249 @@
-"""
-Spectral clustering implementations.
-Naming follows:
-https://www.tml.cs.uni-tuebingen.de/team/luxburg/publications/Luxburg07_tutorial.pdf
-"""
-
-from typing import Optional
-import numpy as np
-import seaborn as sns
-from scipy.linalg import eig, eigh
-import scipy.sparse as sp
-from scipy.sparse.linalg import eigs, eigsh
-from sklearn.metrics import pairwise_distances
 from sklearn.cluster import HDBSCAN
-from sklearn.neighbors import kneighbors_graph
+import torch
+import argparse
+import os
+import numpy as np
+import torchvision
+from pathlib import Path
+import logging
+import mmcv
+import rerun as rr
+
+from scene.cameras import Camera
+from utils.params_utils import merge_hparams
+from arguments import ModelParams, PipelineParams, ModelHiddenParams
+from cluster_utils import store_palette, clusters_to_rgb
+from scene import GaussianModel, Scene
+from gaussian_renderer import render as gs_render
+from utils.sh_utils import RGB2SH
+import random
+# from utils.render_utils import get_state_at_time
 
 
-def laplacian(A):
-    # assert np.allclose(A.T, A), "A is not symmetric"
-    if sp.isspmatrix(A):
-        D_diag = np.asarray(A.sum(axis=0)).ravel()
-        D = sp.diags(D_diag, format="csr")
-        L = D - A
-    else:
-        D_diag = np.sum(A, axis=0)
-        D = np.diag(D_diag)
-        L = D - A
-    # assert np.allclose(L, L.T), "L is not symmetric"
-    return L
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
-def laplacian_rw(A):
-    # assert np.allclose(A.T, A), "A is not symmetric"
-    if sp.isspmatrix(A):
-        D_diag = np.asarray(A.sum(axis=0)).ravel()
-        with np.errstate(divide="ignore"):
-            D_inv_diag = np.zeros_like(D_diag)
-            nonzero = D_diag != 0
-            D_inv_diag[nonzero] = 1.0 / D_diag[nonzero]
-        D_inv = sp.diags(D_inv_diag, format="csr")
-        I = sp.eye(A.shape[0], format="csr")
-        L_rw = I - D_inv @ A
-    else:
-        D_diag = np.sum(A, axis=0)
-        with np.errstate(divide="ignore"):
-            D_inv_diag = np.zeros_like(D_diag)
-            nonzero = D_diag != 0
-            D_inv_diag[nonzero] = 1.0 / D_diag[nonzero]
-        D_inv = np.diag(D_inv_diag)
-        L_rw = np.eye(A.shape[0]) - D_inv @ A
-    # not supposed to be symmetric
-    return L_rw
+# Select which frame index to cluster and render
+N_TIMESTEPS = 5  # change this to choose the frame index
+TIMES = np.linspace(0 + 1e-6, 1 - 1e-6, N_TIMESTEPS)
 
+def init_params():
+    """Setup parameters similar to the train_eval.sh script"""
+    parser = argparse.ArgumentParser()
 
-def laplacian_sym(A):
-    # assert np.allclose(A.T, A), "A is not symmetric"
-    if sp.isspmatrix(A):
-        D_diag = np.asarray(A.sum(axis=0)).ravel()
-        D_pow_neg_half_diag = np.zeros_like(D_diag)
-        nonzero = D_diag != 0
-        D_pow_neg_half_diag[nonzero] = D_diag[nonzero] ** -0.5
-        D_pow_neg_half = sp.diags(D_pow_neg_half_diag, format="csr")
-        normalized_A = D_pow_neg_half @ A @ D_pow_neg_half
-        normalized_L = sp.eye(A.shape[0], format="csr") - normalized_A
-    else:
-        D_diag = np.sum(A, axis=0)
-        with np.errstate(divide="ignore"):
-            D_pow_neg_half_diag = np.zeros_like(D_diag)
-            nonzero = D_diag != 0
-            D_pow_neg_half_diag[nonzero] = D_diag[nonzero] ** -0.5
-        D_pow_neg_half = np.diag(D_pow_neg_half_diag)
-        normalized_A = D_pow_neg_half @ A @ D_pow_neg_half
-        normalized_L = np.eye(A.shape[0]) - normalized_A
-    # assert np.allclose(normalized_L, normalized_L.T), "L is not symmetric"
-    return normalized_L
+    # these register parameters to the parser
+    model_params = ModelParams(parser, sentinel=True)
+    pipeline = PipelineParams(parser)
+    hyperparam = ModelHiddenParams(parser)
 
+    parser.add_argument("--iteration", default=-1, type=int)
+    parser.add_argument("--skip_train", action="store_true")
+    parser.add_argument("--skip_test", action="store_true")
+    parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--skip_video", action="store_true")
+    # parser.add_argument("--skip_new_view", action="store_true")
+    parser.add_argument("--configs", type=str)
+    parser.add_argument("--mode", choices=["rgb", "lang"], default="rgb")
+    parser.add_argument("--novideo", type=int, default=0)
+    parser.add_argument("--noimage", type=int, default=0)
+    parser.add_argument("--nonpy", type=int, default=0)
+    parser.add_argument("--load_stage", type=str, default="fine-lang")
+    parser.add_argument("--num_views", type=int, default=5)
 
-def spectral_embeddings(
-    L, d, normalize_rows: bool, use_symmetric_eigensolver: bool
-):
-    """Spectral embeddings.
+    # load config file if specified
+    args = parser.parse_args()
+    if args.configs:
+        config = mmcv.Config.fromfile(args.configs)
+        args = merge_hparams(args, config)
+
+    return args, model_params, pipeline, hyperparam
+
+def filter_gaussians(gaussians: GaussianModel, mask: torch.Tensor):
+    """Filter set of gaussians based on a mask.
 
     Args:
-        L: Laplacian matrix (n x n)
-        d: dimension of embeddings (number of eigenvectors to keep), if set to None, cutoff at largest eigengap
-        normalize_rows: Normalize rows of embedding
-        use_symmetric_eigensolver: Use symmetric eigensolver
-
-    Returns:
-        _type_: _description_
+        gaussians (GaussianModel): The gaussian model to filter.
+        mask (torch.Tensor): The mask to filter the gaussians. Shape (n_gaussians,)
     """
-    if sp.isspmatrix(L):
-        if use_symmetric_eigensolver:
-            eigenvalues, U = eigsh(L, k=d, which="SA")
-        else:
-            eigenvalues, U = eigs(L, k=d, which="SR")
-    else:
-        if use_symmetric_eigensolver:
-            eigenvalues, U = eigh(L, subset_by_index=[0, d - 1])
-        else:
-            eigenvalues, eigenvectors = eig(L)
-            U = eigenvectors[:, :d]
-        assert np.allclose(eigenvalues[0], 0), (
-            f"smallest eigenvalue is not 0 but {np.array(eigenvalues[0]).round(6)} with eigenvector {np.array(eigenvectors[0]).round(6)}"
+    for prop in dir(gaussians):
+        attribute = getattr(gaussians, prop)
+        a_type = type(attribute)
+        if a_type == torch.Tensor or a_type == torch.nn.Parameter:
+            if attribute.shape[0] == len(mask):
+                setattr(gaussians, prop, attribute[mask])
+                logger.info(f"Filtered {prop} with shape {attribute.shape}")
+
+def normalize_indep_dim(x):
+    return (x - x.mean(axis=0)) / x.std(axis=0)
+
+def normalize_dep_dim(x):
+    return (x - x.mean()) / x.std()
+
+def positions_at_timestep(gaussians: GaussianModel, timestep: float, scene: Scene):
+    with torch.no_grad():
+        means3D = gaussians.get_xyz
+        scales = gaussians._scaling
+        rotations = gaussians._rotation
+        opacity = gaussians._opacity
+        shs = gaussians.get_features
+        lang = gaussians.get_language_feature
+        # Ensure time has the same dtype/device as model tensors
+        time = torch.full(
+            (means3D.shape[0], 1), float(timestep), device=means3D.device, dtype=means3D.dtype
         )
-        assert len(eigenvalues) < 2 or not np.allclose(eigenvalues[1], 0), (
-            "second smallest eigenvalue is 0 -> graph is not connected"
+        means3D_final, _, _, _, _, _, _ = gaussians._deformation(
+            means3D, scales, rotations, opacity, shs, lang, time
         )
-
-    # normalize rows if required
-    if normalize_rows:
-        norms = np.linalg.norm(U, axis=1, keepdims=True)
-        norms = np.maximum(norms, 1e-12)
-        T = U / norms
-    else:
-        T = U
-
-    return T
+    return means3D_final.detach().cpu().numpy()
 
 
-def unnormalized_spectral_clustering(A, min_cluster_size=1000, seed=42):
-    """Unnormalized spectral clustering. Approximates ratio cut.
+def cluster_gaussians(gaussians: GaussianModel, timestep: float, scene: Scene):
+    pos = normalize_indep_dim(positions_at_timestep(gaussians, timestep, scene))
+    lf = gaussians.get_language_feature.detach().cpu().numpy()
+    lf = normalize_dep_dim(lf)
 
-    Args:
-        A: Adjacency matrix (n x n)
-        min_cluster_size: Minimum cluster size
-        seed: Random seed
-
-    Returns:
-        Clusters (n,)
-    """
-    L = laplacian(A)
-    T = spectral_embeddings(L, d=None, normalize_rows=False, use_symmetric_eigensolver=True)
-    hdbscan = HDBSCAN(min_cluster_size=min_cluster_size, metric="euclidean", seed=seed)
-    clusters = hdbscan.fit_predict(T)
-    return clusters
-
-
-def shi_malik_spectral_clustering(A, min_cluster_size=1000, seed=42):
-    """Spectral clustering with random walk Laplacian.
-    Approximates normalized cut but uses non-hermitian laplacian and eigensolver,
-    so might be slower than other approaches.
-
-    Args:
-        A: Adjacency matrix (n x n)
-        min_cluster_size: Minimum cluster size
-        seed: Random seed
-
-    Returns:
-        Clusters (n,)
-    """
-    L = laplacian_rw(A)
-    T = spectral_embeddings(L, d=None, normalize_rows=False, use_symmetric_eigensolver=False)
-    hdbscan = HDBSCAN(min_cluster_size=min_cluster_size, metric="euclidean", seed=seed)
-    clusters = hdbscan.fit_predict(T)
-    return clusters
-
-
-def ng_jordan_weiss_spectral_clustering(A, min_cluster_size=100, d_spectral=8):
-    """Spectral clustering with symmetric, normalized Laplacian.
-    Heuristically approximates normalized cut (not principled like Shi-Malik),
-    but is faster because it uses a symmetric eigensolver.
-
-    Args:
-        A: Adjacency matrix (n x n)
-        min_cluster_size: Minimum cluster size
-        seed: Random seed
-
-    Returns:
-        Clusters (n,)
-    """
-    L = laplacian_sym(A)
-    print("Computing spectral embeddings...")
-    T = spectral_embeddings(L, d=d_spectral, normalize_rows=True, use_symmetric_eigensolver=True)
-    print("Fitting HDBSCAN...")
-    hdbscan = HDBSCAN(min_cluster_size=min_cluster_size, metric="euclidean")
-    clusters = hdbscan.fit_predict(T)
-    return clusters
-
-
-def clusters_to_rgb(clusters):
-    """Convert cluster ids to RGB colors from HUSL palette.
-
-    Args:
-        clusters: Cluster ids (does NOT have to be unique) (n,)
-
-    Returns:
-        RGB colors (n,3) in range(0,1), palette (K,3) in range(0,1)
-    """
-    unique = np.unique(clusters)
-    assert np.all(unique == np.arange(len(unique))), "Cluster ids must be contiguous"
-    # husl = np.array(sns.color_palette("husl", len(unique)))
-    # n_steps, min_brightness = 6, 0.4
-    # brightness = (
-    #     min_brightness
-    #     + (1 - min_brightness)
-    #     * np.mod(np.linspace(0, 1, husl.shape[0]), 1 / n_steps)
-    #     * n_steps
-    # )
-    # husl_adjusted = husl * brightness[:, np.newaxis]
-    # return husl_adjusted[clusters]
-    pal = np.random.rand(len(unique), 3)
-    return pal[clusters], pal
-
-
-def build_graph(positions, language_latent_features, k):
-    # knn position graph
-    knn_position = kneighbors_graph(
-        positions, n_neighbors=k, mode="distance"
-    )  # scipy sparse csr (n, n)
-    knn_position /= knn_position.max()
-
-    # language feature distances for knn edges
-    n_samples = knn_position.shape[0]
-    indptr = knn_position.indptr
-    indices = knn_position.indices
-    row_idx = []
-    col_idx = []
-    data = []
-    for i in range(n_samples):
-        start, end = indptr[i], indptr[i + 1]
-        neighbors = indices[start:end]
-        if neighbors.size == 0:
-            continue
-        dists = pairwise_distances(
-            language_latent_features[i : i + 1],
-            language_latent_features[neighbors],
-            metric="euclidean",
-        ).ravel()  # 1 x k distances for this row's neighbors
-        row_idx.extend([i] * len(neighbors))
-        col_idx.extend(neighbors.tolist())
-        data.extend(dists.tolist())
-    knn_language = sp.csr_matrix(
-        (data, (row_idx, col_idx)), shape=(n_samples, n_samples)
+    # graph = build_graph(pos, lf, k=10)
+    # clusters = ng_jordan_weiss_spectral_clustering(graph, min_cluster_size=100, d_spectral=10)
+    clusters = HDBSCAN(min_cluster_size=100, metric="euclidean").fit_predict(
+        np.concatenate([pos, lf], axis=1)
     )
-    knn_language /= knn_language.max()
 
-    # combine
-    graph = (knn_position + knn_language) * 0.5
-    return graph
+    return clusters
+
+def filter_clusters(clusters, gaussians, scene):
+    pos = normalize_indep_dim(positions_at_timestep(gaussians, 0.0, scene))
+    lf = gaussians.get_language_feature.detach().cpu().numpy()
+    lf = normalize_dep_dim(lf)
+
+    i = 0
+    for cluster_id in np.unique(clusters):
+        cluster_mask = clusters == cluster_id
+        opacity = gaussians.get_opacity[cluster_mask].mean()
+        std_pos = pos[cluster_mask].std()
+        std_lang = lf[cluster_mask].std()
+
+        logger.info(
+            f"Cluster {cluster_id}\tn_points {cluster_mask.sum()}\topacity {opacity:.4f}\tstd_pos {std_pos:.4f}\tstd_lang {std_lang:.4f}"
+        )
+
+        if cluster_id >= 0:
+            # filter clusters
+            if std_lang < 0.1:
+                clusters[cluster_mask] = -1
+                logger.info("\tFiltered because std_lang < 0.1")
+                continue
+            if opacity < 0.4:
+                clusters[cluster_mask] = -1
+                logger.info("\tFiltered because opacity < 0.4")
+                continue
+
+            # restore contiguousness of cluster ids
+            clusters[cluster_mask] = i
+            i += 1
+
+def set_cluster_colors(gaussians: GaussianModel, clusters: np.ndarray):
+    colors = torch.zeros_like(gaussians._features_dc)  # outliers black
+    all_clusters_mask = clusters >= 0
+    cluster_colors, palette = clusters_to_rgb(clusters[all_clusters_mask])
+    sh_dc = RGB2SH(cluster_colors)  # (N,3)
+    colors[all_clusters_mask, 0, :] = torch.tensor(sh_dc, device=colors.device, dtype=colors.dtype)
+    gaussians._features_dc.data = colors  # constant part becomes cluster color
+    gaussians._features_rest.data = torch.zeros_like(
+        gaussians._features_rest
+    )  # higher order coefficients (handle view dependence) become 0
+
+    return palette
+
+def render(cam: Camera, timestep: float, gaussians: GaussianModel, pipe: PipelineParams, scene: Scene, args: argparse.Namespace, dataset: ModelParams):
+    cam.time = timestep
+    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+    pkg = gs_render(
+        cam,
+        gaussians,
+        pipe,
+        background,
+        None,
+        stage=args.load_stage,
+        cam_type=scene.dataset_type,
+        args=args,
+    )
+    img = torch.clamp(pkg["render"], 0.0, 1.0)
+    return img
+
+def render_and_save_all(gaussians: GaussianModel, pipe: PipelineParams, scene: Scene, args: argparse.Namespace, dataset: ModelParams, out: Path):
+    save_dir = out / "cluster_renders"
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    # pick random views
+    test_cams = scene.getVideoCameras() # test + train
+    random_idx = random.sample(range(len(test_cams)), args.num_views)
+    cams = [test_cams[i] for i in random_idx]
+
+    # evenly spaced timesteps
+    timesteps = np.linspace(0, 1, args.num_views, dtype=np.float32)
+
+    # render and save
+    for i, cam in enumerate(cams):
+        cam_dir = save_dir / f"cam_{i:02d}"
+        cam_dir.mkdir(parents=True, exist_ok=True)
+        for j, timestep in enumerate(timesteps):
+            img = render(cam, timestep, gaussians, pipe, scene, args, dataset)
+            torchvision.utils.save_image(img, cam_dir / f"timestep_{j:02d}.png")
+
+def visualize_cluster_pointcloud(gaussians: GaussianModel, clusters: np.ndarray, scene: Scene):
+    rr.init("clusters", spawn=True)
+    cluster_idx = clusters != -1
+    cols = gaussians._features_dc.detach().cpu().numpy()[cluster_idx] * 255
+    labels = [str(i) for i in clusters[cluster_idx]]
+    for t in np.linspace(0, 1, 20):
+        pos = positions_at_timestep(gaussians, t, scene)[cluster_idx]
+        pc = rr.Points3D(
+            positions=pos,
+            colors=cols,
+            labels=labels,
+        )
+        rr.log("clusters", pc)
+
+def main():
+    # determistic seeds
+    random.seed(1234)
+    np.random.seed(1234)
+    torch.manual_seed(1234)
+
+    # mock render.py config
+    args, model_params, pipeline, hyperparam = init_params()
+
+    # construct all objects
+    dataset = model_params.extract(args)
+    pipe = pipeline.extract(args)
+    hyper = hyperparam.extract(args)
+    gaussians = GaussianModel(dataset.sh_degree, hyper)  # type:ignore
+    scene = Scene(
+        dataset,
+        gaussians,
+        load_iteration=args.iteration,
+        shuffle=False,
+        load_stage=args.load_stage,
+    )
+
+    # filter gaussians, cluster, filter clusters, set cluster colors
+    mask = (gaussians.get_opacity > 0.1).squeeze()
+    filter_gaussians(gaussians, mask)
+    clusters = cluster_gaussians(gaussians, timestep=0.0, scene=scene)
+    filter_clusters(clusters, gaussians, scene)
+    palette = set_cluster_colors(gaussians, clusters)
+
+    # log clusters over time
+    visualize_cluster_pointcloud(gaussians, clusters, scene)
+
+    # render and save everything
+    out = Path(args.model_path) / "graph"
+    out.mkdir(parents=True, exist_ok=True)
+    render_and_save_all(gaussians, pipe, scene, args, dataset, out)
+    store_palette(palette, out / "cluster_palette.png")
+    gaussians.save_ply(out / "clustered_gaussians.ply")
+
+if __name__ == "__main__":
+    main()
