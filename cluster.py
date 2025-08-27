@@ -274,8 +274,10 @@ def timestep_graph(positions, clusters):
     A = np.where(distances >= 0.05, distances, 0)
     return A
 
-def visualize_rerun(gaussians: GaussianModel, clusters: np.ndarray, timesteps: np.ndarray, pos_through_time: np.ndarray, cluster_pos_through_time: np.ndarray, graphs_through_time: np.ndarray):
-    rr.init("clusters", spawn=True)
+def visualize_rerun(gaussians: GaussianModel, clusters: np.ndarray, timesteps: np.ndarray, pos_through_time: np.ndarray, cluster_pos_through_time: np.ndarray, graphs_through_time: np.ndarray, rerun_file: Path):
+    rr.init("clusters")
+    rr.connect_grpc("rerun+http://127.0.0.1:9876/proxy")
+    rr.save(rerun_file)
 
     cluster_ids = np.unique(clusters)
     cluster_ids = cluster_ids[cluster_ids != -1]
@@ -408,7 +410,9 @@ def main():
     # graph
     graphs = np.stack([timestep_graph(pos_through_time[i], clusters) for i in range(len(timesteps))])
 
-    # log clusters over time
+    # render and save everything
+    out = Path(args.model_path) / "graph"
+    out.mkdir(parents=True, exist_ok=True)
     visualize_rerun(
         gaussians=gaussians,
         clusters=clusters,
@@ -416,11 +420,8 @@ def main():
         pos_through_time=pos_through_time,
         cluster_pos_through_time=cluster_pos_through_time,
         graphs_through_time=graphs,
+        rerun_file=out / "graph_visualization.rrd"
     )
-
-    # render and save everything
-    out = Path(args.model_path) / "graph"
-    out.mkdir(parents=True, exist_ok=True)
     render_and_save_all(gaussians, pipe, scene, args, dataset, out)
     store_palette(palette, out / "cluster_palette.png")
     gaussians.save_ply(out / "clustered_gaussians.ply")
