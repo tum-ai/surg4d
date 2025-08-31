@@ -162,3 +162,62 @@ This repository contains the official forked implementation of the paper "4D Lan
 | Datasets Annotations | [Google Drive](https://drive.google.com/drive/folders/1C-ciHn38vVd47TMkx2-93EUpI0z4ZdZW?usp=sharing) | [BaiduWangpan](https://pan.baidu.com/s/1ZMOk0UFQ39WJ7TtTXy9gkA?pwd=g9rg)\
 | Pretrained Model | [Google Drive](https://drive.google.com/drive/folders/1-G8I5cJCD66fjpvejUzF9QPRJU_GNxj0?usp=sharing) | [BaiduWangpan](https://pan.baidu.com/s/1TmBW1ZjZfjLQTGxpDXZzlg?pwd=3kmw)\
 | Pregenerated Point Clouds by COLMAP | [Google Drive](https://drive.google.com/drive/folders/1_JOObfpXrCq3v_NYKwDt6vRHIbb0oVek?usp=sharing) | [BaiduWangpan](https://pan.baidu.com/s/15jDvS-zSW7pfdvzdwP32mQ?pwd=9y2u)
+
+## Setting Up Individual GitHub Access on Shared Server
+
+### 1. Generate Your Personal SSH Key
+Each person should generate their own SSH key with a unique identifier:
+```bash
+ssh-keygen -t ed25519 -C "your-email@example.com" -f ~/.ssh/id_ed25519_yourname
+```
+
+### 2. Add Public Key to GitHub
+1. Copy your public key content:
+   ```bash
+   cat ~/.ssh/id_ed25519_yourname.pub
+   ```
+2. Go to GitHub → Settings → SSH and GPG keys → New SSH key
+3. Paste the public key content and save
+
+### 3. Test Your SSH Connection
+Test the connection using your alias (we'll set this up in step 4):
+```bash
+ssh -T git@github-yourname
+```
+
+### 4. Configure SSH Alias
+Add your personal SSH configuration block to `~/.ssh/config`:
+```
+Host github-YOURNAME
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/id_ed25519_YOURNAME
+```
+Replace `YOURNAME` with your actual identifier (same as used in the key filename).
+
+### 5. Clone Repositories Using Your Alias
+When cloning repositories, use your personal alias:
+```bash
+git clone --recursive git@github-yourname:username/repository-name.git
+```
+
+### 6. Set Git Identity Per Repository
+Inside each cloned repository, set your personal Git identity:
+```bash
+cd repository-name
+git config user.name "Your Full Name"
+git config user.email "your-email@example.com"
+```
+
+### 7. Set Up Shared Data Symlinks
+To avoid cluttering the remote server and simplify access to shared data and results, create symlinks to the shared data repository:
+```bash
+cd surgery-scene-graphs
+ln -s ~/shared_data/4DLangSplatSurgery/data ./data
+ln -s ~/shared_data/4DLangSplatSurgery/output ./output
+ln -s ~/shared_data/4DLangSplatSurgery/autoencoder/ckpt ./autoencoder/ckpt
+```
+
+This allows everyone to use their local repository folders while accessing the same shared datasets, model outputs, and checkpoints.
+
+This setup ensures that each person's commits are properly attributed to them while working on the shared server environment.
