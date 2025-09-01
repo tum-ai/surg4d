@@ -6,3 +6,4 @@ eval/eval_result
 preprocess/log
 preprocess/preprocess_result
 .vscode
+.venv

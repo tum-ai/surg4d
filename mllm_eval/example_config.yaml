@@ -1,0 +1,202 @@
+# Example configuration for 4D Scene Graph VQA experiments
+
+name: "4d_scene_graph_vqa_baseline"
+
+# Model configuration
+model:
+  name: "qwen2.5-vl-7b-instruct"
+  type: "local"
+  model_path: "/home/tumai/models/Qwen--Qwen2.5-VL-7B-Instruct"
+  max_tokens: 500
+  temperature: 0.1
+  additional_params:
+    do_sample: true
+    top_p: 0.9
+
+# Scene graph configuration
+scene_graph:
+  source_type: "4d"
+  encoding_format: "json"
+  file_format: "graphml"
+  temporal_strategy: "single_file"
+  temporal_frames: 3
+  graph_dir: "./data/scene_graphs_4d/"
+  include_spatial_info: true
+  include_temporal_info: true
+  
+  # Feature processing configuration
+  feature_processing:
+    preset: "surgical_optimized"  # Options: "default", "surgical_optimized", "fast_inference", "research_mode"
+    # You can also override specific settings:
+    # clip_model_name: "ViT-B-32"
+    # pretrained: "openai"
+    # top_k_matches: 3
+    # confidence_threshold: 0.2
+
+# Dataset configuration
+data:
+  data_root: "./data/"
+  train_sequences:
+    - "VID73"
+    - "VID40"
+    - "VID62"
+    - "VID42"
+    - "VID29"
+    - "VID56"
+    - "VID50"
+    - "VID78"
+    - "VID66"
+    - "VID13"
+    - "VID52"
+    - "VID06"
+    - "VID36"
+    - "VID05"
+    - "VID12"
+    - "VID26"
+    - "VID68"
+    - "VID32"
+    - "VID49"
+    - "VID65"
+    - "VID47"
+    - "VID04"
+    - "VID23"
+    - "VID79"
+    - "VID51"
+    - "VID10"
+    - "VID57"
+    - "VID75"
+    - "VID25"
+    - "VID14"
+    - "VID15"
+    - "VID08"
+    - "VID80"
+    - "VID27"
+    - "VID70"
+  val_sequences:
+    - "VID18"
+    - "VID48"
+    - "VID01"
+    - "VID35"
+    - "VID31"
+  test_sequences:
+    - "VID22"
+    - "VID74"
+    - "VID60"
+    - "VID02"
+    - "VID43"
+  question_types:
+    - "all"  # Or specify specific types: ["exist", "count", "query_component"]
+  batch_size: 16
+
+# Experiment settings
+output_dir: "./experiments/"
+save_predictions: true
+compute_baseline: true
+novel_view_synthesis: false
+
+---
+# Fast inference configuration
+name: "4d_scene_graph_vqa_fast"
+
+model:
+  name: "qwen2.5-vl-7b-instruct"
+  type: "local"
+  model_path: "/home/tumai/models/Qwen--Qwen2.5-VL-7B-Instruct"
+  max_tokens: 300
+  temperature: 0.0
+
+scene_graph:
+  source_type: "3d"
+  encoding_format: "text"
+  graph_dir: "./data/scene_graphs_3d/"
+  include_spatial_info: true
+  include_temporal_info: false
+  
+  feature_processing:
+    preset: "fast_inference"  # Optimized for speed
+
+data:
+  data_root: "./data/"
+  test_sequences: ["VID22", "VID74"]
+  question_types: ["exist", "count"]
+  batch_size: 32
+
+output_dir: "./experiments/fast_run/"
+save_predictions: true
+compute_baseline: false
+
+---
+# Research mode with maximum detail
+name: "4d_scene_graph_vqa_research"
+
+model:
+  name: "qwen2.5-vl-7b-instruct"
+  type: "local"
+  model_path: "/home/tumai/models/Qwen--Qwen2.5-VL-7B-Instruct"
+  max_tokens: 1000
+  temperature: 0.05
+
+scene_graph:
+  source_type: "4d"
+  encoding_format: "json"
+  temporal_frames: 5
+  graph_dir: "./data/scene_graphs_4d/"
+  include_spatial_info: true
+  include_temporal_info: true
+  
+  feature_processing:
+    preset: "research_mode"  # Best quality, most detailed
+    custom_vocabulary_terms:  # Add domain-specific terms
+      - "cholecystectomy_clip"
+      - "harmonic_scalpel"
+      - "calot_triangle"
+
+data:
+  data_root: "./data/"
+  test_sequences: ["VID22", "VID74", "VID60", "VID02", "VID43"]
+  question_types: ["all"]
+  batch_size: 8
+
+output_dir: "./experiments/research_run/"
+save_predictions: true
+compute_baseline: true
+
+---
+# Custom configuration example
+name: "4d_scene_graph_vqa_custom"
+
+model:
+  name: "qwen2.5-vl-7b-instruct"
+  type: "local"
+  model_path: "/home/tumai/models/Qwen--Qwen2.5-VL-7B-Instruct"
+  max_tokens: 500
+  temperature: 0.1
+
+scene_graph:
+  source_type: "3d"
+  encoding_format: "text"
+  graph_dir: "./data/scene_graphs_3d/"
+  include_spatial_info: true
+  include_temporal_info: false
+  
+  # Custom feature processing (no preset)
+  feature_processing:
+    clip_model_name: "ViT-L-14"
+    pretrained: "laion400m_e32"
+    enable_feature_decoding: true
+    enable_raw_features: false
+    top_k_matches: 2
+    confidence_threshold: 0.3
+    use_extended_vocabulary: true
+    include_alternative_descriptions: true
+    max_description_length: 80
+    surgical_vocabulary_file: "./data/custom_surgical_vocab.txt"
+
+data:
+  data_root: "./data/"
+  test_sequences: ["VID22"]
+  question_types: ["exist"]
+  batch_size: 16
+
+output_dir: "./experiments/custom_run/"
+save_predictions: true
