@@ -1,5 +1,4 @@
 from typing import List
-import open_clip
 from sklearn.cluster import HDBSCAN
 import torch
 import argparse
@@ -411,8 +410,10 @@ def main():
 
     # query correspondences
     gaussian_lfs = decode_lfs(gaussians.get_language_feature, args)
-    queries = ["hand", "egg"]
-    canonical_corpus = ["object", "things", "stuff", "texture"]
+    # queries = ["hand", "egg"]
+    # canonical_corpus = ["object", "things", "stuff", "texture"]
+    queries = ["gallbladder", "liver"]
+    canonical_corpus = ["object", "things", "stuff", "texture", "surgery", "body", "anatomy", "medical"]
     gaussian_scores = lerf_relevancies(gaussian_lfs, queries, canonical_corpus)
     cluster_scores = lerf_relevancies(clip_features, queries, canonical_corpus)
 
