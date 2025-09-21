@@ -277,9 +277,13 @@ def process_single_image_with_query(
     )
 
     # Convert query similarity to 2D spatial layout
-    query_similarity_2d = patches_to_2d(
-        query_similarity.unsqueeze(-1), resized_image
-    ).squeeze(-1)
+    query_similarity_2d = (
+        patches_to_2d(query_similarity.unsqueeze(-1), resized_image)
+        .squeeze(-1)
+        .detach()
+        .cpu()
+        .float()
+    )
 
     return resized_image, patch_features_pca_2d, query_similarity_2d
 
