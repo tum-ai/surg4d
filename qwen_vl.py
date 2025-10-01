@@ -70,7 +70,7 @@ def forward(
     if inputs_embeds is None:
         inputs_embeds = self.get_input_embeddings()(input_ids)
 
-    if pixel_values is not None or "custom_patch_features" in kwargs:
+    if pixel_values is not None:
         if "custom_patch_features" in kwargs:
             image_embeds = kwargs["custom_patch_features"]
         else:
@@ -168,7 +168,7 @@ def get_patched_qwen(
     attn_implementation: str = "sdpa", # "flash_attention_2" or "sdpa"
     torch_dtype: torch.dtype = torch.bfloat16,
     device_map: Union[str, Dict[str, str]] = "auto",
-    max_memory: Optional[Dict[str, str]] = {0: "22.0GB", "cpu": "46.0GB"},
+    max_memory: Optional[Dict[str, str]] = {0: "18.0GB", "cpu": "46.0GB"},
 ):
     """Get a monkey-patched Qwen2_5_VL model/processor that supports raw patch features.
 
@@ -206,6 +206,8 @@ def get_patched_qwen(
     # Also patch prepare_inputs_for_generation to accept and forward custom_patch_features through generation
     orig_prepare = model.prepare_inputs_for_generation
 
+    # input preparation needs to access custom_patch_features
+    # so transformers doesn't complain about unsupported attributes
     def prepare_inputs_for_generation_wrapper(
         self,
         input_ids,
@@ -223,6 +225,13 @@ def get_patched_qwen(
         custom_patch_features=None,
         **kwargs,
     ):
+        # During decoding steps, GenerationMixin provides only the last token in input_ids
+        # but the full attention_mask. Align mask length to avoid shape mismatches
+        # inside Qwen2_5_VL get_rope_index when indexing with the mask.
+        if attention_mask is not None and input_ids is not None:
+            # If lengths differ, slice mask to align with provided input_ids tokens
+            if attention_mask.shape[-1] != input_ids.shape[-1]:
+                attention_mask = attention_mask[..., -input_ids.shape[-1] :]
         model_inputs = orig_prepare(
             input_ids,
             past_key_values=past_key_values,
@@ -247,10 +256,7 @@ def get_patched_qwen(
     )
     processor = Qwen2_5_VLProcessor.from_pretrained(model_path)
     # Prefer new cache format for memory-efficient caches
-    try:
-        model.generation_config.return_legacy_cache = False
-    except Exception:
-        pass
+    model.generation_config.return_legacy_cache = False
     model.eval()
     return model, processor
 
@@ -344,16 +350,6 @@ def ask_qwen_about_image(
     generated_ids = model.generate(
         **inputs,
         max_new_tokens=128,
-        cache_implementation="quantized",
-        cache_config={
-            "backend": "hqq",
-            "config": model.config.get_text_config(),
-            "nbits": 4,
-            "q_group_size": 64,
-            "residual_length": 128,
-        },
-        return_legacy_cache=False,
-        prefill_chunk_size=4096,
     )
     generated_ids_trimmed = [
         out_ids[len(in_ids) :]
@@ -455,16 +451,6 @@ def generate_with_vision_features(
         **inputs,
         max_new_tokens=max_tokens,
         custom_patch_features=vision_features,
-        cache_implementation="quantized",
-        cache_config={
-            "backend": "hqq",
-            "config": model.config.get_text_config(),
-            "nbits": 4,
-            "q_group_size": 64,
-            "residual_length": 128,
-        },
-        return_legacy_cache=False,
-        prefill_chunk_size=4096,
     )
 
     # remove prefix tokens (model input) and decode
