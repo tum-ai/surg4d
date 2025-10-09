@@ -5,8 +5,17 @@ import torch
 from torch.utils.data import Dataset
 from tqdm import tqdm
 class Autoencoder_dataset(Dataset):
-    def __init__(self, data_dir):
-        data_names = glob.glob(os.path.join(data_dir, '*f.npy'))
+    def __init__(self, data_dirs):
+        # Support both single directory and list of directories
+        if isinstance(data_dirs, str):
+            data_dirs = [data_dirs]
+        else:
+            data_dirs = data_dirs
+        
+        # Collect all data files from all directories
+        data_names = []
+        for dir_path in data_dirs:
+            data_names.extend(glob.glob(os.path.join(dir_path, '*f.npy')))
         total_rows = 0
         for i in tqdm(range(len(data_names))):
             features = np.load(data_names[i], mmap_mode='r')  

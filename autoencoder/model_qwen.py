@@ -15,12 +15,12 @@ class QwenAutoencoder(nn.Module):
     """
     Autoencoder for Qwen features per paper spec:
     - Input feature dimension: 3584
-    - Encoder: 3584 -> 2048 -> BN -> GeLU -> 1024 -> BN -> GeLU -> 512 -> BN -> GeLU -> 256
-    - Decoder: 256 -> 512 -> GeLU -> 1024 -> GeLU -> 2048 -> GeLU -> 2048 -> GeLU -> 3584
+    - Encoder: 3584 -> 2048 (1024) -> BN -> GeLU -> 1024 (256) -> BN -> GeLU -> 512 (32) -> BN -> GeLU -> 256 (3)
+    - Decoder: 256 (3) -> 512 (64) -> GeLU -> 1024 (256) -> GeLU -> 2048 (1024) -> GeLU -> 2048 -> GeLU -> 3584
     - Latent (compressed) features are L2-normalized to a unit hypersphere
     """
 
-    def __init__(self, input_dim: int = 3584, latent_dim: int = 256) -> None:
+    def __init__(self, input_dim: int = 3584, latent_dim: int = 3) -> None:
         super().__init__()
         if input_dim != 3584 or latent_dim != 256:
             # Still build generically, but warn in case of accidental mismatch
@@ -28,28 +28,28 @@ class QwenAutoencoder(nn.Module):
 
         # Encoder with BN + GeLU between linear layers (except after final layer)
         encoder_layers = [
-            nn.Linear(input_dim, 2048),
-            nn.BatchNorm1d(2048),
-            nn.GELU(),
-            nn.Linear(2048, 1024),
+            nn.Linear(input_dim, 1024),
             nn.BatchNorm1d(1024),
             nn.GELU(),
-            nn.Linear(1024, 512),
-            nn.BatchNorm1d(512),
+            nn.Linear(1024, 256),
+            nn.BatchNorm1d(256),
             nn.GELU(),
-            nn.Linear(512, latent_dim),
+            nn.Linear(256, 32),
+            nn.BatchNorm1d(32),
+            nn.GELU(),
+            nn.Linear(32, latent_dim),
         ]
         self.encoder = nn.Sequential(*encoder_layers)
 
         # Decoder with GeLU activations between linear layers
         decoder_layers = [
-            nn.Linear(latent_dim, 512),
+            nn.Linear(latent_dim, 64),
             nn.GELU(),
-            nn.Linear(512, 1024),
+            nn.Linear(64, 256),
+            nn.GELU(),
+            nn.Linear(256, 1024),
             nn.GELU(),
             nn.Linear(1024, 2048),
-            nn.GELU(),
-            nn.Linear(2048, 2048),
             nn.GELU(),
             nn.Linear(2048, input_dim),
         ]

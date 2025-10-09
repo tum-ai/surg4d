@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Union, Any
 from types import MethodType
 from functools import lru_cache
 from transformers.utils.quantization_config import BitsAndBytesConfig
+import json
 
 from transformers.utils import is_torchdynamo_compiling, TransformersKwargs
 from transformers.cache_utils import Cache
@@ -319,6 +320,7 @@ def ask_qwen_about_image(
     prompt: str,
     model: Qwen2_5_VLForConditionalGeneration,
     processor: Qwen2_5_VLProcessor,
+    system_prompt: str = "You are a medical assistant designed to aid medical practitioners during a cholecystectomy procedure. The surgeon user will ask you a question and show you their current situation, and you give a concise answer."
 ):
     messages = [
         {
@@ -326,7 +328,7 @@ def ask_qwen_about_image(
             "content": [
                 {
                     "type": "text",
-                    "text": "You are a medical assistant designed to aid medical practitioners during a cholecystectomy procedure. The surgeon user will ask you a question and show you their current situation, and you give a concise answer.",
+                    "text": system_prompt,
                 }
             ],
         },
@@ -380,7 +382,7 @@ def ask_qwen_about_image_features(
     prompt: str,
     model: Qwen2_5_VLForConditionalGeneration,
     processor: Qwen2_5_VLProcessor,
-    system_prompt: str = "You are a medical assistant designed to aid medical practitioners during surgery. The surgeon user will ask you a question and show you their current situation, and you give a concise answer.",
+    system_prompt: str = "You are a medical assistant designed to aid medical practitioners during a cholecystectomy procedure. The surgeon user will ask you a question and show you their current situation, and you give a concise answer.",
 ):
     messages = [
         {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
@@ -424,6 +426,8 @@ def model_inputs(
     mock_images = []
     for i in range(len(vision_features)):
         w, h = closest_factor_pair(vision_features[i].shape[0])
+        # print(f'{vision_features[i].shape[0]} features mocked by {w}x{h} image')
+        assert w * h == vision_features[i].shape[0]
         mock_img = Image.new(
             "RGB", (EFFECTIVE_PATCH_SIZE * w, EFFECTIVE_PATCH_SIZE * h), color="red"
         )
@@ -541,15 +545,15 @@ def prompt_with_graph(
                 },
                 {
                     "type": "text",
-                    "text": f'<center x="{node_centers[t][n][0]}" y="{node_centers[t][n][1]}" z="{node_centers[t][n][2]}"/>\n',
+                    "text": f'<center x="{node_centers[t][n][0]:.2f}" y="{node_centers[t][n][1]:.2f}" z="{node_centers[t][n][2]:.2f}"/>\n',
                 },
                 {
                     "type": "text",
-                    "text": f'<centroid x="{node_centroids[t][n][0]}" y="{node_centroids[t][n][1]}" z="{node_centroids[t][n][2]}"/>\n',
+                    "text": f'<centroid x="{node_centroids[t][n][0]:.2f}" y="{node_centroids[t][n][1]:.2f}" z="{node_centroids[t][n][2]:.2f}"/>\n',
                 },
                 {
                     "type": "text",
-                    "text": f'<extent x="{node_extents[t][n][0]}" y="{node_extents[t][n][1]}" z="{node_extents[t][n][2]}"/>\n',
+                    "text": f'<extent x="{node_extents[t][n][0]:.2f}" y="{node_extents[t][n][1]:.2f}" z="{node_extents[t][n][2]:.2f}"/>\n',
                 },
                 {
                     "type": "text",
@@ -562,7 +566,7 @@ def prompt_with_graph(
                     graph_content.append(
                         {
                             "type": "text",
-                            "text": f'<edge from="{n}" to="{m}" dist="{A[n, m]}"/>\n',
+                            "text": f'<edge from="{n}" to="{m}" dist="{A[n, m]:.2f}"/>\n',
                         }
                     )
         graph_content.append(
@@ -593,6 +597,9 @@ def prompt_with_graph(
         },
     ]
 
+    with open('qwen_messages.json', 'w') as fp:
+        json.dump(messages, fp)
+
     return generate_with_vision_features(
         messages=messages,
         vision_features=[torch.Tensor(f) for f in node_feats],
@@ -611,15 +618,26 @@ def crop_patch_features(patch_feat: torch.Tensor, cw, ch, cx1, cx2, cy1, cy2):
 def get_patch_segmasks(im_height, im_width):
     """generate an instance segmentation mask
     where each instance corresponds to one qwen 2.5 vl vision encoder patch"""
-    raw_patches_height, raw_patches_width = (
-        im_height // PATCH_SIZE,
-        im_width // PATCH_SIZE,
-    )
-    patches_width = torch.ceil(torch.div(raw_patches_width, SPATIAL_MERGE))
+    # raw_patches_height, raw_patches_width = (
+    #     im_height // PATCH_SIZE,
+    #     im_width // PATCH_SIZE,
+    # )
+    # patches_width = torch.ceil(torch.div(raw_patches_width, SPATIAL_MERGE))
+    # rowcol = torch.stack(
+    #     torch.meshgrid(
+    #         torch.arange(raw_patches_height * PATCH_SIZE),
+    #         torch.arange(raw_patches_width * PATCH_SIZE),
+    #         indexing="ij",
+    #     )
+    # )
+    # patch_coords = torch.floor_divide(rowcol, EFFECTIVE_PATCH_SIZE)
+    # return patch_coords[0] * patches_width + patch_coords[1]
+    patches_height = im_height // EFFECTIVE_PATCH_SIZE + ((im_height // PATCH_SIZE) % 4 == 3) # cursed behavior
+    patches_width = im_width // EFFECTIVE_PATCH_SIZE + ((im_width // PATCH_SIZE) % 4 == 3)    # -,,-
     rowcol = torch.stack(
         torch.meshgrid(
-            torch.arange(raw_patches_height * PATCH_SIZE),
-            torch.arange(raw_patches_width * PATCH_SIZE),
+            torch.arange(patches_height * EFFECTIVE_PATCH_SIZE + ((im_height // PATCH_SIZE) % 4 == 3) * PATCH_SIZE),
+            torch.arange(patches_width * EFFECTIVE_PATCH_SIZE) + ((im_width // PATCH_SIZE) % 4 == 3) * PATCH_SIZE,
             indexing="ij",
         )
     )
