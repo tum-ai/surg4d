@@ -33,7 +33,33 @@ python preprocess/run_nerfstudio_colmap_cpu.py \
 - CUDA 12.4
 - GCC 10.2.0
 
-On default, run the following commands to install the relative packages
+### Option 1: Using Pixi (Recommended)
+[Pixi](https://pixi.sh) provides a reproducible environment with all dependencies managed automatically.
+
+```bash
+# Install pixi if you haven't already (see https://pixi.sh)
+curl -fsSL https://pixi.sh/install.sh | bash
+
+# Install all dependencies
+pixi install
+
+# Build and install all CUDA extensions and additional packages
+# This installs: simple-knn, 4d-langsplat-rasterization, deva, segment-anything
+pixi run setup
+
+# Run any command in the environment
+pixi run python train.py --config configs/...
+```
+
+You can also install individual components:
+```bash
+pixi run install-simple-knn           # Simple KNN CUDA extension
+pixi run install-rasterization        # Gaussian rasterization CUDA extension
+pixi run install-deva                 # DEVA tracking package
+pixi run install-segment-anything     # Segment Anything from Meta
+```
+
+### Option 2: Using Conda/Pip (Traditional)
 ```bash
 conda create -n 4DLangSplat python=3.10
 conda activate 4DLangSplat

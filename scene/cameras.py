@@ -90,9 +90,10 @@ class Camera(nn.Module):
         elif data_type == "colmap":
             # TODO: this is hardcoded, need to fix this! has to do with how colmap generated more images that are blurred
             #  and essentially repeat the dataset every few times
-            frame_id = self.colmap_id % 80
-            if frame_id == 0:
-                frame_id = 80
+            # frame_id = self.colmap_id % 80
+            frame_id = self.colmap_id + 1
+            # if frame_id == 0:
+            #     frame_id = 80
             language_feature_name = os.path.join(language_feature_dir, f"{frame_id:06}")            
         else:
             raise NotImplementedError

@@ -335,7 +335,12 @@ class GaussianModel:
             l.append('f_dc_{}'.format(i))
         for i in range(self._features_rest.shape[1]*self._features_rest.shape[2]):
             l.append('f_rest_{}'.format(i))
-        for i in range(self._language_feature.shape[1]):
+        # Language features may be absent in base-only runs; fall back to env dim
+        if self._language_feature is not None:
+            lang_dim = self._language_feature.shape[1]
+        else:
+            lang_dim = int(os.getenv("language_feature_hiddendim", 3))
+        for i in range(lang_dim):
             l.append('f_lang_{}'.format(i))
         l.append('opacity')
         for i in range(self._scaling.shape[1]):
@@ -374,7 +379,12 @@ class GaussianModel:
         normals = np.zeros_like(xyz)
         f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
         f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
-        f_lang = self._language_feature.detach().cpu().numpy()
+        # If language features are absent (e.g., base-only runs), write zeros with env-specified dim
+        if self._language_feature is None:
+            lang_dim = int(os.getenv("language_feature_hiddendim", 3))
+            f_lang = np.zeros((xyz.shape[0], lang_dim), dtype=np.float32)
+        else:
+            f_lang = self._language_feature.detach().cpu().numpy()
         opacities = self._opacity.detach().cpu().numpy()
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
@@ -382,7 +392,7 @@ class GaussianModel:
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, normals, f_dc, f_rest,f_lang, opacities, scale, rotation), axis=1)
+        attributes = np.concatenate((xyz, normals, f_dc, f_rest, f_lang, opacities, scale, rotation), axis=1)
         # import pdb; pdb.set_trace()
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')

@@ -1,0 +1,69 @@
+[workspace]
+channels = ["conda-forge"]
+name = "surgery-scene-graphs"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+# Install CUDA extensions (require torch to be installed first)
+install-simple-knn = "python -m pip install --no-build-isolation -e submodules/simple-knn/"
+install-rasterization = "python -m pip install --no-build-isolation -e submodules/4d-langsplat-rasterization/"
+# Install Python packages
+install-deva = "python -m pip install -e submodules/4d-langsplat-tracking-anything-with-deva/"
+install-segment-anything = "python -m pip install git+https://github.com/facebookresearch/segment-anything.git"
+# Run this after 'pixi install' to set up all CUDA extensions and additional packages
+setup = { depends-on = ["install-simple-knn", "install-rasterization", "install-deva", "install-segment-anything"] }
+
+[activation.env]
+CUDA_VISIBLE_DEVICES = "$(if [ $(hostname) = 'a4000-2402n18' ]; then echo '1'; fi)"
+LD_LIBRARY_PATH = "$PIXI_PROJECT_ROOT/.pixi/envs/default/lib/python3.10/site-packages/torch/lib:$LD_LIBRARY_PATH"
+
+[dependencies]
+python = "==3.10"
+cuda-toolkit = "12.4.*"
+cuda-version = "==12.4"
+libxcrypt = "*"
+
+[pypi-dependencies]
+pip = "*"
+torch = "==2.6.0"
+torchaudio = "==2.6.0"
+torchvision = "==0.21.0"
+transformers = ">=4.57.0, <5"
+accelerate = ">=1.10.1, <2"
+sentence-transformers = ">=5.1.1, <6"
+open-clip-torch = ">=3.2.0, <4"
+mmcv = "==1.6.0"
+opencv-python = ">=4.12.0.88, <5"
+imageio = { version = ">=2.37.0, <3", extras = ["ffmpeg"] }
+open3d = ">=0.18.0, <0.19"
+plyfile = ">=1.1.2, <2"
+qwen-vl-utils = { version = ">=0.0.14, <0.0.15", extras = ["decord"] }
+matplotlib = ">=3.10.7, <4"
+seaborn = ">=0.13.2, <0.14"
+mediapy = ">=1.2.4, <2"
+numpy = ">=2.2.6, <3"
+scipy = ">=1.15.3, <2"
+scikit-learn = ">=1.7.2, <2"
+pandas = ">=2.3.3, <3"
+networkx = ">=3.4.2, <4"
+pyyaml = ">=6.0.3, <7"
+ipdb = ">=0.13.13, <0.14"
+loguru = ">=0.7.3, <0.8"
+wandb = ">=0.22.2, <0.23"
+roboflow = ">=1.2.10, <2"
+argparse = ">=1.4.0, <2"
+pathlib = ">=1.0.1, <2"
+tqdm = ">=4.67.1, <5"
+jaxtyping = ">=0.3.3, <0.4"
+jupyter = ">=1.1.1, <2"
+ipykernel = ">=6.30.1, <7"
+ipywidgets = ">=8.1.7, <9"
+pillow = ">=11.3.0, <12"
+requests = ">=2.32.5, <3"
+dataclasses-json = ">=0.6.7, <0.7"
+faiss-cpu = ">=1.12.0, <2"
+einops = ">=0.8.1, <0.9"
+lpips = ">=0.1.4, <0.2"
+rerun-sdk = ">=0.25.1, <0.26"
+

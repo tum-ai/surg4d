@@ -255,13 +255,15 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             
             gt_images.append(gt_image.unsqueeze(0))
             
-            gt_language_feature, language_feature_mask = viewpoint_cam.get_language_feature(language_feature_dir=dataset.lf_path, feature_level=dataset.feature_level,data_type=scene.dataset_type)
-            gt_language_features.append(gt_language_feature)
+            if 'base' not in stage:
+                gt_language_feature, language_feature_mask = viewpoint_cam.get_language_feature(language_feature_dir=dataset.lf_path, feature_level=dataset.feature_level,data_type=scene.dataset_type)
+                gt_language_features.append(gt_language_feature)
             end_time = time.time()
             total_time_ongt += (end_time - start_time)
 
-            language_feature_masks.append(language_feature_mask)
-            language_features.append(language_feature)
+            if 'base' not in stage:
+                language_feature_masks.append(language_feature_mask)
+                language_features.append(language_feature)
             
             radii_list.append(radii.unsqueeze(0))
             visibility_filter_list.append(visibility_filter.unsqueeze(0))
@@ -309,16 +311,21 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
 
 
         ################ DEBUG  ################
-        if language_feature is None:
-            language_feature = torch.zeros(gt_language_feature.shape)
-        if iteration % log_iter_interval == 0:        
-            # import ipdb; ipdb.set_trace()
-            images = [
-                image2save(image,'rgb'),
-                image2save(gt_image,'rgb'),
-                image2save(language_feature,'lang'),
-                image2save(gt_language_feature,'lang')
-            ]
+        if iteration % log_iter_interval == 0:
+            if 'base' in stage:
+                images = [
+                    image2save(image,'rgb'),
+                    image2save(gt_image,'rgb'),
+                ]
+            else:
+                if language_feature is None:
+                    language_feature = torch.zeros_like(gt_language_feature)
+                images = [
+                    image2save(image,'rgb'),
+                    image2save(gt_image,'rgb'),
+                    image2save(language_feature,'lang'),
+                    image2save(gt_language_feature,'lang')
+                ]
             concatenated_image = concat_images(images, mode='horizontal')
 
             # 
@@ -440,7 +447,12 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
                                 checkpoint_iterations, checkpoint, debug_from,
                                 gaussians, scene, "fine-lang-discrete", args.joint_fine, tb_writer, opt.fine_lang_iterations+10000,args,timer)
     else:
-        scene = Scene(dataset, gaussians, load_coarse=None)
+        # Allow resuming from a specific saved stage/iteration (non-discrete path)
+        if getattr(args, 'resume_from_stage', ""):
+            timer.start()
+            scene = Scene(dataset, gaussians, load_iteration=getattr(args, 'resume_from_iter', -1), load_stage=args.resume_from_stage)
+        else:
+            scene = Scene(dataset, gaussians, load_coarse=None)
         logger.info(f"opt.coarse_base_iterations:{opt.coarse_base_iterations}")
         logger.info(f"opt.coarse_lang_iterations:{opt.coarse_lang_iterations}")
         logger.info(f"opt.fine_base_iterations:{opt.fine_base_iterations}")
@@ -587,6 +599,9 @@ if __name__ == "__main__":
     parser.add_argument("--resume_from_final_stage_load_iter",type=int,default=10000)
     parser.add_argument("--init_from_stage",choices=['fine-lang','fine-base'],default='fine-base')
     parser.add_argument("--coff_time_smooth_loss_weight",type=float,default=1e-1)
+    # Generic resume controls (non-discrete)
+    parser.add_argument('--resume_from_stage', type=str, default="")
+    parser.add_argument('--resume_from_iter', type=int, default=-1)
     
     
     args = parser.parse_args(sys.argv[1:])

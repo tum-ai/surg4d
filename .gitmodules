@@ -3,7 +3,7 @@
 	url = git@github.com:zrporz/simple-knn.git
 [submodule "submodules/4d-langsplat-rasterization"]
 	path = submodules/4d-langsplat-rasterization
-	url = git@github.com:zrporz/4d-langsplat-rasterization.git
+	url = git@github.com:NicoStellwag/4d-langsplat-rasterization.git
 [submodule "submodules/4d-langsplat-tracking-anything-with-deva"]
 	path = submodules/4d-langsplat-tracking-anything-with-deva
 	url = git@github.com:zrporz/4d-langsplat-tracking-anything-with-deva.git
