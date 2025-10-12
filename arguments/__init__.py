@@ -69,6 +69,7 @@ class ModelParams(ParamGroup):
             g.lf_path = None
         else:
             g.lf_path = os.path.join(g.source_path, g.language_features_name)
+            g.depth_path = os.path.join(g.source_path, "depth")
         if g.sh_degree == None:
             g.sh_degree = self.sh_degree
         return g

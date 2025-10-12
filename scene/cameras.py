@@ -126,6 +126,41 @@ class Camera(nn.Module):
        
         return point_feature.cuda(), mask.cuda()
     
+    def get_depth_map(self, depth_dir, split='train',data_type="nerfies"):
+        if data_type == "nerfies":
+            if split=='train':
+                real_id = self.colmap_id*4 + 1
+            elif split == 'test': # test
+                real_id = self.colmap_id*4 + 3
+            else: # video
+                real_id = self.colmap_id +1
+            depth_name = os.path.join(depth_dir, f"{real_id:06}")
+
+        elif data_type == "dynerf": 
+            frame_id = self.colmap_id % 300
+
+            if split ==  'test':
+                assert self.colmap_id<300
+            elif split == "video":
+                return None, None
+
+            depth_name = os.path.join(depth_dir, f"{self.cam_name}-{frame_id:04}")
+
+        elif data_type == "colmap":
+            # TODO: this is hardcoded, need to fix this! has to do with how colmap generated more images that are blurred
+            #  and essentially repeat the dataset every few times
+            # frame_id = self.colmap_id % 80
+            frame_id = self.colmap_id + 1
+            # if frame_id == 0:
+            #     frame_id = 80
+            depth_name = os.path.join(depth_dir, f"{frame_id:06}")            
+        else:
+            raise NotImplementedError
+
+        depth_map = torch.from_numpy(np.load(depth_name + ".npy"))
+
+        return depth_map.float().cuda().unsqueeze(0) # add channel dim
+    
 class MiniCam:
     def __init__(self, width, height, fovy, fovx, znear, zfar, world_view_transform, full_proj_transform, time):
         self.image_width = width

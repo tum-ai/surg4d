@@ -238,6 +238,8 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         language_features = []
         language_feature_masks = []
         coff_list = []
+        depth_maps = []
+        gt_depth_maps = []
 
         for viewpoint_cam in viewpoint_cams:
             render_pkg = render(viewpoint_cam, gaussians, pipe, background,opt, stage=stage,cam_type=scene.dataset_type,args=args)
@@ -254,6 +256,11 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                 gt_image  = viewpoint_cam['image'].cuda()
             
             gt_images.append(gt_image.unsqueeze(0))
+
+            depth_map = render_pkg["depth"]
+            depth_maps.append(depth_map.unsqueeze(0))
+            gt_depth_map = viewpoint_cam.get_depth_map(dataset.depth_path, split='train',data_type=scene.dataset_type)
+            gt_depth_maps.append(gt_depth_map.unsqueeze(0))
             
             if 'base' not in stage:
                 gt_language_feature, language_feature_mask = viewpoint_cam.get_language_feature(language_feature_dir=dataset.lf_path, feature_level=dataset.feature_level,data_type=scene.dataset_type)
@@ -275,6 +282,8 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             language_feature_tensor = torch.cat(language_features,0)
             language_feature_mask_tensor = torch.cat(language_feature_masks,0)
             gt_language_feature_tensor = torch.cat(gt_language_features,0)
+        depth_map_tensor = torch.cat(depth_maps,0) # (batch, 1, h, w)
+        gt_depth_map_tensor = torch.cat(gt_depth_maps,0)
         
         image_tensor = torch.cat(images,0)
         gt_image_tensor = torch.cat(gt_images,0)
@@ -296,6 +305,10 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                 Ll1_rgb = l1_loss(image_tensor, gt_image_tensor[:,:3,:,:])
                 resdict['rgb_l1'] = Ll1_rgb.item()
                 Ll1 += Ll1_rgb
+        if args.depth_loss_weight != 0.0:
+            Ll1_depth = l1_loss(depth_map_tensor, gt_depth_map_tensor)
+            resdict['depth_l1'] = Ll1_depth.item()
+            Ll1 += args.depth_loss_weight * Ll1_depth
         # if opt.include_feature:
         #     Ll1 += l1_loss(language_feature*language_feature_mask, gt_language_feature*language_feature_mask)            
             # loss = Ll1
@@ -602,6 +615,8 @@ if __name__ == "__main__":
     # Generic resume controls (non-discrete)
     parser.add_argument('--resume_from_stage', type=str, default="")
     parser.add_argument('--resume_from_iter', type=int, default=-1)
+    # custom loss stuff
+    parser.add_argument("--depth_loss_weight",type=float,default=0.0)
     
     
     args = parser.parse_args(sys.argv[1:])
