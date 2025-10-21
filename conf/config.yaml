@@ -1,7 +1,7 @@
 defaults:
   - clips: t50_seg8k_intersection
   - preprocessing: default
-  # - feature_extraction: default
+  - feature_extraction: default
   # - autoencoder: default
   # - splat: default
   # - graph_extraction: default
