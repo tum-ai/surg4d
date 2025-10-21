@@ -57,7 +57,6 @@ def init_params():
     parser.add_argument("--noimage", type=int, default=0)
     parser.add_argument("--nonpy", type=int, default=0)
     parser.add_argument("--load_stage", type=str, default="fine-lang")
-    parser.add_argument("--num_views", type=int, default=5)
     parser.add_argument("--qwen_autoencoder_ckpt_path", type=str, default=None)
     # Additional model paths/stages for loading multiple GaussianModels
     parser.add_argument("--rgb_model_path", type=str, default=None)
@@ -268,11 +267,11 @@ def render_and_save_all(
 
     # pick random views
     test_cams = scene.getVideoCameras()  # test + train
-    random_idx = random.sample(range(len(test_cams)), args.num_views)
+    random_idx = random.sample(range(len(test_cams)), N_TIMESTEPS)
     cams = [test_cams[i] for i in random_idx]
 
     # evenly spaced timesteps
-    timesteps = np.linspace(0, 1, args.num_views, dtype=np.float32)
+    timesteps = np.linspace(0, 1, N_TIMESTEPS, dtype=np.float32)
 
     # render and save
     for i, cam in enumerate(cams):

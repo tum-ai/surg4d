@@ -5,14 +5,12 @@ platforms = ["linux-64"]
 version = "0.1.0"
 
 [tasks]
-# Install CUDA extensions (require torch to be installed first)
 install-simple-knn = "python -m pip install --no-build-isolation -e submodules/simple-knn/"
 install-rasterization = "python -m pip install --no-build-isolation -e submodules/4d-langsplat-rasterization/"
-# Install Python packages
 install-deva = "python -m pip install -e submodules/4d-langsplat-tracking-anything-with-deva/"
 install-segment-anything = "python -m pip install git+https://github.com/facebookresearch/segment-anything.git"
-# Run this after 'pixi install' to set up all CUDA extensions and additional packages
 setup = { depends-on = ["install-simple-knn", "install-rasterization", "install-deva", "install-segment-anything"] }
+# run pixi run setup after pixi install to install cuda extensions
 
 [activation.env]
 CUDA_VISIBLE_DEVICES = "$(if [ $(hostname) = 'a4000-2402n18' ]; then echo '1'; fi)"
@@ -31,6 +29,7 @@ torchaudio = "==2.6.0"
 torchvision = "==0.21.0"
 transformers = ">=4.57.0, <5"
 accelerate = ">=1.10.1, <2"
+bitsandbytes = ">=0.44.0, <1"
 sentence-transformers = ">=5.1.1, <6"
 open-clip-torch = ">=3.2.0, <4"
 mmcv = "==1.6.0"
@@ -66,4 +65,5 @@ faiss-cpu = ">=1.12.0, <2"
 einops = ">=0.8.1, <0.9"
 lpips = ">=0.1.4, <0.2"
 rerun-sdk = ">=0.25.1, <0.26"
+tensorboard = ">=2.20.0, <3"
 

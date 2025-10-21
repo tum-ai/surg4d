@@ -1,0 +1,23 @@
+Traceback (most recent call last):
+  File "/home/students/lmu_proj/surgery-scene-graphs/train.py", line 639, in <module>
+    config = mmcv.Config.fromfile(args.configs)
+AttributeError: module 'mmcv' has no attribute 'Config'
+Rendering  output/cholecseg8k/video27_00480_qwen_cat_depth_opacity
+Traceback (most recent call last):
+  File "/home/students/lmu_proj/surgery-scene-graphs/render.py", line 205, in <module>
+    config = mmcv.Config.fromfile(args.configs)
+AttributeError: module 'mmcv' has no attribute 'Config'
+Rendering  output/cholecseg8k/video27_00480_qwen_cat_depth_opacity
+Traceback (most recent call last):
+  File "/home/students/lmu_proj/surgery-scene-graphs/render.py", line 205, in <module>
+    config = mmcv.Config.fromfile(args.configs)
+AttributeError: module 'mmcv' has no attribute 'Config'
+===== Extract graph
+Traceback (most recent call last):
+  File "/home/students/lmu_proj/surgery-scene-graphs/extract_graph.py", line 743, in <module>
+    main()
+  File "/home/students/lmu_proj/surgery-scene-graphs/extract_graph.py", line 606, in main
+    args, model_params, pipeline, hyperparam = init_params()
+  File "/home/students/lmu_proj/surgery-scene-graphs/extract_graph.py", line 74, in init_params
+    config = mmcv.Config.fromfile(args.configs)
+AttributeError: module 'mmcv' has no attribute 'Config'

@@ -1,0 +1,34 @@
+name: "4d_scene_graph_vqa_qwen3"
+
+model:
+  name: "qwen3-vl-8b-instruct"
+  type: "local"
+  model_path: "Qwen/Qwen3-VL-8B-Instruct"  # or local path
+  max_tokens: 256
+  temperature: 0.1
+  additional_params:
+    do_sample: false
+    top_p: 0.9
+  use_patch_features: true
+
+scene_graph:
+  source_type: "4d"
+  encoding_format: "json"
+  file_format: "graphml"
+  temporal_strategy: "single_file"
+  temporal_frames: 3
+  graph_dir: "./data/scene_graphs_4d/"
+  include_spatial_info: true
+  include_temporal_info: true
+
+data:
+  data_root: "./data/"
+  batch_size: 16
+
+output_dir: "./experiments_qwen3/"
+save_predictions: true
+compute_baseline: true
+novel_view_synthesis: false
+
+
+

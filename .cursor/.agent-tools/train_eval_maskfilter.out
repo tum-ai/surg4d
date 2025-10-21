@@ -1,0 +1,18 @@
+===== Extract graph
+/home/students/lmu_proj/surgery-scene-graphs/.pixi/envs/default/lib/python3.10/site-packages/pydantic/_internal/_generate_schema.py:2249: UnsupportedFieldAttributeWarning: The 'repr' attribute with value False was provided to the `Field()` function, which has no effect in the context it was used. 'repr' is field-specific metadata, and can only be attached to a model field using `Annotated` metadata or by assignment. This may have happened because an `Annotated` type alias using the `type` statement was used, or if the `Field()` function was attached to a single member of a union type.
+  warnings.warn(
+/home/students/lmu_proj/surgery-scene-graphs/.pixi/envs/default/lib/python3.10/site-packages/pydantic/_internal/_generate_schema.py:2249: UnsupportedFieldAttributeWarning: The 'frozen' attribute with value True was provided to the `Field()` function, which has no effect in the context it was used. 'frozen' is field-specific metadata, and can only be attached to a model field using `Annotated` metadata or by assignment. This may have happened because an `Annotated` type alias using the `type` statement was used, or if the `Field()` function was attached to a single member of a union type.
+  warnings.warn(
+feature_dim: 48
+Traceback (most recent call last):
+  File "/home/students/lmu_proj/surgery-scene-graphs/extract_graph_maskfilter.py", line 1146, in <module>
+    main()
+  File "/home/students/lmu_proj/surgery-scene-graphs/extract_graph_maskfilter.py", line 981, in main
+    gaussians, scene, dataset = load_all_models(
+  File "/home/students/lmu_proj/surgery-scene-graphs/extract_graph_maskfilter.py", line 116, in load_all_models
+    scene = Scene(
+  File "/home/students/lmu_proj/surgery-scene-graphs/scene/__init__.py", line 37, in __init__
+    self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"),load_stage)
+  File "/home/students/lmu_proj/surgery-scene-graphs/utils/system_utils.py", line 28, in searchForMaxIteration
+    raise FileNotFoundError(f"Iteration folder not found: {folder}")
+FileNotFoundError: Iteration folder not found: output/cholecseg8k/video27_00480_qwen_cat_depth_opacity_maskclusterfilter_coverage80_factor2pos/point_cloud

@@ -56,6 +56,12 @@ def log_points_through_time(
     cols_instance = gaussians.get_language_feature[:, 3:].detach().cpu().numpy()
     cols_instance = (((cols_instance + 1.0) / 2.0).clip(0.0, 1.0) * 255.0).astype(np.uint8)
 
+    # Scale uniformity
+    uniformity = gaussians.get_scaling.min(dim=1).values / gaussians.get_scaling.max(dim=1).values
+    uniformity = (uniformity.detach().cpu().numpy() * 255.0).astype(np.uint8)
+    uniformity = np.repeat(uniformity[:, None], 3, axis=-1)
+    # print(np.histogram(uniformity, bins=10))
+
     for i in range(len(timesteps)):
         rr.set_time("timestep", sequence=i)
         pos = pos_through_time[i]
@@ -88,6 +94,15 @@ def log_points_through_time(
                 colors=cols_instance,
                 radii=point_radius,
             ),
+        )
+
+        rr.log(
+            "uniformity",
+            rr.Points3D(
+                positions=pos,
+                colors=uniformity,
+                radii=point_radius
+            )
         )
 
         # Log individual cluster points

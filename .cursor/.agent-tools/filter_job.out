@@ -1,0 +1,45 @@
+===== Extract graph
+feature_dim: 48
+Loading trained model at iteration 10000
+Reading camera 1/80Reading camera 2/80Reading camera 3/80Reading camera 4/80Reading camera 5/80Reading camera 6/80Reading camera 7/80Reading camera 8/80Reading camera 9/80Reading camera 10/80Reading camera 11/80Reading camera 12/80Reading camera 13/80Reading camera 14/80Reading camera 15/80Reading camera 16/80Reading camera 17/80Reading camera 18/80Reading camera 19/80Reading camera 20/80Reading camera 21/80Reading camera 22/80Reading camera 23/80Reading camera 24/80Reading camera 25/80Reading camera 26/80Reading camera 27/80Reading camera 28/80Reading camera 29/80Reading camera 30/80Reading camera 31/80Reading camera 32/80Reading camera 33/80Reading camera 34/80Reading camera 35/80Reading camera 36/80Reading camera 37/80Reading camera 38/80Reading camera 39/80Reading camera 40/80Reading camera 41/80Reading camera 42/80Reading camera 43/80Reading camera 44/80Reading camera 45/80Reading camera 46/80Reading camera 47/80Reading camera 48/80Reading camera 49/80Reading camera 50/80Reading camera 51/80Reading camera 52/80Reading camera 53/80Reading camera 54/80Reading camera 55/80Reading camera 56/80Reading camera 57/80Reading camera 58/80Reading camera 59/80Reading camera 60/80Reading camera 61/80Reading camera 62/80Reading camera 63/80Reading camera 64/80Reading camera 65/80Reading camera 66/80Reading camera 67/80Reading camera 68/80Reading camera 69/80Reading camera 70/80Reading camera 71/80Reading camera 72/80Reading camera 73/80Reading camera 74/80Reading camera 75/80Reading camera 76/80Reading camera 77/80Reading camera 78/80Reading camera 79/80Reading camera 80/80INFO:__main__:Filtered _deformation_accum with shape torch.Size([190118, 3])
+INFO:__main__:Filtered _deformation_table with shape torch.Size([190118])
+INFO:__main__:Filtered _features_dc with shape torch.Size([190118, 1, 3])
+INFO:__main__:Filtered _features_rest with shape torch.Size([190118, 15, 3])
+INFO:__main__:Filtered _language_feature with shape torch.Size([190118, 6])
+INFO:__main__:Filtered _opacity with shape torch.Size([190118, 1])
+INFO:__main__:Filtered _rotation with shape torch.Size([190118, 4])
+INFO:__main__:Filtered _scaling with shape torch.Size([190118, 3])
+INFO:__main__:Filtered _xyz with shape torch.Size([190118, 3])
+INFO:__main__:Filtered max_radii2D with shape torch.Size([190118])
+
+Loading Training Cameras
+Loading Test Cameras
+Loading Video Cameras
+Deformation Net Set aabb [0.20064  0.173641 1.474569] [-0.246214 -0.210221  1.097075]
+Voxel Plane: set aabb= Parameter containing:
+tensor([[ 0.2006,  0.1736,  1.4746],
+        [-0.2462, -0.2102,  1.0971]])
+loading model from existsoutput/cholecseg8k/video27_00480_qwen_cat_depth_opacity/point_cloud/fine-lang_iteration_10000
+Preliminary gaussian filtering left 77879 for clustering
+Traceback (most recent call last):
+  File "/home/students/lmu_proj/surgery-scene-graphs/extract_graph_maskfilter.py", line 1146, in <module>
+    main()
+  File "/home/students/lmu_proj/surgery-scene-graphs/extract_graph_maskfilter.py", line 1016, in main
+    clusters = filter_clusters_by_mask_render(
+  File "/home/students/lmu_proj/surgery-scene-graphs/extract_graph_maskfilter.py", line 934, in filter_clusters_by_mask_render
+    cluster_mask = _render_cluster_binary_mask(
+  File "/home/students/lmu_proj/surgery-scene-graphs/extract_graph_maskfilter.py", line 862, in _render_cluster_binary_mask
+    g_copy: GaussianModel = copy.deepcopy(gaussians)
+  File "/home/students/lmu_proj/surgery-scene-graphs/.pixi/envs/default/lib/python3.10/copy.py", line 172, in deepcopy
+    y = _reconstruct(x, memo, *rv)
+  File "/home/students/lmu_proj/surgery-scene-graphs/.pixi/envs/default/lib/python3.10/copy.py", line 271, in _reconstruct
+    state = deepcopy(state, memo)
+  File "/home/students/lmu_proj/surgery-scene-graphs/.pixi/envs/default/lib/python3.10/copy.py", line 146, in deepcopy
+    y = copier(x, memo)
+  File "/home/students/lmu_proj/surgery-scene-graphs/.pixi/envs/default/lib/python3.10/copy.py", line 231, in _deepcopy_dict
+    y[deepcopy(key, memo)] = deepcopy(value, memo)
+  File "/home/students/lmu_proj/surgery-scene-graphs/.pixi/envs/default/lib/python3.10/copy.py", line 153, in deepcopy
+    y = copier(memo)
+  File "/home/students/lmu_proj/surgery-scene-graphs/.pixi/envs/default/lib/python3.10/site-packages/torch/_tensor.py", line 114, in __deepcopy__
+    raise RuntimeError(
+RuntimeError: Only Tensors created explicitly by the user (graph leaves) support the deepcopy protocol at the moment.  If you were attempting to deepcopy a module, this may be because of a torch.nn.utils.weight_norm usage, see https://github.com/pytorch/pytorch/pull/103001

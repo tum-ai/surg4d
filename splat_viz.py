@@ -2,18 +2,22 @@ from scene.gaussian_model import GaussianModel
 from pathlib import Path
 from extract_graph import init_params, load_all_models, filter_gaussians
 from gaussian_renderer import render as gs_render
+from gaussian_renderer import render_opacity as gs_render_opacity
+from torchvision.utils import save_image
 import argparse
 from arguments import ModelParams, PipelineParams, ModelHiddenParams
 import sys
 import torch
+from PIL import Image
 
 N_TIMESTEPS = 80
 out_path = Path('splat_viz')
 
 # ------------- input arguments ----------------------
-clip_name = "video27_00480_qwen_cat_depthl2_nods"
-frame = 50
-exp_pc_name = "pointcloud.ply"
+clip_name = "video27_00480_qwen_cat_depth_opacity"
+frame = 75
+pc_exp_name = "pointcloud.ply"
+img_exp_name = "render_img.png"
 
 # ----------------------------------------------------
 timestep = frame / (N_TIMESTEPS - 1)
@@ -45,20 +49,47 @@ args, model_params, pipeline, hyperparam = init_params()
 gaussians, scene, dataset = load_all_models(
     args, model_params, pipeline, hyperparam
 )
+
+# ------------- custom overrides ---------------------
+
+# opacity_mask = (gaussians.get_opacity >= 0.5).squeeze()
+# filter_gaussians(gaussians, opacity_mask)
+# gaussians._features_rest = torch.zeros_like(gaussians._features_rest)
+# gaussians._features_dc = gaussians._opacity.unsqueeze(-1).expand_as(gaussians._features_dc)
+# gaussians._opacity = torch.full_like(gaussians._opacity, 100)
+
+# ----------------------------------------------------
+
+
+lf_transform = lambda c: c/2.0+0.5
+cam = scene.getVideoCameras()[frame]
+# cam.time = frame
+bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+pkg = gs_render(cam, gaussians, pipeline, background, None, stage=args.load_stage, cam_type=scene.dataset_type, args=args)
+rgb_render = torch.clamp(pkg["render"], 0.0, 1.0)
+lf_render = torch.clamp(lf_transform(pkg["language_feature_image"]), 0.0, 1.0)
+depth_render = pkg["depth"]
+depth_render = (depth_render - depth_render.min()) / (depth_render.max() - depth_render.min())
+opacity_render = gs_render_opacity(cam, gaussians, pipeline, background, None, stage=args.load_stage, cam_type=scene.dataset_type, args=args)
+opacity_render = torch.clamp(opacity_render, 0.0, 1.0)
+
+
+save_image(rgb_render, out_path / ("rgb_" + img_exp_name))
+save_image(lf_render[:3], out_path / ("patch_" + img_exp_name))
+save_image(lf_render[3:], out_path / ("instance_" + img_exp_name))
+save_image(depth_render, out_path / ("depth_" + img_exp_name))
+save_image(opacity_render, out_path / ("opacity_" + img_exp_name))
+
 time = torch.full(
     (gaussians.get_xyz.shape[0], 1),
     float(timestep),
     device=gaussians.get_xyz.device,
     dtype=gaussians.get_xyz.dtype,
 )
+
+print(f"number of gaussians: {gaussians._xyz.shape[0]}")
+
 xyz, scaling, rotation, _, _, _, _ = gaussians._deformation(gaussians._xyz, gaussians._scaling, gaussians._rotation, gaussians._opacity, gaussians.get_features, gaussians.get_language_feature, time)
-
 gaussians._xyz, gaussians._scaling, gaussians._rotation = xyz, scaling, rotation
-
-# ------------- custom overrides ---------------------
-
-# gaussians._opacity = torch.full_like(gaussians._opacity, 100)
-
-# ----------------------------------------------------
-
-gaussians.save_ply(out_path / exp_pc_name)
+gaussians.save_ply(out_path / pc_exp_name)

@@ -88,12 +88,12 @@ def main():
         clip_dirs = video_dir.glob("video[0-9][0-9]_[0-9][0-9][0-9][0-9][0-9]")
         for clip_dir in clip_dirs:
             tasks.append((video_dir, clip_dir))
-            if clip_dir.stem == "video27_00480": # ! tmp
-                tasks_tmp.append((video_dir, clip_dir))
+            # if clip_dir.stem == "video27_00480": # ! tmp
+            #     tasks_tmp.append((video_dir, clip_dir))
             # if clip_dir.stem == "video01_00080": # ! tmp
             #     tasks_tmp.append((video_dir, clip_dir))
-            # if clip_dir.stem == "video25_00402": # ! tmp
-            #     tasks_tmp.append((video_dir, clip_dir))
+            if clip_dir.stem == "video25_00402": # ! tmp
+                tasks_tmp.append((video_dir, clip_dir))
     
     tasks = tasks_tmp # ! tmp
 

@@ -1,0 +1,3 @@
+[2025-10-21T10:19:22Z INFO  re_data_loader::load_file] Loading "/home/students/lmu_proj/surgery-scene-graphs/output/cholecseg8k/video27_00480_qwen_cat_depth_opacity_maskclusterfilter_coverage80_factor2pos/graph/visualization.rrd"…
+[2025-10-21T10:19:22Z INFO  re_grpc_server] Listening for gRPC connections on 0.0.0.0:9876. Connect by running `rerun --connect rerun+http://127.0.0.1:9876/proxy`
+[2025-10-21T10:19:22Z INFO  re_sdk::web_viewer] Hosting a web-viewer at http://localhost:9090?url=rerun%2Bhttp%3A%2F%2Flocalhost%3A9876%2Fproxy
