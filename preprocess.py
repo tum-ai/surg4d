@@ -14,6 +14,7 @@ from vipe.utils.io import ArtifactPath
 from submodules.vipe.scripts.vipe_to_colmap import convert_vipe_to_colmap
 import zipfile
 from openexr_numpy import imread
+from scipy.ndimage import label
 
 from cholec_utils import get_clip_seg8k, parse_cholecseg8k_instance_mask
 
@@ -121,8 +122,23 @@ def get_cholecseg8k_frames(clip: DictConfig, cfg: DictConfig):
         )  # required for qwen encoder
         class_ids = center_crop_divisible(class_ids, cfg.preprocessing.frames_divisor)
 
+        # Generate instance masks from semantic masks using connected components
+        # 2d arrays, 0 is background, > 0 are instance ids
+        instance_ids = np.zeros_like(class_ids, dtype=np.int32)
+        instance_counter = 1
+        unique_classes = np.unique(class_ids)
+        unique_classes = unique_classes[unique_classes != 0]
+        for class_id in unique_classes:
+            class_binary = (class_ids == class_id).astype(np.uint8)
+            labeled_components, num_components = label(class_binary)
+            for component_id in range(1, num_components + 1):
+                component_mask = labeled_components == component_id
+                instance_ids[component_mask] = instance_counter
+                instance_counter += 1
+
         Image.fromarray(rgb).save(out_rgb / f"frame_{new_frame_id:06d}.png")
         np.save(out_sem_masks / f"frame_{new_frame_id:06d}.npy", class_ids)
+        np.save(out_inst_masks / f"frame_{new_frame_id:06d}.npy", instance_ids)
 
 
 def vipe(clip: DictConfig, cfg: DictConfig):
