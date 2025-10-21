@@ -1,16 +1,14 @@
 from typing import List
-from sklearn.cluster import HDBSCAN, KMeans
+from sklearn.cluster import HDBSCAN
 import torch
 import argparse
 import numpy as np
 import torchvision
 from pathlib import Path
-import copy
 import logging
 import mmcv
 import rerun as rr
 import random
-import cv2
 
 from eval.openclip_encoder import OpenCLIPNetwork
 from scene.cameras import Camera
@@ -19,8 +17,7 @@ from arguments import ModelParams, PipelineParams, ModelHiddenParams
 from cluster_utils import store_palette, clusters_to_rgb
 from scene import GaussianModel, Scene
 from gaussian_renderer import render as gs_render
-from utils.sh_utils import RGB2SH, SH2RGB
-from autoencoder.model import Autoencoder
+from utils.sh_utils import RGB2SH
 from autoencoder.model_qwen import QwenAutoencoder
 from rerun_utils import (
     log_points_through_time,
@@ -30,10 +27,6 @@ from rerun_utils import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
-N_TOP_FEATS = 9
-N_TIMESTEPS = 5
 
 
 def init_params():
@@ -66,6 +59,8 @@ def init_params():
     parser.add_argument("--clip_load_stage", type=str, default=None)
     parser.add_argument("--qwen_load_stage", type=str, default=None)
     parser.add_argument("--store_verbose", action="store_true")
+    parser.add_argument("--dynamic_lang", type=bool, required=True, help="Whether to extract langauge features at each timestep")
+    parser.add_argument("--n_timesteps", type=int, required=True, help="Number of timesteps to extract graph at")
 
     # load config file if specified
     args = parser.parse_args()
@@ -74,32 +69,6 @@ def init_params():
         args = merge_hparams(args, config)
 
     return args, model_params, pipeline, hyperparam
-
-
-def load_all_models(
-    args: argparse.Namespace,
-    model_params: ModelParams,
-    pipeline: PipelineParams,
-    hyperparam: ModelHiddenParams,
-):
-    """Load and return three GaussianModels and Scenes: clip, rgb, qwen.
-
-    Returns:
-        Tuple[GaussianModel, Scene, GaussianModel, Scene, GaussianModel, Scene]
-        In order: (clip_gaussians, clip_scene, rgb_gaussians, rgb_scene, qwen_gaussians, qwen_scene)
-    """
-    hyper = hyperparam.extract(args)
-    dataset = model_params.extract(args)
-    gaussians = GaussianModel(dataset.sh_degree, hyper)  # type:ignore
-    scene = Scene(
-        dataset,
-        gaussians,
-        load_iteration=args.iteration,
-        shuffle=False,
-        load_stage=args.load_stage,
-    )
-
-    return gaussians, scene, dataset
 
 
 def filter_gaussians(gaussians: GaussianModel, mask: torch.Tensor):
@@ -126,7 +95,7 @@ def normalize_dep_dim(x):
     return (x - x.mean()) / x.std()
 
 
-def positions_at_timestep(gaussians: GaussianModel, timestep: float, scene: Scene):
+def gaussian_props_at_timestep(gaussians: GaussianModel, timestep: float):
     with torch.no_grad():
         means3D = gaussians.get_xyz
         # Short-circuit if no gaussians remain after filtering
@@ -144,15 +113,18 @@ def positions_at_timestep(gaussians: GaussianModel, timestep: float, scene: Scen
             device=means3D.device,
             dtype=means3D.dtype,
         )
-        # Ensure language deformation is disabled for positional query
-        try:
-            gaussians._deformation.deformation_net.args.no_dlang = 1
-        except Exception:
-            pass
-        means3D_final, _, _, _, _, _, _ = gaussians._deformation(
+        means3D_t, scales_t, rotations_t, opacity_t, shs_t, lang_t, time_t = gaussians._deformation(
             means3D, scales, rotations, opacity, shs, lang, time
         )
-    return means3D_final.detach().cpu().numpy()
+    return {
+        "means3D": means3D_t.detach().cpu().numpy(),
+        "scales": scales_t.detach().cpu().numpy(),
+        "rotations": rotations_t.detach().cpu().numpy(),
+        "opacity": opacity_t.detach().cpu().numpy(),
+        "shs": shs_t.detach().cpu().numpy(),
+        "lang": lang_t.detach().cpu().numpy(),
+        "time": time_t.detach().cpu().numpy(),
+    }
 
 
 def cluster_gaussians(gaussians: GaussianModel, scene: Scene):
@@ -267,11 +239,11 @@ def render_and_save_all(
 
     # pick random views
     test_cams = scene.getVideoCameras()  # test + train
-    random_idx = random.sample(range(len(test_cams)), N_TIMESTEPS)
+    random_idx = random.sample(range(len(test_cams)), args.n_timesteps)
     cams = [test_cams[i] for i in random_idx]
 
     # evenly spaced timesteps
-    timesteps = np.linspace(0, 1, N_TIMESTEPS, dtype=np.float32)
+    timesteps = np.linspace(0, 1, args.n_timesteps, dtype=np.float32)
 
     # render and save
     for i, cam in enumerate(cams):
@@ -307,28 +279,6 @@ def bhattacharyya_coefficient(mu1, Sigma1, mu2, Sigma2):
     return np.exp(-DB)  # Bhattacharyya coefficient
 
 
-# def decode_clip(lfs: torch.Tensor, args: argparse.Namespace) -> np.ndarray:
-#     BATCH_SIZE = 1024
-
-#     ae = Autoencoder(
-#         encoder_hidden_dims=[256, 128, 64, 32, 3],
-#         decoder_hidden_dims=[16, 32, 64, 128, 256, 512],
-#         feature_dim=512,
-#     ).to("cuda")
-#     ae.load_state_dict(torch.load(args.clip_autoencoder_ckpt_path, map_location="cuda"))
-#     ae.eval()
-
-#     decoded_lfs = []
-#     with torch.no_grad():
-#         for i in range(0, lfs.shape[0], BATCH_SIZE):
-#             batch = lfs[i : min(i + BATCH_SIZE, len(lfs))].to("cuda")
-#             decoded_lfs.append(ae.decode(batch))
-#     decoded_lfs = [i.detach().cpu().numpy() for i in decoded_lfs]
-#     decoded_lfs = np.concatenate(decoded_lfs, axis=0)
-#     decoded_lfs = decoded_lfs / np.linalg.norm(decoded_lfs, axis=-1, keepdims=True)
-#     return decoded_lfs
-
-
 def decode_qwen(lfs: torch.Tensor, args: argparse.Namespace) -> np.ndarray:
     BATCH_SIZE = 1024
 
@@ -347,65 +297,6 @@ def decode_qwen(lfs: torch.Tensor, args: argparse.Namespace) -> np.ndarray:
     decoded_lfs = [i.detach().cpu().numpy() for i in decoded_lfs]
     decoded_lfs = np.concatenate(decoded_lfs, axis=0)
     return decoded_lfs
-
-
-# def cluster_clip_features(
-#     gaussians: GaussianModel, clusters: np.ndarray, args: argparse.Namespace
-# ) -> np.ndarray:
-#     # get average language feature weighted by opacity
-#     weighted_cluster_lfs = []
-#     n_nodes = len(np.unique(clusters))
-#     opacities = gaussians.get_opacity.detach().cpu().numpy()
-#     decoded_lfs = decode_clip(
-#         gaussians.get_language_feature, args
-#     )  # decode before aggregation, works slightly better but not much
-#     for cluster_id in range(n_nodes):
-#         cluster_mask = clusters == cluster_id
-#         cluster_opacities = opacities[cluster_mask]
-#         cluster_lfs = decoded_lfs[cluster_mask]
-#         cluster_lf = (cluster_lfs * cluster_opacities).sum(
-#             axis=0
-#         ) / cluster_opacities.sum()
-#         cluster_lf = cluster_lf / np.linalg.norm(cluster_lf)
-#         weighted_cluster_lfs.append(cluster_lf)
-
-#     lfs_weighted_centroids = np.stack(weighted_cluster_lfs)
-
-#     return lfs_weighted_centroids
-
-
-# def cluster_qwen_features(
-#     qwen_g: GaussianModel,
-#     rgb_g: GaussianModel,
-#     clusters: np.ndarray,
-#     args: argparse.Namespace,
-# ) -> np.ndarray:
-#     """Extract top N_TOP_FEATS qwen features by opacity for each cluster.
-
-#     Args:
-#         qwen_g (GaussianModel): Gaussian model of qwen features.
-#         rgb_g (GaussianModel): Gaussian model of rgb images.
-#         clusters (np.ndarray): Cluster ids.
-#         args (argparse.Namespace): Arguments.
-
-#     Returns:
-#         Dict[int, np.ndarray]: map of cluster id to torch tensor of shape (n_feats, 3584)
-#         where n_feats is min(N_TOP_FEATS, n_cluster_gaussians)
-#     """
-#     n_nodes = len(np.unique(clusters))
-#     opacities = rgb_g.get_opacity.squeeze()
-#     top_feats_per_cluster = {}
-#     for cluster_id in range(n_nodes):
-#         cluster_mask = torch.tensor(clusters) == cluster_id
-#         cluster_opacities = opacities[cluster_mask]
-#         cluster_lfs = qwen_g.get_language_feature[cluster_mask]
-#         top_indices = torch.topk(cluster_opacities, min(cluster_opacities.shape[0], N_TOP_FEATS)).indices
-#         top_feats_per_cluster[cluster_id] = cluster_lfs[top_indices]
-#     top_feats_per_cluster = {
-#         k: decode_qwen(v, args)
-#         for k, v in top_feats_per_cluster.items()
-#     }
-#     return top_feats_per_cluster
 
 
 def cluster_qwen_features(
@@ -449,83 +340,6 @@ def cluster_qwen_features(
 
     feats_per_cluster = {k: decode_qwen(v, args) for k, v in cluster_feats.items()}
     return feats_per_cluster
-
-    # cluster_feats = {}
-    # hdb = HDBSCAN(
-    #     min_cluster_size=20, store_centers="centroid"
-    # )  # store_centers="medioid" would be slower, but guerantee an observed feature
-    # for cluster_id in np.unique(clusters):
-    #     cluster_mask = torch.tensor(clusters) == cluster_id
-    #     cluster_lfs = qwen_g.get_language_feature[cluster_mask][:, :3].detach().cpu().numpy()
-    #     sub_clusters = hdb.fit_predict(
-    #         cluster_lfs
-    #     )  # -1 for unmatched feats (not belonging to clear cluster) and 0-n for clusters
-    #     if len(np.unique(sub_clusters)) == 1:
-    #         print(
-    #             f"HDBSCAN couldn't subcluster features in cluster {cluster_id} containing {cluster_lfs.shape[0]} gaussians, using KMeans on this cluster instead"
-    #         )
-    #         kmeans = KMeans(
-    #             n_clusters=min(bg_f_per_cluster, cluster_lfs.shape[0]), random_state=42
-    #         ).fit(cluster_lfs)
-    #         normed_means = kmeans.cluster_centers_ / np.linalg.norm(
-    #             kmeans.cluster_centers_, axis=-1, keepdims=True
-    #         )
-    #         cluster_feats[cluster_id] = torch.as_tensor(normed_means, device="cuda")
-    #         continue
-    #     # means = []
-    #     # for sub_cluster_id in np.unique(sub_clusters)[1:]:
-    #     #     feature_mean = cluster_lfs[sub_clusters == sub_cluster_id].mean(axis=0)
-    #     #     means.append(feature_mean / np.linalg.norm(feature_mean))
-    #     # means = np.stack(means)
-    #     means = hdb.centroids_ / np.linalg.norm(
-    #         hdb.centroids_
-    #     )  # subsitute hdb.medioids_ for medioids
-
-    #     # Using KMeans on the unclustered gaussians for a representative sample
-
-    #     if (sub_clusters == -1).sum() < bg_f_per_cluster:
-    #         bg_means = torch.as_tensor(cluster_lfs[sub_clusters == -1], device="cuda")
-    #     else:
-    #         kmeans = KMeans(n_clusters=bg_f_per_cluster, random_state=42).fit(
-    #             cluster_lfs[sub_clusters == -1]
-    #         )
-    #         bg_means = kmeans.cluster_centers_ / np.linalg.norm(
-    #             kmeans.cluster_centers_, axis=-1, keepdims=True
-    #         )
-
-    #     feature_selection = torch.cat(
-    #         (
-    #             torch.as_tensor(
-    #                 means, device="cuda"
-    #             ),  # attach the means of the feature sub-clusters per cluster
-    #             torch.as_tensor(
-    #                 bg_means, device="cuda"
-    #             ),  # also attach the unclustered features as they contain context information
-    #         )
-    #     )
-
-    #     # fill up feature selection to at least min_f_per_cluster, if necessary
-    #     if feature_selection.shape[0] < min_f_per_cluster:
-    #         feature_selection = torch.cat(
-    #             (
-    #                 feature_selection,
-    #                 torch.as_tensor(
-    #                     cluster_lfs[
-    #                         np.random.randint(
-    #                             0,
-    #                             cluster_lfs.shape[0],
-    #                             min_f_per_cluster - feature_selection.shape[0],
-    #                         )
-    #                     ],
-    #                     device="cuda",
-    #                 ),
-    #             )
-    #         )
-
-    #     cluster_feats[cluster_id] = feature_selection.float()
-
-    # feats_per_cluster = {k: decode_qwen(v, args) for k, v in cluster_feats.items()}
-    # return feats_per_cluster
 
 
 def properties_through_time(positions_through_time, clusters):
@@ -605,8 +419,15 @@ def main():
     args, model_params, pipeline, hyperparam = init_params()
 
     # construct all objects
-    gaussians, scene, dataset = load_all_models(
-        args, model_params, pipeline, hyperparam
+    hyper = hyperparam.extract(args)
+    dataset = model_params.extract(args)
+    gaussians = GaussianModel(dataset.sh_degree, hyper)  # type:ignore
+    scene = Scene(
+        dataset,
+        gaussians,
+        load_iteration=args.iteration,
+        shuffle=False,
+        load_stage=args.load_stage,
     )
 
     # gaussian filtering
@@ -640,7 +461,7 @@ def main():
     cluster_colors, palette = clusters_to_rgb(clusters)
 
     # cluster features
-    timesteps = np.linspace(0, 1, N_TIMESTEPS)
+    timesteps = np.linspace(0, 1, args.n_timesteps)
     qwen_per_cluster = cluster_qwen_features(gaussians, clusters, args)
     pos_through_time = np.stack(
         [positions_at_timestep(gaussians, t, scene) for t in timesteps]
@@ -655,15 +476,6 @@ def main():
     graphs = np.stack(
         [timestep_graph(pos_through_time[i], clusters) for i in range(len(timesteps))]
     )
-
-    # query correspondences
-    # gaussian_lfs = decode_lfs(gaussians.get_language_feature, args)
-    # # queries = ["hand", "egg"]
-    # # canonical_corpus = ["object", "things", "stuff", "texture"]
-    # queries = ["gallbladder", "liver"]
-    # canonical_corpus = ["object", "things", "stuff", "texture", "surgery", "body", "anatomy", "medical"]
-    # gaussian_scores = lerf_relevancies(gaussian_lfs, queries, canonical_corpus)
-    # cluster_scores = lerf_relevancies(clip_features, queries, canonical_corpus)
 
     # render and save everything
     out = Path(args.model_path) / "graph"
@@ -728,14 +540,6 @@ def main():
         cluster_pos_through_time=cluster_pos_through_time,
         graphs_through_time=graphs,
     )
-    # log_correspondences_static(
-    #     positions=gaussians.get_xyz.detach().cpu().numpy(),
-    #     clusters=clusters,
-    #     text_queries=queries,
-    #     correspondences=gaussian_scores,
-    #     corr_min=0.0,
-    #     corr_max=1.0,
-    # )
 
 
 if __name__ == "__main__":
