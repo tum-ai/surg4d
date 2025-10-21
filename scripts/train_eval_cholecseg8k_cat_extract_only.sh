@@ -24,13 +24,12 @@ export use_discrete_lang_f=f
 echo "===== Extract graph (extract only, no configs)"
 # Ensure Python-side modules size to CLIP F when loading the CLIP model
 export language_feature_hiddendim=${clip_feat_dim}
-python extract_graph.py \
+/home/students/.pixi/bin/pixi run -q python extract_graph.py \
   -s  ${dataset_path} \
   --language_features_name ${language_feature_name} \
   --model_path output/${exp_name} \
   --feature_level 0 --skip_train --skip_test \
   --configs arguments/cholecseg8k/no_tv.py --mode lang --no_dlang 1 --load_stage fine-lang \
-  --num_views 5 \
   --qwen_autoencoder_ckpt_path data/cholecseg8k/preprocessed_ssg/${video_name}/${clip_name}/autoencoder/best_ckpt.pth \
   --store_verbose # store features of filtered gaussians etc., turn off when running with whole dataset
 

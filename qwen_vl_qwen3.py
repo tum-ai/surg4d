@@ -293,35 +293,30 @@ def qwen3_encode_image(
         image_grid_thw = image_grid_thw.to(model.device)
 
     def _coerce_to_2d(feat_out: Any) -> torch.Tensor:
-        # Accept tuple/list/dict/tensor and return (num_patches, hidden_dim)
-        candidate = None
-        if isinstance(feat_out, torch.Tensor):
-            candidate = feat_out
-        elif isinstance(feat_out, (list, tuple)):
-            # pick the first tensor-like element
-            for item in feat_out:
-                if isinstance(item, torch.Tensor):
-                    candidate = item
-                    break
-        elif isinstance(feat_out, dict):
-            for key in (
-                "image_features",
-                "visual_features",
-                "last_hidden_state",
-                "embeddings",
-                "features",
-            ):
-                if key in feat_out and isinstance(feat_out[key], torch.Tensor):
-                    candidate = feat_out[key]
-                    break
-            if candidate is None:
-                # pick first tensor value
-                for v in feat_out.values():
-                    if isinstance(v, torch.Tensor):
-                        candidate = v
-                        break
-        else:
-            # Try common attributes on ModelOutput-like objects
+        # Accept nested tuple/list/dict/ModelOutput/tensor and return (num_patches, hidden_dim)
+        def collect_tensors(obj: Any, acc: list[torch.Tensor]):
+            if isinstance(obj, torch.Tensor):
+                acc.append(obj)
+                return
+            if isinstance(obj, (list, tuple)):
+                for it in obj:
+                    collect_tensors(it, acc)
+                return
+            if isinstance(obj, dict):
+                # Prefer common keys first
+                for key in (
+                    "image_features",
+                    "visual_features",
+                    "last_hidden_state",
+                    "embeddings",
+                    "features",
+                ):
+                    if key in obj and isinstance(obj[key], torch.Tensor):
+                        acc.append(obj[key])
+                for v in obj.values():
+                    collect_tensors(v, acc)
+                return
+            # ModelOutput-like: iterate attributes
             for attr in (
                 "image_features",
                 "visual_features",
@@ -329,15 +324,28 @@ def qwen3_encode_image(
                 "embeddings",
                 "features",
             ):
-                if hasattr(feat_out, attr):
-                    val = getattr(feat_out, attr)
+                if hasattr(obj, attr):
+                    val = getattr(obj, attr)
                     if isinstance(val, torch.Tensor):
-                        candidate = val
-                        break
-        if candidate is None:
+                        acc.append(val)
+            # Fallback: scan dir for tensor attrs (best-effort)
+            for name in dir(obj):
+                if name.startswith("_"):
+                    continue
+                try:
+                    val = getattr(obj, name)
+                except Exception:
+                    continue
+                if isinstance(val, torch.Tensor):
+                    acc.append(val)
+
+        tensors: list[torch.Tensor] = []
+        collect_tensors(feat_out, tensors)
+        if not tensors:
             raise RuntimeError(
                 "Could not extract tensor features from vision encoder output."
             )
+        candidate = tensors[0]
         # Ensure 2D: (num_patches, hidden_dim)
         if candidate.ndim == 3:
             # assume (batch, seq, dim)

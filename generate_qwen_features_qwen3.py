@@ -29,14 +29,15 @@ def extract_qwen3_features(clip_dir: Path, model, processor):
         feats = (
             qwen3_encode_image(image, model, processor).detach().float().cpu().numpy()
         )
-        patch_map = np.load(seg_dir / f"{frame_stem}.npy") * 0  # placeholder if needed
+        # placeholder patch map (int32 to allow -1 fill below if no mapping applied)
+        patch_map = (np.load(seg_dir / f"{frame_stem}.npy").astype(np.int32) * 0)
         np.save(patch_dir / f"{frame_stem_just_number}_f.npy", feats)
         np.save(patch_dir / f"{frame_stem_just_number}_s.npy", patch_map)
 
         # instance-wise (if masks exist)
         if (seg_dir / f"{frame_stem}.npy").exists():
             seg = np.load(seg_dir / f"{frame_stem}.npy")
-            instance_map = np.full_like(patch_map, -1)
+            instance_map = np.full(patch_map.shape, -1, dtype=np.int32)
             instance_ids = np.unique(seg)
             instance_feats_out = []
             for i, inst_id in enumerate(instance_ids):
@@ -78,7 +79,8 @@ def main():
     for video_dir in video_dirs:
         clip_dirs = video_dir.glob("video[0-9][0-9]_[0-9][0-9][0-9][0-9][0-9]")
         for clip_dir in clip_dirs:
-            tasks.append((video_dir, clip_dir))
+            if clip_dir.name == "video27_00480":
+                tasks.append((video_dir, clip_dir))
 
     if args.workers == 0:
         for _, clip_dir in tqdm(tasks, desc="Generating qwen3 feats", unit="clip"):

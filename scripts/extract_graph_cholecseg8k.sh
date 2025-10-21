@@ -28,7 +28,6 @@ python extract_graph.py \
   --model_path output/cholecseg8k/${clip_name}_qwen_cat_depth_opacity \
   --feature_level 0 --skip_train --skip_test \
   --configs arguments/cholecseg8k/no_tv.py --mode lang --no_dlang 1 --load_stage fine-lang \
-  --num_views 5 \
   --qwen_autoencoder_ckpt_path data/cholecseg8k/preprocessed_ssg/${video_name}/${clip_name}/autoencoder/best_ckpt.pth \
   --store_verbose # store features of filtered gaussians etc., turn off when running with whole dataset
 

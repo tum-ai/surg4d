@@ -7,7 +7,7 @@ video_name=video27
 clip_name=video27_00480
 dataset_path=data/cholecseg8k/preprocessed_ssg/${video_name}/${clip_name}
 language_feature_name=qwen_cat_features_dim6
-exp_name=cholecseg8k/${clip_name}_qwen_cat_depth_opacity_maskclusterfilter_coverage80_factor2pos
+exp_name=cholecseg8k/${clip_name}_qwen_cat_depth_opacity
 
 # ====== Qwen3 (small, 8B) feature precomputation for this clip ======
 QWEN3_MODEL_ID="Qwen/Qwen3-VL-8B-Instruct"
