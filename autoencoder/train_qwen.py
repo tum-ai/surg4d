@@ -17,12 +17,14 @@ from autoencoder.model_qwen import QwenAutoencoder
 
 def train(
     clip_path: str,
+    checkpoint_subdir: str,
     lf_dir_names: List[str] = ['qwen_patch_features', 'qwen_instance_features'],
     epochs: int = 100,
     lr: float = 1e-4,
     batch_size: int = 256,
     num_workers: int = 8,
     device: str = 'cuda:0',
+    full_dim: int = 3584,
     latent_dim: int = 3,
 ) -> None:
     """Train Qwen feature autoencoder.
@@ -33,7 +35,7 @@ def train(
     data_dirs = [
         Path(clip_path) / i for i in lf_dir_names
     ]
-    ae_dir = Path(clip_path) / 'autoencoder'
+    ae_dir = Path(clip_path) / checkpoint_subdir
     ae_dir.mkdir(parents=True, exist_ok=True)
 
     dataset = Autoencoder_dataset(data_dirs)
@@ -59,7 +61,7 @@ def train(
         pin_memory=True,
     )
 
-    model = QwenAutoencoder(input_dim=3584, latent_dim=latent_dim).to(device)
+    model = QwenAutoencoder(input_dim=full_dim, latent_dim=latent_dim).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     tb = SummaryWriter(ae_dir)
 

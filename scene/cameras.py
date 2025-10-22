@@ -91,7 +91,7 @@ class Camera(nn.Module):
             # TODO: this is hardcoded, need to fix this! has to do with how colmap generated more images that are blurred
             #  and essentially repeat the dataset every few times
             # frame_id = self.colmap_id % 80
-            frame_id = self.colmap_id + 1
+            frame_id = self.colmap_id
             # if frame_id == 0:
             #     frame_id = 80
             language_feature_name = os.path.join(language_feature_dir, f"{frame_id:06}")            
@@ -150,7 +150,7 @@ class Camera(nn.Module):
             # TODO: this is hardcoded, need to fix this! has to do with how colmap generated more images that are blurred
             #  and essentially repeat the dataset every few times
             # frame_id = self.colmap_id % 80
-            frame_id = self.colmap_id + 1
+            frame_id = self.colmap_id
             # if frame_id == 0:
             #     frame_id = 80
             depth_name = os.path.join(depth_dir, f"{frame_id:06}")            

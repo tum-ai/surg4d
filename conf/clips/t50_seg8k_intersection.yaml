@@ -1,0 +1,11 @@
+- dir: ${preprocessed_root}/video27_00480
+  video_id: 27 # those are constant over cholec80 derivatives
+  first_frame: 480 # inclusive
+  last_frame: 560 # exclusive
+  frame_stride: 1 # based on orignal cholec80 25 fps, make sure to hit 1fps t50 annotations with this
+
+- dir: ${preprocessed_root}/video01_00080
+  video_id: 1
+  first_frame: 80
+  last_frame: 160
+  frame_stride: 1

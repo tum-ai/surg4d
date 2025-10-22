@@ -1,0 +1,23 @@
+load_stage: fine-lang
+iteration: -1
+
+opacity_threshold: -3.0
+inst_feat_norm_threshold: 0.05
+
+cluster_min_size: 50
+cluster_metric: euclidean
+
+min_gaussians_per_cluster: 50 # TODO this is redundant with hdbscan min cluster size
+
+max_features_per_cluster: 40
+min_features_per_cluster: 4
+decode_batch_size: 1024
+
+n_timesteps: 5 # graph timesteps
+
+graph_edge_threshold: 0.05 # minimum bhattacharyya coefficient to create an edge between clusters
+
+store_verbose: true  # save verbose outputs (renders, palettes, raw gaussians, etc.)
+n_render_views: 5  # number of random camera views to render (only if store_verbose is true)
+
+random_seed: 1234

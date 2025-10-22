@@ -1,0 +1,41 @@
+config_path: arguments/cholecseg8k/no_tv.py # this config disables total variation losses
+
+depth_loss_weight: 1.0
+opacity_loss_weight: 1.0
+
+dynamic_language: true
+dynamic_scale: true
+
+# coarse_base_iterations: 3000 # static rgb splat
+# coarse_lang_iterations: 1000 # static rgb + language splat
+# fine_base_iterations: 10000 # dynamic rgb splat
+# fine_lang_iterations: 10000 # dynamic rgb + language splat
+
+# tmp for testing
+coarse_base_iterations: 30 # static rgb splat
+coarse_lang_iterations: 10 # static rgb + language splat
+fine_base_iterations: 100 # dynamic rgb splat
+fine_lang_iterations: 100 # dynamic rgb + language splat
+
+# each stage starts at 0 iterations and the lang stages consider these lists
+# ATTENTION: it's crucial to save the last iteration of fine lang here!
+# test_iterations: [2000, 10000, 20000] # when to compute val metrics (logged to tensorboard)
+# save_iterations: [2000, 10000, 20000] # when to save model checkpoints to disk (for rendering, graph extraction, etc.)
+# checkpoint_iterations: [] # when to save full checkpoints (with optimizer states for resuming)
+
+# tmp for testing
+# each stage starts at 0 iterations and they all check these lists
+# ATTENTION: it's crucial to save the last iteration of fine lang here!
+test_iterations: [500, 1000] # when to compute val metrics (logged to tensorboard)
+save_iterations: [10, 30, 100] # when to save model checkpoints to disk (for rendering, graph extraction, etc.)
+checkpoint_iterations: [] # when to save full checkpoints (with optimizer states for resuming)
+
+render_outputs:
+  coarse_base: false
+  coarse_lang: false
+  fine_base: false
+  fine_lang: true
+
+# Language feature settings
+language_feature_hiddendim: 6
+use_discrete_lang_f: f
