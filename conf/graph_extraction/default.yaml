@@ -1,6 +1,7 @@
 load_stage: fine-lang
 iteration: -1
 
+# TODO we likely want to filter initially based on opacity * instance feature norm
 opacity_threshold: -3.0
 inst_feat_norm_threshold: 0.05
 
@@ -21,3 +22,5 @@ store_verbose: true  # save verbose outputs (renders, palettes, raw gaussians, e
 n_render_views: 5  # number of random camera views to render (only if store_verbose is true)
 
 random_seed: 1234
+
+# TODO rendering based cluster filtering etc. have to be integrated here
