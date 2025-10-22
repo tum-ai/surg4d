@@ -4,10 +4,14 @@ load_stage: fine-lang
 iteration: -1
 
 # TODO we likely want to filter initially based on opacity * instance feature norm
-opacity_threshold: -3.0
-inst_feat_norm_threshold: 0.05
+opacity_threshold: 0.05
+inst_feat_norm_threshold: 0.03
 
-cluster_min_size: 50
+clustering_weights:
+  position: 2.0  # Weight spatial features more than instance features
+  instance: 1.0  # Reduce this if instance features are poorly trained (e.g., 0.5 or 0.1)
+cluster_min_size: 250  # Larger values = fewer, larger clusters
+cluster_min_samples: 30  # Larger values = more conservative clustering
 cluster_metric: euclidean
 
 min_gaussians_per_cluster: 50 # TODO this is redundant with hdbscan min cluster size
