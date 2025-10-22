@@ -3,7 +3,7 @@ defaults:
   - preprocessing: default
   - feature_extraction: default
   - autoencoder: default
-  # - splat: default
+  - splat: default
   # - graph_extraction: default
   - _self_
 
@@ -11,6 +11,7 @@ cholec80_root: data/cholec80
 cholecseg8k_root: data/cholecseg8k
 cholect50_root: data/cholect50
 preprocessed_root: data/preprocessed_tmpttest
+output_root: output/tmptest
 
 hydra:
   job:
