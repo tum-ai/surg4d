@@ -13,3 +13,4 @@ preprocess/preprocess_result
 .cursor/
 outputs/
 multirun/
+benchmark/results/
