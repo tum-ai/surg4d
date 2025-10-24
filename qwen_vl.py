@@ -575,7 +575,7 @@ def prompt_with_graph(
                 "text": '</spatial-graph>\n',
             }
         )
-
+    # TODO: adapt question and system_prompt 
     messages = [
         {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
         {

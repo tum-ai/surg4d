@@ -242,7 +242,7 @@ class TripletsFrameEvaluator:
         return output_text
     
     # TODO: have to look into this to see if it works as expected
-    def _query_with_graph(self, image_paths: List[Path], graph_path: Path, prompt: str) -> str:
+    def _query_with_graph(self, image_paths: List[Path], graph_path: Path, prompt: str, system_prompt: str = None) -> str:
         """Query model with multiple frames AND scene graph"""
         
         # Load graph data
@@ -263,7 +263,8 @@ class TripletsFrameEvaluator:
             node_extents=graph_data['node_extents'],
             question=prompt,
             model=self.model,
-            processor=self.processor
+            processor=self.processor,
+            system_prompt=system_prompt
         )
 
         print(f"response: {response}")
@@ -343,7 +344,8 @@ class TripletsFrameEvaluator:
         sample: MultiFrameSample, 
         # TODO: have to change all of this; not a good way to do this
         condition: str,
-        prompt: str
+        prompt: str,
+        system_prompt: str = None
     ) -> Dict:
         """
         Evaluate a single sample under specified condition.
@@ -351,6 +353,8 @@ class TripletsFrameEvaluator:
         Args:
             sample: MultiFrameSample to evaluate
             condition: One of "single_frame", "multiframe", "multiframe_graph"
+            prompt: The main prompt/question for the task
+            system_prompt: Optional system prompt (used for multiframe_graph)
         """
 
         print(f"calling evaluate sample for end frame {sample.end_frame}")
@@ -366,7 +370,12 @@ class TripletsFrameEvaluator:
                 # TODO: not actually using the graph here, fix this
                 response = self._query_multiframe(sample.image_paths[sample.start_frame:sample.end_frame + 1], prompt)
             else:
-                response = self._query_with_graph(sample.image_paths[sample.start_frame:sample.end_frame + 1], sample.graph_path, prompt)
+                response = self._query_with_graph(
+                    sample.image_paths[sample.start_frame:sample.end_frame + 1], 
+                    sample.graph_path, 
+                    prompt,
+                    system_prompt=system_prompt
+                )
         else:
             raise ValueError(f"Unknown condition: {condition}")
         
@@ -458,15 +467,17 @@ class TripletsFrameEvaluator:
                 # TODO: evaluate the sample given the specific configuration
                 if ablation == "single_frame":
                     prompt = self.config.triplets_config['single_frame_prompt']
+                    result = self.evaluate_sample(sample, ablation, prompt)
                 elif ablation == "multiframe":
                     prompt = self.config.triplets_config['multiframe_prompt']
-                # TODO: need extra one for the graph, fix later
+                    result = self.evaluate_sample(sample, ablation, prompt)
                 elif ablation == "multiframe_graph":
-                    prompt = self.config.triplets_config['multiframe_prompt']
+                    prompt = self.config.triplets_config['multiframe_graph_prompt']
+                    system_prompt = self.config.triplets_config.get('multiframe_graph_system_prompt', None)
+                    result = self.evaluate_sample(sample, ablation, prompt, system_prompt=system_prompt)
                 else:
                     raise ValueError(f"Unknown ablation: {ablation}")
                 
-                result = self.evaluate_sample(sample, ablation, prompt)
                 ablation_results.append(result)
                 
                 # Print result

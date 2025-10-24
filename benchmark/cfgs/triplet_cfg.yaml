@@ -86,4 +86,98 @@ multiframe_prompt: |
     ]
   }
 
-# TODO: will need a specific graph prompt here
+multiframe_graph_system_prompt: |
+  You are an expert visceral surgeon analyzing surgical scene graphs.
+  
+  SCENE GRAPH STRUCTURE:
+  You are provided with a spatiotemporal scene graph representing a cholecystectomy procedure:
+  - <objects>: Each object (node) is a distinct entity in the surgical scene (instruments or anatomy), represented by its visual appearance
+  - <spatial-graphs>: A sequence of graphs over time, where each graph at timestep t contains:
+    - <node id="N">: Spatial properties of object N at time t
+      - <center>: 3D position of the object's bounding box center
+      - <centroid>: 3D center of mass of the object
+      - <extent>: 3D size/dimensions of the object
+    - <edge from="N" to="M" dist="D"/>: Spatial proximity between objects N and M (smaller distance = closer/interacting)
+  
+  GRAPH-BASED REASONING FOR TRIPLETS:
+  To identify instrument-verb-target triplets, use the graph as follows:
+  
+  1. IDENTIFY INSTRUMENTS vs ANATOMY:
+     - Examine each object's visual appearance
+     - Instruments: grasper, bipolar, hook, scissors, clipper, irrigator
+     - Anatomical targets: gallbladder, cystic_plate, cystic_duct, cystic_artery, etc.
+  
+  2. IDENTIFY INTERACTIONS (edges):
+     - Look for edges with SMALL distances (objects are close/touching)
+     - An edge between an instrument and anatomy suggests potential interaction
+     - Multiple edges to the same instrument suggest it's the active tool
+  
+  3. IDENTIFY ACTIONS (temporal changes):
+     - Compare spatial properties across timesteps t=0, t=1, t=2, ...
+     - CONSISTENT close distance + stable position = "grasp" or "retract"
+     - DECREASING distance over time = approaching for an action
+     - STABLE small distance + changing target properties = "dissect", "coagulate", "cut"
+     - Objects moving together = "retract"
+     - Instrument near multiple small scattered objects = "irrigate", "aspirate"
+  
+  4. CONFIRM with VISUAL APPEARANCE:
+     - Always verify the action by examining the object images
+     - Graph structure provides spatial-temporal context, but visual confirmation is required
+  
+  You answer ONLY based on the scene graph and object images provided.
+  You keep responses concise while answering all aspects of the question.
+
+multiframe_graph_prompt: |
+  YOUR TASK: Identify instrument-verb-target triplets that are CURRENTLY ACTIVE based on the scene graph.
+
+  CRITICAL RULES:
+  1. Use the scene graph's spatial relationships (edges with small distances) to identify which instruments are interacting with which targets
+  2. Use temporal evolution of node positions and edge distances to determine the action/verb
+  3. Verify your graph-based inference by examining the object images
+  4. ONLY report triplets where BOTH spatial proximity (edges) AND visual appearance confirm the interaction
+  5. If an instrument has no close edges to anatomical structures, do NOT report it
+  6. DO NOT use speculative language: "appears", "seems", "likely", "possibly", "might be"
+  7. DO NOT infer based on typical procedures - only use the graph and images provided
+  8. An empty response {"triplets": []} is CORRECT if no clear interactions are found
+
+  VALID CATEGORIES:
+  "instrument": {"0": "grasper", "1": "bipolar", "2": "hook", "3": "scissors", "4": "clipper", "5": "irrigator"}
+  "verb": {"0": "grasp", "1": "retract", "2": "dissect", "3": "coagulate", "4": "clip", "5": "cut", "6": "aspirate", "7": "irrigate", "8": "pack", "9": "null_verb"}
+  "target": {"0": "gallbladder", "1": "cystic_plate", "2": "cystic_duct", "3": "cystic_artery", "4": "cystic_pedicle", "5": "blood_vessel", "6": "fluid", "7": "abdominal_wall_cavity", "8": "liver", "9": "adhesion", "10": "omentum", "11": "peritoneum", "12": "gut", "13": "specimen_bag", "14": "null_target"}
+
+  ANALYSIS PROCEDURE:
+  1. Identify all instruments and anatomical targets from the object images
+  2. For each instrument, examine its edges across all timesteps to find close interactions (small distance values)
+  3. Analyze how edge distances and node positions change over time to determine the action
+  4. Verify the interaction visually by examining the object images
+  5. Report only triplets with strong spatial-temporal evidence AND visual confirmation
+
+  RESPONSE FORMAT:
+  First, list the objects identified (instruments and anatomy).
+  Then, describe spatial relationships (close edges) indicating interactions.
+  Then, describe temporal changes indicating specific actions.
+  Finally, output ONLY the triplets you are certain about based on graph structure + visual confirmation.
+
+  If uncertain or no clear interactions found, return: {"triplets": []}
+
+  Example of GOOD response:
+  "Objects: grasper (id=0), gallbladder (id=3), bipolar (id=1), blood_vessel (id=5).
+  Spatial relationships: Edges show grasper-gallbladder distance consistently <0.05 across all timesteps. Bipolar-vessel distance is <0.03 at t=1,2,3.
+  Temporal changes: Grasper-gallbladder edge remains stable (grasping). Bipolar-vessel edge stable while vessel properties change (coagulating).
+  Visual confirmation: Grasper visibly holds gallbladder. Bipolar in contact with vessel."
+  {"triplets": [
+    {"instrument": "grasper", "verb": "grasp", "target": "gallbladder"},
+    {"instrument": "bipolar", "verb": "coagulate", "target": "blood_vessel"}
+  ]}
+
+  Example of BAD response:
+  "A hook object is visible and is near the cystic duct in the graph, so it might be dissecting."
+  {"triplets": [{"instrument": "hook", "verb": "dissect", "target": "cystic_duct"}]}
+  (BAD because: does not cite specific edge distances, does not verify temporal changes, uses speculative language)
+
+  Output format:
+  {
+    "triplets": [
+      {"instrument": "...", "verb": "...", "target": "..."}
+    ]
+  }
