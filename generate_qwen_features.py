@@ -20,7 +20,7 @@ def extract_qwen_features(
     model: Qwen2_5_VLForConditionalGeneration,
     processor: Qwen2_5_VLProcessor,
 ):
-    clip_dir = Path(clip.dir)
+    clip_dir = Path(cfg.preprocessed_root) / clip.name
     img_dir = clip_dir / "images"
     seg_dir = clip_dir / (
         cfg.preprocessing.instance_mask_subdir

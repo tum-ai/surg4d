@@ -1,4 +1,4 @@
-- dir: ${preprocessed_root}/video01_16345
+- name: video01_16345
   video_id: 1
   first_frame: 16345
   last_frame: 16425

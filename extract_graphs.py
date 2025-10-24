@@ -45,8 +45,8 @@ def load_gaussian_model(
     os.environ["language_feature_hiddendim"] = str(cfg.splat.language_feature_hiddendim)
     os.environ["use_discrete_lang_f"] = cfg.splat.use_discrete_lang_f
 
-    clip_dir = Path(clip.dir)
-    model_path = Path(cfg.output_root) / clip_dir.name
+    clip_dir = Path(cfg.preprocessed_root) / clip.name
+    model_path = Path(cfg.output_root) / clip.name
 
     # Create argument parser
     parser = argparse.ArgumentParser()
@@ -361,7 +361,7 @@ def bhattacharyya_coefficient(mu1, Sigma1, mu2, Sigma2):
 def decode_qwen(lfs: torch.Tensor, cfg: DictConfig, clip: DictConfig) -> np.ndarray:
     BATCH_SIZE = cfg.graph_extraction.decode_batch_size
 
-    clip_dir = Path(clip.dir)
+    clip_dir = Path(cfg.preprocessed_root) / clip.name
     ae_path = clip_dir / cfg.autoencoder.checkpoint_subdir / "best_ckpt.pth"
 
     ae = QwenAutoencoder(
@@ -526,9 +526,8 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
     )
 
     # Save outputs
-    clip_dir = Path(clip.dir)
-    output_root = Path(cfg.get("output_root", "output"))
-    model_path = output_root / clip_dir.name
+    clip_dir = Path(cfg.preprocessed_root) / clip.name
+    model_path = Path(cfg.output_root) / clip.name
     out = Path(model_path) / cfg.graph_extraction.graph_output_subdir
 
     out.mkdir(parents=True, exist_ok=True)

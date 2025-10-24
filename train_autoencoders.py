@@ -11,7 +11,7 @@ from autoencoder.model_qwen import QwenAutoencoder
 
 
 def save_dim_reduced(clip: DictConfig, cfg: DictConfig):
-    clip_dir = Path(clip.dir)
+    clip_dir = Path(cfg.preprocessed_root) / clip.name
     ae = QwenAutoencoder(
         input_dim=cfg.autoencoder.full_dim, latent_dim=cfg.autoencoder.latent_dim
     ).to("cuda")
@@ -108,7 +108,7 @@ def train_ae(
             full_dim = 3584
 
     train(
-        clip_path=str(Path(clip.dir)),
+        clip_path=str(Path(cfg.preprocessed_root) / clip.name),
         checkpoint_subdir=cfg.autoencoder.checkpoint_subdir,
         lf_dir_names=[
             cfg.feature_extraction.patch_feat_subdir,
