@@ -1,5 +1,5 @@
 defaults:
-  - clips: high_interaction
+  - clips: dynamic_2grasper
   - preprocessing: default
   - feature_extraction: default
   - autoencoder: default
@@ -10,8 +10,8 @@ defaults:
 cholec80_root: data/cholec80
 cholecseg8k_root: data/cholecseg8k
 cholect50_root: data/cholect50
-preprocessed_root: data/preprocessed_high_interaction_single_frame_pc
-output_root: output/high_interaction_single_frame_pc/dl_${splat.dynamic_language}
+preprocessed_root: data/preprocessed_dynamic_2grasper
+output_root: output/preprocessed_dynamic_2grasper/dl_${splat.dynamic_language}
 
 hydra:
   job:
