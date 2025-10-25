@@ -30,7 +30,8 @@ def log_points_through_time(
     cluster_pos_through_time: np.ndarray,
     text_queries: list[str],
     cluster_correspondences: np.ndarray,
-    lang_through_time: np.ndarray = None,
+    patch_lf_through_time: np.ndarray,
+    instance_lf_through_time: np.ndarray,
 ):
     """Log cluster pointclouds (points + cluster means) over time to Rerun.
 
@@ -42,8 +43,8 @@ def log_points_through_time(
         cluster_pos_through_time: Cluster mean positions per timestep; shape (T, C, 3).
         text_queries: List of text queries used for cluster correspondences.
         cluster_correspondences: Cluster correspondences of shape (C, n_queries).
-        lang_through_time: Optional timestep-wise language features; shape (T, N, D).
-            If None, uses static canonical language features from gaussians.
+        patch_lf_through_time: Patch language features per timestep; shape (T, N, D).
+        instance_lf_through_time: Instance language features per timestep; shape (T, N, D).
     """
     cluster_ids = np.unique(clusters)
 
@@ -51,15 +52,6 @@ def log_points_through_time(
     dc_sh = gaussians._features_dc.detach().cpu().numpy()  # (N, 1, 3)
     cols_rgb = SH2RGB(dc_sh[:, 0, :])  # (N, 3) in [0,1] ideally
     cols_rgb = (np.clip(cols_rgb, 0.0, 1.0) * 255.0).astype(np.uint8)
-
-    # Language features - use canonical if dynamic not provided
-    if lang_through_time is None:
-        # Language features assumed to be in roughly [-1,1] → map to [0,255]
-        cols_patch = gaussians.get_language_feature[:, :3].detach().cpu().numpy()
-        cols_patch = (((cols_patch + 1.0) / 2.0).clip(0.0, 1.0) * 255.0).astype(np.uint8)
-
-        cols_instance = gaussians.get_language_feature[:, 3:].detach().cpu().numpy()
-        cols_instance = (((cols_instance + 1.0) / 2.0).clip(0.0, 1.0) * 255.0).astype(np.uint8)
 
     # Scale uniformity
     uniformity = gaussians.get_scaling.min(dim=1).values / gaussians.get_scaling.max(dim=1).values
@@ -77,17 +69,10 @@ def log_points_through_time(
         mean_radius = max(scene_extent * 0.015, point_radius * 3.0)
 
         # Use timestep-specific language features if available
-        if lang_through_time is not None:
-            lang_t = lang_through_time[i]  # (N, D)
-            cols_patch_t = lang_t[:, :3]
-            cols_patch_t = (((cols_patch_t + 1.0) / 2.0).clip(0.0, 1.0) * 255.0).astype(np.uint8)
-            
-            cols_instance_t = lang_t[:, 3:]
-            cols_instance_t = (((cols_instance_t + 1.0) / 2.0).clip(0.0, 1.0) * 255.0).astype(np.uint8)
-        else:
-            # Use static language features
-            cols_patch_t = cols_patch
-            cols_instance_t = cols_instance
+        cols_patch_t = patch_lf_through_time[i]
+        cols_patch_t = (((cols_patch_t + 1.0) / 2.0).clip(0.0, 1.0) * 255.0).astype(np.uint8)
+        cols_instance_t = instance_lf_through_time[i]
+        cols_instance_t = (((cols_instance_t + 1.0) / 2.0).clip(0.0, 1.0) * 255.0).astype(np.uint8)
 
         rr.log(
             "rgb",

@@ -84,7 +84,7 @@ def estimate_crop_box(class_ids: np.ndarray):
 
 
 def get_cholecseg8k_frames(clip: DictConfig, cfg: DictConfig):
-    clip_dir = Path(clip.dir)
+    clip_dir = Path(cfg.preprocessed_root) / clip.name
 
     out_rgb = clip_dir / "rgb"
     out_rgb.mkdir(parents=True, exist_ok=True)
@@ -142,7 +142,7 @@ def get_cholecseg8k_frames(clip: DictConfig, cfg: DictConfig):
 
 
 def vipe(clip: DictConfig, cfg: DictConfig):
-    clip_dir = Path(clip.dir)
+    clip_dir = Path(cfg.preprocessed_root) / clip.name
     image_dir = clip_dir / "rgb"
     assert image_dir.exists(), f"RGB frames directory not found: {image_dir}"
 
@@ -177,7 +177,7 @@ def vipe_to_colmap(
     clip: DictConfig,
     cfg: DictConfig,
 ):
-    clip_dir = Path(clip.dir)
+    clip_dir = Path(cfg.preprocessed_root) / clip.name
     artifacts = list(ArtifactPath.glob_artifacts(clip_dir, use_video=True))
     for artifact in artifacts:
         convert_vipe_to_colmap(
@@ -189,8 +189,8 @@ def vipe_to_colmap(
         )
 
 
-def colmap_txt_to_bin(clip: DictConfig):
-    clip_dir = Path(clip.dir)
+def colmap_txt_to_bin(clip: DictConfig, cfg: DictConfig):
+    clip_dir = Path(cfg.preprocessed_root) / clip.name
     output_dir = clip_dir / "sparse" / "0"
     output_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -207,7 +207,7 @@ def colmap_txt_to_bin(clip: DictConfig):
 
 
 def extract_depth_maps(clip: DictConfig, cfg: DictConfig):
-    clip_dir = Path(clip.dir)
+    clip_dir = Path(cfg.preprocessed_root) / clip.name
     depth_dir = clip_dir / "depth"
     if not cfg.preprocessing.depth_subdir == "depth":
         shutil.move(depth_dir, clip_dir / cfg.preprocessing.depth_subdir)
@@ -232,8 +232,8 @@ def extract_depth_maps(clip: DictConfig, cfg: DictConfig):
         np.save(exr_file.with_name(f"{exr_file.stem}.npy"), depth)
 
 
-def delete_unused_files(clip: DictConfig):
-    clip_dir = Path(clip.dir)
+def delete_unused_files(clip: DictConfig, cfg: DictConfig):
+    clip_dir = Path(cfg.preprocessed_root) / clip.name
 
     # vipe internals
     if (clip_dir / "intrinsics").exists():
@@ -267,17 +267,13 @@ def delete_unused_files(clip: DictConfig):
 
 
 def process_clip(clip: DictConfig, cfg: DictConfig):
-    out_clip_dir = Path(clip.dir)
-    out_clip_dir.mkdir(parents=True, exist_ok=True)
-
     get_cholecseg8k_frames(clip, cfg)
     vipe(clip, cfg)
     vipe_to_colmap(clip, cfg)
-    colmap_txt_to_bin(clip)
+    colmap_txt_to_bin(clip, cfg)
     extract_depth_maps(clip, cfg)
-
     if not cfg.preprocessing.verbose_output:
-        delete_unused_files(clip)
+        delete_unused_files(clip, cfg)
 
 
 def main():

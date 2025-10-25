@@ -486,6 +486,37 @@ def _resize_feature_grid_to(
     return out
 
 
+def get_patch_segmasks(im_height: int, im_width: int) -> torch.Tensor:
+    """Generate an instance segmentation mask for Qwen3-VL patches.
+
+    Each instance corresponds to one Qwen3-VL vision encoder patch.
+    Returns a tensor of shape (H, W) where each pixel value is the patch index it belongs to.
+    """
+    # Qwen3 uses the same patch size conventions as Qwen2.5
+    patches_height = im_height // EFFECTIVE_PATCH_SIZE + (
+        (im_height // PATCH_SIZE) % 4 == 3
+    )
+    patches_width = im_width // EFFECTIVE_PATCH_SIZE + (
+        (im_width // PATCH_SIZE) % 4 == 3
+    )
+
+    rowcol = torch.stack(
+        torch.meshgrid(
+            torch.arange(
+                patches_height * EFFECTIVE_PATCH_SIZE
+                + ((im_height // PATCH_SIZE) % 4 == 3) * PATCH_SIZE
+            ),
+            torch.arange(
+                patches_width * EFFECTIVE_PATCH_SIZE
+                + ((im_width // PATCH_SIZE) % 4 == 3) * PATCH_SIZE
+            ),
+            indexing="ij",
+        )
+    )
+    patch_coords = torch.floor_divide(rowcol, EFFECTIVE_PATCH_SIZE)
+    return patch_coords[0] * patches_width + patch_coords[1]
+
+
 def generate_with_vision_features_qwen3(
     messages: List[Dict[str, Any]],
     vision_features: List[torch.Tensor],

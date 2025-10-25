@@ -11,15 +11,20 @@ from autoencoder.model_qwen import QwenAutoencoder
 
 
 def save_dim_reduced(clip: DictConfig, cfg: DictConfig):
-    clip_dir = Path(clip.dir)
-    ae = QwenAutoencoder(input_dim=cfg.autoencoder.full_dim, latent_dim=cfg.autoencoder.latent_dim).to("cuda")
+    clip_dir = Path(cfg.preprocessed_root) / clip.name
+    ae = QwenAutoencoder(
+        input_dim=cfg.autoencoder.full_dim, latent_dim=cfg.autoencoder.latent_dim
+    ).to("cuda")
     ae.load_state_dict(
-        torch.load(clip_dir / cfg.autoencoder.checkpoint_subdir / "best_ckpt.pth", map_location="cuda")
+        torch.load(
+            clip_dir / cfg.autoencoder.checkpoint_subdir / "best_ckpt.pth",
+            map_location="cuda",
+        )
     )
     ae.eval()
 
-    patch_dir = clip_dir / cfg.feature_extraction.patch_feat_subdir
-    instance_dir = clip_dir / cfg.feature_extraction.instance_feat_subdir
+    patch_dir = clip_dir / cfg.autoencoder.patch_feat_subdir
+    instance_dir = clip_dir / cfg.autoencoder.instance_feat_subdir
     reduced_patch_dir = clip_dir / cfg.autoencoder.latent_patch_feat_subdir
     reduced_instance_dir = clip_dir / cfg.autoencoder.latent_instance_feat_subdir
     reduced_cat_dir = clip_dir / cfg.autoencoder.latent_cat_feat_subdir
@@ -94,13 +99,16 @@ def train_ae(
     cfg: DictConfig,
 ):
     train(
-        clip_path=str(Path(clip.dir)),
+        clip_path=str(Path(cfg.preprocessed_root) / clip.name),
         checkpoint_subdir=cfg.autoencoder.checkpoint_subdir,
-        lf_dir_names=[cfg.feature_extraction.patch_feat_subdir, cfg.feature_extraction.instance_feat_subdir],
+        lf_dir_names=[
+            cfg.autoencoder.patch_feat_subdir,
+            cfg.autoencoder.instance_feat_subdir,
+        ],
         epochs=cfg.autoencoder.epochs,
         lr=cfg.autoencoder.lr,
         batch_size=cfg.autoencoder.batch_size,
-        full_dim=cfg.autoencoder.full_dim,
+        full_dim=full_dim,
         latent_dim=cfg.autoencoder.latent_dim,
     )
     save_dim_reduced(

@@ -1,9 +1,0 @@
-bnb_4bit: false
-bnb_8bit: false
-
-aggregate_with_instance_masks: true # semantic if not
-
-patch_feat_subdir: qwen_patch_features
-instance_feat_subdir: qwen_instance_features
-
-# TODO add toggle for qwen3 here

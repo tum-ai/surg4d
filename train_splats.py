@@ -15,14 +15,14 @@ from render import render_sets
 def train_splat(clip: DictConfig, cfg: DictConfig):
     """Train Gaussian Splatting for a single clip."""
 
-    clip_dir = Path(clip.dir)
+    clip_dir = Path(cfg.preprocessed_root) / clip.name
 
     # Set up environment variables
     os.environ["language_feature_hiddendim"] = str(cfg.splat.language_feature_hiddendim)
     os.environ["use_discrete_lang_f"] = cfg.splat.use_discrete_lang_f
 
     # Experiment name is just the clip directory name
-    exp_name = clip_dir.name
+    exp_name = clip.name
 
     # Create base argument parser
     parser = ArgumentParser(description="Training script parameters")
@@ -76,7 +76,7 @@ def train_splat(clip: DictConfig, cfg: DictConfig):
         cfg.splat.config_path,
         "--include_feature",
         "--language_features_name",
-        cfg.autoencoder.latent_cat_feat_subdir,
+        cfg.splat.latent_cat_feat_subdir,
         "--feature_level",
         "0",
         "--joint_coarse",
@@ -181,7 +181,7 @@ def render_splat(clip: DictConfig, cfg: DictConfig, model_path: str, stage: str)
         stage: Training stage name (e.g., "fine-lang", "coarse-base")
     """
 
-    clip_dir = Path(clip.dir)
+    clip_dir = Path(cfg.preprocessed_root) / clip.name
 
     # Determine which modes to render based on stage
     if "lang" in stage:
@@ -218,7 +218,7 @@ def render_splat(clip: DictConfig, cfg: DictConfig, model_path: str, stage: str)
             "-s",
             str(clip_dir),
             "--language_features_name",
-            cfg.autoencoder.latent_cat_feat_subdir,
+            cfg.splat.latent_cat_feat_subdir,
             "--model_path",
             model_path,
             "--feature_level",

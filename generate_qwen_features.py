@@ -6,7 +6,12 @@ from omegaconf import DictConfig
 from tqdm import tqdm
 from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLProcessor
 
-from qwen_vl import get_patched_qwen, qwen_encode_image, get_patch_segmasks
+from qwen_vl import get_patched_qwen, qwen_encode_image
+from qwen_vl import get_patch_segmasks as get_patch_segmasks_qwen2
+from qwen_vl_qwen3 import (
+    qwen3_encode_image,
+    get_patch_segmasks as get_patch_segmasks_qwen3,
+)
 
 
 def extract_qwen_features(
@@ -15,12 +20,12 @@ def extract_qwen_features(
     model: Qwen2_5_VLForConditionalGeneration,
     processor: Qwen2_5_VLProcessor,
 ):
-    clip_dir = Path(clip.dir)
+    clip_dir = Path(cfg.preprocessed_root) / clip.name
     img_dir = clip_dir / "images"
     seg_dir = clip_dir / (
-        cfg.preprocessing.instance_mask_subdir
+        cfg.feature_extraction.instance_mask_subdir
         if cfg.feature_extraction.aggregate_with_instance_masks
-        else cfg.preprocessing.semantic_mask_subdir
+        else cfg.feature_extraction.semantic_mask_subdir
     )
     frame_stems = [f.stem for f in img_dir.glob("*.jpg")]
 
@@ -34,10 +39,40 @@ def extract_qwen_features(
         frame_stem_just_number = frame_stem.replace("frame_", "")
 
         # patch wise
-        qwen_feats = (
-            qwen_encode_image(image, model, processor).detach().float().cpu().numpy()
-        )
-        patch_map = get_patch_segmasks(image.height, image.width).unsqueeze(0).numpy()
+        if cfg.feature_extraction.get("use_qwen3", False):
+            from qwen_vl_qwen3 import closest_factor_pair, EFFECTIVE_PATCH_SIZE
+
+            feats = qwen3_encode_image(image, model, processor)
+            qwen_feats = feats.detach().float().cpu().numpy()
+
+            # Infer actual processed image size from feature count
+            # Qwen3 processor resizes images, so we can't use original image.height/width
+            num_patches = qwen_feats.shape[0]
+            patch_h, patch_w = closest_factor_pair(num_patches)
+            processed_height = patch_h * EFFECTIVE_PATCH_SIZE
+            processed_width = patch_w * EFFECTIVE_PATCH_SIZE
+
+            # Generate patch map for the PROCESSED image dimensions, then resize to original
+            patch_map_processed = (
+                get_patch_segmasks_qwen3(processed_height, processed_width)
+                .unsqueeze(0)
+                .numpy()
+            )
+            # Resize patch map to match original image size using nearest neighbor
+            import cv2
+
+            patch_map = cv2.resize(
+                patch_map_processed[0].astype(np.int32),
+                (image.width, image.height),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(np.int32)[None, :, :]
+        else:
+            feats = qwen_encode_image(image, model, processor)
+            qwen_feats = feats.detach().float().cpu().numpy()
+            patch_map = (
+                get_patch_segmasks_qwen2(image.height, image.width).unsqueeze(0).numpy()
+            )
+
         np.save(patch_dir / f"{frame_stem_just_number}_f.npy", qwen_feats)
         np.save(patch_dir / f"{frame_stem_just_number}_s.npy", patch_map)
 
@@ -70,11 +105,22 @@ def extract_qwen_features(
 
 @hydra.main(config_path="conf", config_name="config.yaml", version_base="1.3")
 def main(cfg: DictConfig):
-    # load qwen
-    model, processor = get_patched_qwen(
-        use_bnb_4bit=cfg.feature_extraction.bnb_4bit,
-        use_bnb_8bit=cfg.feature_extraction.bnb_8bit,
-    )
+    # load qwen (conditional on use_qwen3 flag)
+    if cfg.feature_extraction.get("use_qwen3", True):
+        from qwen_vl_qwen3 import get_patched_qwen3
+
+        model, processor = get_patched_qwen3(
+            model_path=cfg.feature_extraction.get(
+                "model_id", "Qwen/Qwen3-VL-8B-Instruct"
+            ),
+            use_bnb_4bit=cfg.feature_extraction.bnb_4bit,
+            use_bnb_8bit=cfg.feature_extraction.bnb_8bit,
+        )
+    else:
+        model, processor = get_patched_qwen(
+            use_bnb_4bit=cfg.feature_extraction.bnb_4bit,
+            use_bnb_8bit=cfg.feature_extraction.bnb_8bit,
+        )
 
     for clip in tqdm(cfg.clips, desc="Generating qwen feats", unit="clip"):
         extract_qwen_features(clip, cfg, model, processor)

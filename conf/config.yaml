@@ -1,8 +1,8 @@
 defaults:
   - clips: high_interaction
   - preprocessing: default
-  - feature_extraction: default
-  - autoencoder: default
+  - feature_extraction: qwen25
+  - autoencoder: qwen25
   - splat: default
   - graph_extraction: default
   - _self_
@@ -10,8 +10,8 @@ defaults:
 cholec80_root: data/cholec80
 cholecseg8k_root: data/cholecseg8k
 cholect50_root: data/cholect50
-preprocessed_root: data/preprocessed_high_interaction_single_frame_pc
-output_root: output/high_interaction_single_frame_pc/dl_${splat.dynamic_language}
+preprocessed_root: data/preprocessed_dyn_scene
+output_root: output/dyn_scene
 
 hydra:
   job:

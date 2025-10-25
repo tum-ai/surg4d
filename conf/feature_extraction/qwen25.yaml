@@ -1,0 +1,13 @@
+bnb_4bit: false
+bnb_8bit: false
+
+aggregate_with_instance_masks: true # semantic if not
+
+patch_feat_subdir: qwen_patch_features
+instance_feat_subdir: qwen_instance_features
+
+use_qwen3: false
+model_id: Qwen/Qwen2.5-VL-7B-Instruct
+
+semantic_mask_subdir: ${preprocessing.semantic_mask_subdir}
+instance_mask_subdir: ${preprocessing.instance_mask_subdir}
