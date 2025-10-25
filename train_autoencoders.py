@@ -108,7 +108,7 @@ def train_ae(
         epochs=cfg.autoencoder.epochs,
         lr=cfg.autoencoder.lr,
         batch_size=cfg.autoencoder.batch_size,
-        full_dim=full_dim,
+        full_dim=cfg.autoencoder.full_dim,
         latent_dim=cfg.autoencoder.latent_dim,
     )
     save_dim_reduced(

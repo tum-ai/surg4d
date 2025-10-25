@@ -1,10 +1,10 @@
 from pathlib import Path
 from PIL import Image
 import numpy as np
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 import hydra
-from hydra.core.global_hydra import GlobalHydra, OmegaConf
+from hydra.core.global_hydra import GlobalHydra
 import subprocess
 import shutil
 from vipe import make_pipeline
@@ -17,7 +17,6 @@ from openexr_numpy import imread
 import cv2
 
 from cholec_utils import get_clip_seg8k, parse_cholecseg8k_instance_mask
-import torch
 from vipe.utils.depth import reliable_depth_mask_range
 from vipe.utils.io import read_depth_artifacts
 import re
