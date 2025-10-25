@@ -167,14 +167,17 @@ class TripletsFrameEvaluator:
 
             print(f"clip_dir: {clip_dir}")
             
-            # Load qwen features
-            qwen_feat_dir = clip_dir / "c_qwen_feats"
-            if not qwen_feat_dir.exists():
-                print(f"Warning: No qwen features found at {qwen_feat_dir}")
+            # Load qwen features from npz file
+            qwen_feat_file = clip_dir / "c_qwen_feats.npz"
+            if not qwen_feat_file.exists():
+                print(f"Warning: No qwen features found at {qwen_feat_file}")
                 return None
             
-            feat_files = sorted(qwen_feat_dir.glob("*.npy"))
-            node_feats = [np.load(f) for f in feat_files]
+            # Load npz file and extract features in sorted cluster ID order
+            qwen_feats_dict = np.load(qwen_feat_file)
+            cluster_ids = sorted([int(k) for k in qwen_feats_dict.keys()])
+            node_feats = [qwen_feats_dict[str(cluster_id)][0] for cluster_id in cluster_ids]
+            # TODO this is hardcoded to use features at timestep 0
             
             # Load spatial matrices
             adjacency_matrices = np.load(clip_dir / "graph.npy")
