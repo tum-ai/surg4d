@@ -2,6 +2,7 @@ import numpy as np
 import rerun as rr
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
+from typing import List, Optional
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import SH2RGB
 
@@ -350,3 +351,138 @@ def log_correspondences_static(
             show_labels=False,
         )
         rr.log(f"correspondences/{query}", points)
+
+
+# =============================
+# Spatial grounding visualizers
+# =============================
+
+def _colorize_values(values: np.ndarray, cmap_name: str) -> np.ndarray:
+    """Map scalar values to RGB colors in [0,255] using a colormap with per-vector min-max normalization."""
+    vmin = float(values.min())
+    vmax = float(values.max())
+    denom = (vmax - vmin) if vmax > vmin else 1.0
+    normed = (values - vmin) / denom
+    rgba = cm.get_cmap(cmap_name)(normed)
+    rgb = (rgba[:, :3] * 255.0).astype(np.uint8)
+    return rgb
+
+
+def log_scalar_values_over_points(
+    entity_path: str,
+    positions: np.ndarray,
+    values: np.ndarray,
+    labels: Optional[List[str]] = None,
+    cmap_name: str = "jet",
+    point_radius_scale: float = 0.004,
+    timestep: Optional[int] = None,
+):
+    """Log a colored point cloud where color encodes scalar values per point.
+
+    Args:
+        entity_path: Rerun path to log into.
+        positions: (N, 3)
+        values: (N,)
+        labels: Optional list[str] length N used as per-point labels (hidden by default)
+        cmap_name: Matplotlib colormap name
+        point_radius_scale: Relative radius based on scene extent
+        timestep: Optional timestep index for time axis alignment
+    """
+    if timestep is not None:
+        rr.set_time("timestep", sequence=int(timestep))
+
+    scene_extent = _compute_scene_extent(positions)
+    point_radius = max(scene_extent * point_radius_scale, 1e-5)
+    rgb = _colorize_values(values.astype(np.float64), cmap_name)
+
+    points = rr.Points3D(
+        positions=positions,
+        colors=rgb,
+        radii=point_radius,
+        labels=labels,
+        show_labels=False,
+    )
+    rr.log(entity_path, points)
+
+
+def log_basic_points(
+    entity_path: str,
+    positions: np.ndarray,
+    color: List[int] = [200, 200, 200],
+    point_radius_scale: float = 0.004,
+    timestep: Optional[int] = None,
+):
+    """Log a basic point cloud with uniform color, used as an overlay base."""
+    if timestep is not None:
+        rr.set_time("timestep", sequence=int(timestep))
+    scene_extent = _compute_scene_extent(positions)
+    point_radius = max(scene_extent * point_radius_scale, 1e-5)
+    cols = np.tile(np.array(color, dtype=np.uint8)[None, :], (positions.shape[0], 1))
+    points = rr.Points3D(positions=positions, colors=cols, radii=point_radius)
+    rr.log(entity_path, points)
+
+
+def init_and_save_rerun(output_rrd_path):
+    """Initialize and set file sink. Call once per run before logging."""
+    rr.init("clusters")
+    rr.save(output_rrd_path)
+
+
+def log_spatial_grounding_heatmaps(
+    base_path: str,
+    positions: np.ndarray,
+    layers: List[int],
+    tokens: List[str],
+    query_token_indices: List[int],
+    scores: np.ndarray,
+    cmap_name: str,
+    timestep: int,
+):
+    """Log per-token and aggregated heatmaps for spatial grounding.
+
+    Args:
+        base_path: Root entity path under which to log heatmaps
+        positions: (N, 3) positions for the sampled points
+        layers: list of layer indices as configured
+        tokens: decoded token strings for the sequence
+        query_token_indices: indices into tokens corresponding to the substring span
+        scores: (L, Q, N) attention scores (layers x query_tokens x points)
+        cmap_name: matplotlib colormap name
+        timestep: time index to align with the base recording
+    """
+    # Log tokens metadata once
+    rr.set_time("timestep", sequence=int(timestep))
+    rr.log(
+        f"{base_path}/tokens",
+        rr.TextLog(
+            text=f"query_token_indices={query_token_indices}\n" +
+                 f"tokens: {tokens}"
+        ),
+    )
+
+    for lpos, layer_idx in enumerate(layers):
+        layer_path = f"{base_path}/layer_{layer_idx}"
+        # Per-token
+        for qpos, tok_idx in enumerate(query_token_indices):
+            tok = tokens[tok_idx]
+            vals = scores[lpos, qpos]
+            labels = [f"{tok}:{float(v):.4f}" for v in vals]
+            log_scalar_values_over_points(
+                entity_path=f"{layer_path}/token_{qpos}_{tok}",
+                positions=positions,
+                values=vals,
+                labels=labels,
+                cmap_name=cmap_name,
+                timestep=timestep,
+            )
+        # Aggregate (mean)
+        agg = scores[lpos].mean(axis=0)
+        labels = [f"mean:{float(v):.4f}" for v in agg]
+        log_scalar_values_over_points(
+            entity_path=f"{layer_path}/aggregate_mean",
+            positions=positions,
+            values=agg,
+            labels=labels,
+            cmap_name=cmap_name,
+            timestep=timestep,
+        )

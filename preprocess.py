@@ -4,7 +4,7 @@ import numpy as np
 from omegaconf import DictConfig
 from tqdm import tqdm
 import hydra
-from hydra.core.global_hydra import GlobalHydra
+from hydra.core.global_hydra import GlobalHydra, OmegaConf
 import subprocess
 import shutil
 from vipe import make_pipeline
@@ -289,6 +289,10 @@ def main():
     
     out_dir = Path(cfg.preprocessed_root)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    for config_dump in cfg.config_dumps:
+        Path(config_dump).parent.mkdir(parents=True, exist_ok=True)
+        OmegaConf.save(cfg, config_dump)
 
     for clip in tqdm(cfg.clips, desc="Processing clips", unit="clip"):
         process_clip(clip, cfg)

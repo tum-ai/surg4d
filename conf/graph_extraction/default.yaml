@@ -29,6 +29,11 @@ n_render_views: 1  # number of random camera views to render (only if store_verb
 
 random_seed: 1234
 
+# spatial grounding feature extraction
+spatial_grounding:
+  n_splat_points: 1000
+  n_cluster_points: 100
+
 # TODO rendering based cluster filtering etc. have to be integrated here
 
 language_feature_hiddendim: ${splat.language_feature_hiddendim}

@@ -14,6 +14,10 @@ cholect50_root: data/cholect50
 preprocessed_root: data/preprocessed_dyn_scene
 output_root: output/dyn_scene
 
+config_dumps:
+  - ${preprocessed_root}/config.yaml
+  - ${output_root}/config.yaml
+
 hydra:
   job:
     chdir: false

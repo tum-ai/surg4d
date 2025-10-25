@@ -1,12 +1,13 @@
 defaults:
-  - triplets: default
+  # - triplets: default
   # - temporal: default
-  # - spatial: default
+  - spatial: default
   - _self_
 
 # nulling skips
+triplets: null
 temporal: null
-spatial: null
+# spatial: null
 
 # Required output directory for benchmark results
 output_dir: ${output_root}/benchmark

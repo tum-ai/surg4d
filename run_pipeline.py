@@ -1,6 +1,6 @@
 import hydra
 from hydra.core.global_hydra import GlobalHydra
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from pathlib import Path
 
 from preprocess import process_clip
@@ -52,6 +52,10 @@ def main():
 
     # Clear after composing the main config so vipe can initialize its own
     GlobalHydra.instance().clear()
+
+    for config_dump in cfg.config_dumps:
+        Path(config_dump).parent.mkdir(parents=True, exist_ok=True)
+        OmegaConf.save(cfg, config_dump)
 
     for clip in cfg.clips:
         process_clip(clip, cfg)

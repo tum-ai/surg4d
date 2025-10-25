@@ -11,6 +11,7 @@ import random
 import hydra
 from omegaconf import DictConfig
 from tqdm import tqdm
+from typing import List
 
 from scene.cameras import Camera
 from utils.params_utils import merge_hparams
@@ -42,7 +43,9 @@ def load_gaussian_model(
     import os
 
     # Set up environment variables (needed for model architecture)
-    os.environ["language_feature_hiddendim"] = str(cfg.graph_extraction.language_feature_hiddendim)
+    os.environ["language_feature_hiddendim"] = str(
+        cfg.graph_extraction.language_feature_hiddendim
+    )
     os.environ["use_discrete_lang_f"] = cfg.graph_extraction.use_discrete_lang_f
 
     clip_dir = Path(cfg.preprocessed_root) / clip.name
@@ -97,7 +100,9 @@ def load_gaussian_model(
         "--qwen_autoencoder_ckpt_path",
         str(qwen_ae_path),
         "--no_dlang",
-        "0" if cfg.graph_extraction.dynamic_language else "1",  # Pass dynamic language flag
+        "0"
+        if cfg.graph_extraction.dynamic_language
+        else "1",  # Pass dynamic language flag
     ]
 
     if cfg.graph_extraction.store_verbose:
@@ -165,9 +170,7 @@ def normalize_dep_dim(x):
     return (x - x.mean()) / x.std()
 
 
-def deform_at_timestep(
-    gaussians: GaussianModel, timestep: float
-):
+def deform_at_timestep(gaussians: GaussianModel, timestep: float):
     """Extract deformed positions and language features at a specific timestep.
 
     Args:
@@ -214,9 +217,7 @@ def cluster_gaussians(gaussians: GaussianModel, cfg: DictConfig):
     # position
     pos_through_time = np.concatenate(
         [
-            normalize_dep_dim(
-                deform_at_timestep(gaussians, t)[0]
-            )
+            normalize_dep_dim(deform_at_timestep(gaussians, t)[0])
             for t in [0.0, 0.5, 1.0]
         ],
         axis=-1,
@@ -381,7 +382,7 @@ def decode_qwen(lfs: torch.Tensor, cfg: DictConfig, clip: DictConfig) -> np.ndar
     return decoded_lfs
 
 
-def cluster_qwen_features(
+def clusterwise_qwen_feats(
     clusters: np.ndarray,
     cfg: DictConfig,
     clip: DictConfig,
@@ -404,21 +405,23 @@ def cluster_qwen_features(
         cluster_mask = clusters == cluster_id
         cluster_lfs = patch_lf[cluster_mask]
 
-        random_sample = cluster_lfs[
-            np.random.choice(
-                np.arange(cluster_lfs.shape[0]),
-                np.clip(
-                    cluster_lfs.shape[0],
-                    a_min=cfg.graph_extraction.min_features_per_cluster,
-                    a_max=cfg.graph_extraction.max_features_per_cluster,
-                ),
-                replace=True,
-            )
-        ]
-        cluster_feats[cluster_id] = random_sample
+        indices = np.random.choice(
+            np.arange(cluster_lfs.shape[0]),
+            np.clip(
+                cluster_lfs.shape[0],
+                cfg.graph_extraction.min_features_per_cluster,
+                cfg.graph_extraction.max_features_per_cluster,
+            ),
+            replace=True,
+        )
+        feats = decode_qwen(
+            torch.tensor(cluster_lfs[indices], device="cuda", dtype=torch.float32),
+            cfg,
+            clip,
+        )
+        cluster_feats[cluster_id] = feats
 
-    feats_per_cluster = {k: decode_qwen(torch.tensor(v, device="cuda", dtype=torch.float32), cfg, clip) for k, v in cluster_feats.items()}
-    return feats_per_cluster
+    return cluster_feats
 
 
 def properties_through_time(positions_through_time: np.ndarray, clusters: np.ndarray):
@@ -464,6 +467,82 @@ def timestep_graph(positions, clusters, cfg: DictConfig):
     return A
 
 
+def splat_spatial_grounding_feats(
+    gaussians: GaussianModel, cfg: DictConfig, timesteps: List[float], clip: DictConfig
+):
+    """Sample qwen feats throughout the whole scene.
+
+    Args:
+        gaussians (GaussianModel): Gaussian model.
+        cfg (DictConfig): Hydra configuration.
+        timesteps (List[float]): Timesteps to extract features at.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: Tuple of numpy array of shape (T, n_feats, 3584) and numpy array of shape (n_feats)
+            - feats: numpy array of shape (T, n_feats, 3584)
+            - indices: numpy array of shape (n_splat_points) into the whole splat
+    """
+    patch_feats = [deform_at_timestep(gaussians, t)[1] for t in timesteps]
+    indices = np.random.choice(
+        gaussians.get_xyz.shape[0],
+        cfg.graph_extraction.spatial_grounding.n_splat_points,
+        replace=False,
+    )
+    patch_feats = [i[indices] for i in patch_feats]
+    decoded_patch_feats = [
+        decode_qwen(torch.tensor(i, device="cuda", dtype=torch.float32), cfg, clip)
+        for i in patch_feats
+    ]
+    return np.stack(decoded_patch_feats), indices
+
+
+def cluster_spatial_grounding_feats(
+    gaussians: GaussianModel,
+    cfg: DictConfig,
+    timesteps: List[float],
+    clip: DictConfig,
+    clusters: np.ndarray,
+):
+    """Extract cluster-level spatial grounding features and their indices.
+
+    Args:
+        gaussians (GaussianModel): Gaussian model.
+        cfg (DictConfig): Hydra configuration.
+        timesteps (List[float]): Timesteps to extract features at.
+        clip (DictConfig): Clip configuration.
+        clusters (np.ndarray): Cluster ids.
+
+    Returns:
+        tuple[dict[str, np.ndarray], dict[str, np.ndarray]]: Tuple of dictionaries
+        - feat_dict: Map of cluster id to numpy array of shape (T, n_feats, 3584)
+        - indices_dict: Map of cluster id to numpy array of shape (n_feats) (ATTENTION: indices are into cluster gaussians, not the whole splat)
+    """
+    lf_patch_through_time = [deform_at_timestep(gaussians, t)[1] for t in timesteps]
+    feat_dict, indices_dict = {}, {}
+    for cluster_id in np.unique(clusters):
+        cluster_mask = clusters == cluster_id
+        indices = np.random.choice(
+            np.arange(cluster_mask.sum()),
+            max(
+                cluster_mask.sum(),
+                cfg.graph_extraction.spatial_grounding.n_cluster_points,
+            ),
+            replace=False,
+        )
+        indices_dict[str(cluster_id)] = indices
+        cluster_feats = []
+        for t in range(len(timesteps)):
+            feats = lf_patch_through_time[t][cluster_mask][indices]
+            feats = decode_qwen(
+                torch.tensor(feats, device="cuda", dtype=torch.float32), cfg, clip
+            )
+            cluster_feats.append(feats)
+        cluster_feats = np.stack(cluster_feats)
+        feat_dict[str(cluster_id)] = cluster_feats
+
+    return feat_dict, indices_dict
+
+
 def extract_graph(clip: DictConfig, cfg: DictConfig):
     """Extract scene graph from trained Gaussian Splatting model.
 
@@ -505,8 +584,11 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
     lf_instance_through_time = np.stack([i[2] for i in deformed_data])
 
     selected_decoded_lf_through_time = [
-        cluster_qwen_features(
-            clusters, cfg, clip, patch_lf=lf_patch_through_time[t_idx]
+        clusterwise_qwen_feats(
+            clusters,
+            cfg,
+            clip,
+            patch_lf=lf_patch_through_time[t_idx],
         )
         for t_idx in range(len(timesteps))
     ]
@@ -537,9 +619,6 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
         store_palette(
             palette, out / "c_palette.png"
         )  # palette of renders (color position corresponds to cluster id)
-        np.save(
-            out / "clusters.npy", clusters
-        )  # cluster ids after all filtering (n_filtered_gaussians,)
 
         # Save language features (either canonical or through time, but not both)
         np.save(
@@ -574,6 +653,32 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
     np.save(
         out / "graph.npy", graphs
     )  # adjacency matrices through time - weights are bhattacharyya coefficients (timesteps, n_clusters, n_clusters)
+
+    # save stuff for spatial grounding
+    splat_feats, splat_indices = splat_spatial_grounding_feats(
+        gaussians, cfg, timesteps, clip
+    )
+    np.save(
+        out / "splat_spatial_grounding_feats.npy", splat_feats
+    )  # (T, n_splat_points, 3584)
+    np.save(
+        out / "splat_spatial_grounding_indices.npy", splat_indices
+    )  # (n_splat_points,)
+
+    cluster_feats, cluster_indices = cluster_spatial_grounding_feats(
+        gaussians, cfg, timesteps, clip, clusters
+    )
+    np.savez(
+        out / "cluster_spatial_grounding_feats.npz", **cluster_feats
+    )  # (cluster_id -> (T, n_feats, 3584))
+    np.savez(
+        out / "cluster_spatial_grounding_indices.npz", **cluster_indices
+    )  # (cluster_id -> (n_feats,)) (ATTENTION: indices are into cluster gaussians, not the whole splat)
+    np.save(out / "clusters.npy", clusters)  # (n_filtered_gaussians,)
+    filtered_scene_dir = out / "filtered_scene"
+    filtered_scene_dir.mkdir(parents=True, exist_ok=True)
+    gaussians.save_ply(filtered_scene_dir / "point_cloud.ply")
+    gaussians.save_deformation(filtered_scene_dir)
 
     # Visualize to rerun
     rr.init("clusters")
