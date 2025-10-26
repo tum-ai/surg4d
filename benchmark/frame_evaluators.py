@@ -161,41 +161,37 @@ class TripletsFrameEvaluator:
     def _load_graph_data(self, graph_path: Path) -> Optional[Dict]:
         """Load precomputed 4D graph data"""
         
-        try:
-            # Assuming graph structure similar to video01_00080
-            clip_dir = graph_path
+        # Assuming graph structure similar to video01_00080
+        clip_dir = graph_path
 
-            print(f"clip_dir: {clip_dir}")
-            
-            # Load qwen features from npz file
-            qwen_feat_file = clip_dir / "c_qwen_feats.npz"
-            if not qwen_feat_file.exists():
-                print(f"Warning: No qwen features found at {qwen_feat_file}")
-                return None
-            
-            # Load npz file and extract features in sorted cluster ID order
-            qwen_feats_dict = np.load(qwen_feat_file)
-            cluster_ids = sorted([int(k) for k in qwen_feats_dict.keys()])
-            node_feats = [qwen_feats_dict[str(cluster_id)][0] for cluster_id in cluster_ids]
-            # TODO this is hardcoded to use features at timestep 0
-            
-            # Load spatial matrices
-            adjacency_matrices = np.load(clip_dir / "graph.npy")
-            print(f"adjacency_matrices: {adjacency_matrices.shape}")
-            centers = np.load(clip_dir / "c_centers.npy")
-            centroids = np.load(clip_dir / "c_centroids.npy")
-            extents = np.load(clip_dir / "c_extents.npy")
-            
-            return {
-                'node_feats': node_feats,
-                'adjacency_matrices': adjacency_matrices,
-                'node_centers': centers,
-                'node_centroids': centroids,
-                'node_extents': extents
-            }
-        except Exception as e:
-            print(f"Warning: Could not load graph data: {e}")
+        print(f"clip_dir: {clip_dir}")
+        
+        # Load qwen features from npz file
+        qwen_feat_file = clip_dir / "c_qwen_feats.npz"
+        if not qwen_feat_file.exists():
+            print(f"Warning: No qwen features found at {qwen_feat_file}")
             return None
+        
+        # Load npz file and extract features in sorted cluster ID order
+        qwen_feats_dict = np.load(qwen_feat_file)
+        cluster_ids = sorted([int(k) for k in qwen_feats_dict.keys()])
+        node_feats = [qwen_feats_dict[str(cluster_id)][0] for cluster_id in cluster_ids]
+        # TODO this is hardcoded to use features at timestep 0
+        
+        # Load spatial matrices
+        adjacency_matrices = np.load(clip_dir / "graph.npy")
+        print(f"adjacency_matrices: {adjacency_matrices.shape}")
+        centers = np.load(clip_dir / "c_centers.npy")
+        centroids = np.load(clip_dir / "c_centroids.npy")
+        extents = np.load(clip_dir / "c_extents.npy")
+        
+        return {
+            'node_feats': node_feats,
+            'adjacency_matrices': adjacency_matrices,
+            'node_centers': centers,
+            'node_centroids': centroids,
+            'node_extents': extents
+        }
     
     def _parse_response(self, response: str) -> List[Dict]:
         """Parse model response to extract triplets"""

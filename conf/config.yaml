@@ -1,5 +1,5 @@
 defaults:
-  - clips: final_dataset
+  - clips: dynamic_2grasper
   - preprocessing: default
   - feature_extraction: qwen25
   - autoencoder: qwen25
@@ -18,13 +18,10 @@ skip_eval: true
 cholec80_root: data/cholec80
 cholecseg8k_root: data/cholecseg8k
 cholect50_root: data/cholect50
-preprocessed_root: data/preprocessed/final_scenes_qwen3_${feature_extraction.use_qwen3}
-output_root: output/final_scenes_qwen3_${feature_extraction.use_qwen3}
-
-whole_pipeline_clips_sequentially: true  # do everything for each clip first if true, otherwise steps sequentially
+preprocessed_root: data/multiple
+output_root: output/multiple
 
 config_dumps:
-  - ${preprocessed_root}/config.yaml
   - ${output_root}/config.yaml
 
 hydra:

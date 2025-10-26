@@ -18,16 +18,16 @@ class BenchmarkConfig:
 
     # Data paths
     # Root to triplets
-    cholect50_root: Path = Path("/workspace/nico/surgery-scene-graphs/data/cholect50")
+    cholect50_root: Path = Path("/home/tumai/shared_data/4DLangSplatSurgery/data/cholect50")
     # Root to data
-    preprocessed_root: Path = Path("/workspace/nico/surgery-scene-graphs/data/preprocessed_dyn_scene")
+    preprocessed_root: Path = Path("/home/tumai/shared_data/4DLangSplatSurgery/data/cholecseg8k/preprocessed_ssg")
     # Root to output
-    output_root: Path = Path("/workspace/nico/surgery-scene-graphs/output/dyn_scene")
+    output_root: Path = Path("/home/tumai/shared_data/4DLangSplatSurgery/output/testlang/dl_False")
     results_dir: Path = output_root / "benchmark"
 
     # Path to specific video to evaluate
-    video_dir: Path = preprocessed_root / "video01_16345"
-    graph_dir: Path = output_root / "video01_16345/graph"
+    video_dir: Path = preprocessed_root / "video01_00080"
+    graph_dir: Path = output_root / "video01_00080/graph"
     
     # Model settings
     model_name: Literal["qwen", "gpt4"] = "qwen"

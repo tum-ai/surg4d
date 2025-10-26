@@ -18,7 +18,16 @@ from rerun_utils import (
 )
 import numpy as np
 import torch
+
 # rerun is used via helper functions imported from rerun_utils
+
+import json
+from scene.dataset_readers import readColmapSceneInfo, CameraInfo
+from scene.cameras import Camera
+import os
+
+import matplotlib.pyplot as plt
+import cv2
 
 
 def _build_benchmark_config(cfg: DictConfig, clip: DictConfig) -> BenchmarkConfig:
@@ -96,13 +105,87 @@ def evaluate_triplets(clip: DictConfig, cfg: DictConfig):
 
 
 def evaluate_temporal(clip: DictConfig, cfg: DictConfig):
-    # skip this if no eval config is set
-    if cfg.eval is None or cfg.eval.temporal is None:
-        return
     pass
 
 
-def evaluate_spatial(clip: DictConfig, cfg: DictConfig, model, processor):
+def get_timestep_from_frame(frame: str, image_dir: Path) -> int:
+    # Convert image_dir to list of image paths and look up position of frame in there
+    image_paths = list(Path(image_dir).glob("*.jpg"))
+    image_filenames = [path.name for path in image_paths]
+    image_filenames.sort()
+    timestep = image_filenames.index(frame)
+    return timestep
+
+
+def get_proj_matrix_from_timestep(
+    timestep: int, train_cameras: list, frame: str
+) -> torch.Tensor:
+    # Get the camera parameters for the timestep
+    camera_info = train_cameras[timestep]
+    assert isinstance(
+        camera_info, CameraInfo
+    ), "camera_info must be a CameraInfo object"
+
+    # Instantiate a Camera object from the camera info
+    image = camera_info.image
+    R = camera_info.R
+    T = camera_info.T
+    FovX = camera_info.FovX
+    FovY = camera_info.FovY
+    time = camera_info.time
+    mask = camera_info.mask
+    camera = Camera(
+        colmap_id=timestep,
+        R=R,
+        T=T,
+        FoVx=FovX,
+        FoVy=FovY,
+        image=image,
+        gt_alpha_mask=None,
+        image_name=f"{frame}",
+        uid=timestep,
+        data_device=torch.device("cuda"),
+        time=time,
+        mask=mask,
+    )
+
+    # Get projection matrix from camera object
+    # full_proj_transform includes the world to cam as well, seems to be correct
+    # projection_matrix = camera.projection_matrix
+    full_proj_matrix = camera.full_proj_transform
+    return full_proj_matrix, camera.image_width, camera.image_height
+
+
+def project_3d_to_2d(
+    positions: np.ndarray, proj_matrix: torch.Tensor, img_width: int, img_height: int
+) -> np.ndarray:
+    # Expecting positions to be (N, 3)
+    assert positions.shape[1] == 3, "Positions must be (N, 3)"
+
+    # Conver to homogeneous coordinates
+    ones = torch.ones(
+        positions.shape[0], 1, dtype=positions.dtype, device=positions.device
+    )
+    positions = torch.cat([positions, ones], dim=1)  # (N, 4)
+
+    # Apply full projection transform: world to image space
+    # Apparently full_proj_transform is transposed, seems to be correct
+    coords = (proj_matrix.T @ positions.T).T  # (N, 4)
+
+    # Perspective division to get NDC (Normalized Device Coordinates)
+    w = coords[:, 3]
+    ndc = coords[:, :3] / (w.unsqueeze(1) + 1e-7)  # (N, 3) [x, y, z] in [-1, 1]
+
+    # Convert NDC to pixel coordinates
+    # NDC: x, y in [-1, 1] → Pixel: u in [0, width], v in [0, height]
+    pixels_x = (ndc[:, 0] + 1.0) * 0.5 * img_width
+    pixels_y = (ndc[:, 1] + 1.0) * 0.5 * img_height
+
+    pixels = np.stack([pixels_x, pixels_y], axis=-1)  # (N, 2)
+    return pixels
+
+
+def evaluate_spatial(clip: DictConfig, cfg: DictConfig):
     """Compute text-to-vision attention over sampled scene points and log heatmaps to rerun.
 
     Expects graph extraction outputs to exist under output_root/<clip.name>/<graph_subdir>:
@@ -151,35 +234,65 @@ def evaluate_spatial(clip: DictConfig, cfg: DictConfig, model, processor):
 
     T, N, D = splat_feats.shape
 
-    # Config
+    # Get spatial eval data from file
+    spatial_eval_file = clip.spatial_eval_file
+    with open(spatial_eval_file, "r") as f:
+        spatial_eval_data = json.load(f)
+    spatial_prompts = spatial_eval_data["spatial_prompts"]
+    spatial_prompts_frames = spatial_eval_data["spatial_prompts_frames"]
+
+    # Basic spatial eval setup
     layers = list(map(int, spatial_cfg["layers"]))
-    prompt = str(spatial_cfg["prompt"])
-    substring = str(spatial_cfg["substring"])
-    timestep = int(spatial_cfg["timestep"])
     cmap_name = str(spatial_cfg["colormap"])  # required
 
-    assert 0 <= timestep < T, f"Invalid timestep {timestep}; valid range [0,{T - 1}]"
+    # Compute relevant dirs from cfg
+    colmap_root = os.path.join(cfg.preprocessed_root, clip.name)
+    image_dir = os.path.join(cfg.preprocessed_root, clip.name, "images")
 
-    # Prepare vision features for the timestep
-    vision_features = torch.tensor(splat_feats[timestep], dtype=torch.float32)
+    # Load all camera parameters of the appropriate clip, will need some of them depending to project 3D to 2D
+    scene_info = readColmapSceneInfo(colmap_root, images=None, eval=False)
+    train_cameras = scene_info.train_cameras
+    test_cameras = scene_info.test_cameras
+    assert len(test_cameras) == 0, "Test cameras should be empty"
 
-    # Compute attentions
-    attn_out = extract_text_to_vision_attention(
-        model=model,
-        processor=processor,
-        vision_features=vision_features,
-        layers=layers,
-        prompt=prompt,
-        substring=substring,
+    # Load patched model with attentions enabled
+    use_4bit = bench_cfg.use_4bit_quantization
+    model, processor = get_patched_qwen_for_spatial_grounding(
+        use_bnb_4bit=use_4bit, use_bnb_8bit=False
     )
 
-    scores: torch.Tensor = attn_out["scores"]  # (L, Q, N)
-    tokens = attn_out["tokens"]
-    query_token_indices = attn_out["query_token_indices"]
-    # vision_token_indices = attn_out["vision_token_indices"]  # equals [0..N-1] in our setup
+    for prompt, frame in zip(spatial_prompts, spatial_prompts_frames):
+        # TODO: experiment with this, might be better to choose more focused substrings
+        substring = prompt
 
-    # Selected positions for the N sampled points
-    point_positions = positions[splat_indices]
+        # Convert frame to timestep
+        timestep = get_timestep_from_frame(frame, image_dir=image_dir)
+        print(f"timestep: {timestep}")
+
+        proj_matrix, img_width, img_height = get_proj_matrix_from_timestep(
+            timestep, train_cameras, frame
+        )
+
+        # Prepare vision features for the timestep
+        vision_features = torch.tensor(splat_feats[timestep], dtype=torch.float32)
+
+        # Compute attentions
+        attn_out = extract_text_to_vision_attention(
+            model=model,
+            processor=processor,
+            vision_features=vision_features,
+            layers=layers,
+            prompt=prompt,
+            substring=substring,
+        )
+
+        scores: torch.Tensor = attn_out["scores"]  # (L, Q, N)
+        tokens = attn_out["tokens"]
+        query_token_indices = attn_out["query_token_indices"]
+        # vision_token_indices = attn_out["vision_token_indices"]  # equals [0..N-1] in our setup
+
+        # Selected positions for the N sampled points
+        point_positions = positions[splat_indices]
 
     # Init rerun sink to the existing file
     init_and_save_rerun(rerun_file)
@@ -204,30 +317,22 @@ def evaluate_spatial(clip: DictConfig, cfg: DictConfig, model, processor):
     )
 
 
-@hydra.main(config_path="conf", config_name="config.yaml", version_base="1.3")
-def main(cfg: DictConfig):
-    # triplets
-    for clip in tqdm(cfg.clips, desc="Evaluating triplets", unit="clip"):
+def evaluate_clip(clip: DictConfig, cfg: DictConfig):
+    """Run benchmark evaluations for a single clip using Hydra configs."""
+    if cfg.eval.triplets is not None:
         evaluate_triplets(clip, cfg)
 
-    # temporal
-    for clip in tqdm(cfg.clips, desc="Evaluating temporal", unit="clip"):
+    if cfg.eval.temporal is not None:
         evaluate_temporal(clip, cfg)
 
-    # spatial
-    if cfg.eval is not None and cfg.eval.spatial is not None:
-        # we cannot reuse the models from tiplet etc. because attention maps
-        # don't work with flash attention implementations
-        model_spatial, processor_spatial = get_patched_qwen_for_spatial_grounding(
-            use_bnb_4bit=cfg.feature_extraction.bnb_4bit,
-            use_bnb_8bit=cfg.feature_extraction.bnb_8bit,
-        )
-    for clip in tqdm(cfg.clips, desc="Evaluating spatial", unit="clip"):
-        evaluate_spatial(clip, cfg, model_spatial, processor_spatial)
-    if model_spatial is not None:
-        del model_spatial
-        del processor_spatial
-        torch.cuda.empty_cache()
+    if cfg.eval.spatial is not None:
+        evaluate_spatial(clip, cfg)
+
+
+@hydra.main(config_path="conf", config_name="config.yaml", version_base="1.3")
+def main(cfg: DictConfig):
+    for clip in tqdm(cfg.clips, desc="Evaluating clips", unit="clip"):
+        evaluate_clip(clip, cfg)
 
 
 if __name__ == "__main__":

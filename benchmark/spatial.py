@@ -66,6 +66,7 @@ def extract_text_to_vision_attention(
     )
 
     with torch.no_grad():
+        # Not generating any output tokens here
         outputs = model(
             **inputs,
             output_attentions=True,
