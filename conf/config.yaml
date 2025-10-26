@@ -11,8 +11,10 @@ defaults:
 cholec80_root: data/cholec80
 cholecseg8k_root: data/cholecseg8k
 cholect50_root: data/cholect50
-preprocessed_root: data/multiple_scenes/qwen3_${feature_extraction.use_qwen3}
-output_root: output/multiple_scenes/qwen3_${feature_extraction.use_qwen3}
+preprocessed_root: data/multiple
+output_root: output/multiple
+
+whole_pipeline_clips_sequentially: true  # do everything for each clip first if true, otherwise steps sequentially
 
 config_dumps:
   - ${preprocessed_root}/config.yaml

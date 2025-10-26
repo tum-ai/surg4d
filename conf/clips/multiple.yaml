@@ -1,21 +1,3 @@
-- name: video27_00480
-  video_id: 27 # those are constant over cholec80 derivatives
-  first_frame: 480 # inclusive
-  last_frame: 560 # exclusive
-  frame_stride: 1 # based on orignal cholec80 25 fps, make sure to hit 1fps t50 annotations with this
-
-- name: video01_00080
-  video_id: 1
-  first_frame: 80
-  last_frame: 160
-  frame_stride: 1
-
-- name: video01_16345
-  video_id: 1
-  first_frame: 16345
-  last_frame: 16425
-  frame_stride: 1
-
 - name: video17_01803
   video_id: 17
   first_frame: 1803
@@ -32,4 +14,22 @@
   video_id: 43
   first_frame: 787
   last_frame: 867
+  frame_stride: 1
+
+- name: video27_00480
+  video_id: 27 # those are constant over cholec80 derivatives
+  first_frame: 480 # inclusive
+  last_frame: 560 # exclusive
+  frame_stride: 1 # based on orignal cholec80 25 fps, make sure to hit 1fps t50 annotations with this
+
+- name: video01_00080
+  video_id: 1
+  first_frame: 80
+  last_frame: 160
+  frame_stride: 1
+
+- name: video01_16345
+  video_id: 1
+  first_frame: 16345
+  last_frame: 16425
   frame_stride: 1
