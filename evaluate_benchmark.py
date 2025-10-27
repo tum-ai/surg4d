@@ -158,8 +158,23 @@ def evaluate_temporal(clip: DictConfig, cfg: DictConfig):
 
     import json
 
-    with open(temporal_anno_file) as f:
-        temporal_data = json.load(f)
+    try:
+        with open(temporal_anno_file) as f:
+            temporal_data = json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"ERROR: Invalid JSON in temporal annotations file: {temporal_anno_file}")
+        print(f"JSON error: {e}")
+        print("Skipping temporal evaluation for this clip.")
+        return
+    except Exception as e:
+        print(f"ERROR: Could not load temporal annotations: {e}")
+        print("Skipping temporal evaluation for this clip.")
+        return
+
+    if "annotations" not in temporal_data or not temporal_data["annotations"]:
+        print(f"ERROR: No annotations found in {temporal_anno_file}")
+        print("Skipping temporal evaluation for this clip.")
+        return
 
     print(
         f"Loaded {len(temporal_data['annotations'])} temporal queries from {temporal_anno_file}"
@@ -348,8 +363,28 @@ def evaluate_spatial(clip: DictConfig, cfg: DictConfig):
         print("Skipping spatial evaluation for this clip.")
         return
 
-    with open(spatial_eval_file, "r") as f:
-        spatial_eval_data = json.load(f)
+    try:
+        with open(spatial_eval_file, "r") as f:
+            spatial_eval_data = json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"ERROR: Invalid JSON in spatial evaluation file: {spatial_eval_file}")
+        print(f"JSON error: {e}")
+        print("Skipping spatial evaluation for this clip.")
+        return
+    except Exception as e:
+        print(f"ERROR: Could not load spatial evaluation file: {e}")
+        print("Skipping spatial evaluation for this clip.")
+        return
+
+    if (
+        "spatial_prompts" not in spatial_eval_data
+        or "spatial_prompts_frames" not in spatial_eval_data
+    ):
+        print(f"ERROR: Invalid format in spatial evaluation file: {spatial_eval_file}")
+        print("Expected keys: 'spatial_prompts' and 'spatial_prompts_frames'")
+        print("Skipping spatial evaluation for this clip.")
+        return
+
     spatial_prompts = spatial_eval_data["spatial_prompts"]
     spatial_prompts_frames = spatial_eval_data["spatial_prompts_frames"]
 
