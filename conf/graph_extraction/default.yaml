@@ -7,6 +7,7 @@ iteration: -1
 opacity_threshold: 0.03
 inst_feat_norm_threshold: 0.03
 
+custom_cluster_metric: false # ! does not run on camp due to too little RAM
 clustering_weights:
   position: 1.0  # Weight spatial features more than instance features
   instance: 2.0  # Reduce this if instance features are poorly trained (e.g., 0.5 or 0.1)

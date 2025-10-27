@@ -1,4 +1,5 @@
 from sklearn.cluster import HDBSCAN
+from sklearn.metrics.pairwise import pairwise_distances
 import torch
 import argparse
 import numpy as np
@@ -216,37 +217,67 @@ def deform_at_timestep(gaussians: GaussianModel, timestep: float):
     return positions, lang_patch, lang_instance
 
 
+def cluster_distances(
+    norm_lf_at_timestep: List[np.ndarray],
+    positions_at_timestep: List[np.ndarray],
+    cfg: DictConfig,
+):
+    # ! UNTESTED, DOES NOT RUN ON CAMP MACHINE BECAUSE OF TOO LITTLE RAM
+    dist_matrix = 0
+    for norm_lf in norm_lf_at_timestep:
+        d_lf = 1 - (norm_lf @ norm_lf.T)
+        d_lf = (d_lf - d_lf.min()) / (d_lf.max() - d_lf.min())
+        dist_matrix = dist_matrix + d_lf * cfg.graph_extraction.clustering_weights.instance
+
+    for positions in positions_at_timestep:
+        d_pos = pairwise_distances(positions, positions, metric="euclidean")
+        d_pos = (d_pos - d_pos.min()) / (d_pos.max() - d_pos.min())
+        dist_matrix = dist_matrix + d_pos * cfg.graph_extraction.clustering_weights.position
+
+    return dist_matrix
+
+
 def cluster_gaussians(gaussians: GaussianModel, cfg: DictConfig):
-    # position
-    pos_through_time = np.concatenate(
-        [
-            normalize_indep_dim(
-                deform_at_timestep(gaussians, t)[0]
-            )
-            for t in [0.0, 0.5, 1.0]
-        ],
-        axis=-1,
-    )
-    pos_through_time /= 9
+    deformed_data = [deform_at_timestep(gaussians, t) for t in [0.0, 0.5, 1.0]]
+    if cfg.graph_extraction.custom_cluster_metric:
+        dist_matrix = cluster_distances(
+            norm_lf_at_timestep=[i[2] for i in deformed_data],
+            positions_at_timestep=[i[0] for i in deformed_data],
+            cfg=cfg,
+        )
+        clusters = HDBSCAN(
+            min_cluster_size=cfg.graph_extraction.cluster_min_size,
+            metric="precomputed",
+            min_samples=cfg.graph_extraction.cluster_min_samples,
+        ).fit_predict(dist_matrix)
+    else:
+        # position
+        pos_through_time = np.concatenate(
+            [
+                normalize_indep_dim(deform_at_timestep(gaussians, t)[0])
+                for t in [0.0, 0.5, 1.0]
+            ],
+            axis=-1,
+        )
+        pos_through_time /= 9
 
-    # instance language features
-    instance_features = gaussians.get_language_feature[:, 3:].detach().cpu().numpy()
-    instance_features /= np.linalg.norm(instance_features, axis=-1, keepdims=True)
-    instance_features = normalize_dep_dim(instance_features)
-    instance_features /= 3
+        # instance language features
+        _, _, instance_features = deform_at_timestep(gaussians, 0.5)
+        instance_features = normalize_dep_dim(instance_features)
+        instance_features /= 3
 
-    clustering_feats = np.concatenate(
-        [
-            cfg.graph_extraction.clustering_weights.position * pos_through_time,
-            cfg.graph_extraction.clustering_weights.instance * instance_features,
-        ],
-        axis=1,
-    )
-    clusters = HDBSCAN(
-        min_cluster_size=cfg.graph_extraction.cluster_min_size,
-        metric=cfg.graph_extraction.cluster_metric,
-        min_samples=cfg.graph_extraction.cluster_min_samples,
-    ).fit_predict(clustering_feats)
+        clustering_feats = np.concatenate(
+            [
+                cfg.graph_extraction.clustering_weights.position * pos_through_time,
+                cfg.graph_extraction.clustering_weights.instance * instance_features,
+            ],
+            axis=1,
+        )
+        clusters = HDBSCAN(
+            min_cluster_size=cfg.graph_extraction.cluster_min_size,
+            metric=cfg.graph_extraction.cluster_metric,
+            min_samples=cfg.graph_extraction.cluster_min_samples,
+        ).fit_predict(clustering_feats)
 
     return clusters
 
