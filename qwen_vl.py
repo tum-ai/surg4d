@@ -164,12 +164,12 @@ def square_crop_image(image: Image.Image, xslide=0, yslide=0):
 
 
 def get_patched_qwen(
-    use_bnb_4bit: bool = True,
+    use_bnb_4bit: bool = False,
     use_bnb_8bit: bool = False,
     attn_implementation: str = "sdpa",  # "flash_attention_2" or "sdpa"
     torch_dtype: torch.dtype = torch.bfloat16,
     device_map: Union[str, Dict[str, str]] = "auto",
-    max_memory: Optional[Dict[str, str]] = {0: "18.0GB", "cpu": "46.0GB"},
+    max_memory: Optional[Dict[str, str]] = None,
 ):
     """Get a monkey-patched Qwen2_5_VL model/processor that supports raw patch features.
 
@@ -471,9 +471,10 @@ def generate_with_vision_features(
     return response
 
 
-def prompt_with_graph(
+def prompt_with_static_graph(
     question: str,
-    node_feats: List[np.ndarray],
+    node_feats: np.lib.npyio.NpzFile,
+    node_feats_timestep_idx: int,
     adjacency_matrices: np.ndarray,
     node_centers: np.ndarray,
     node_centroids: np.ndarray,
@@ -482,13 +483,28 @@ def prompt_with_graph(
     processor: Qwen2_5_VLProcessor,
     system_prompt: str = None,
 ):
-    assert all(len(feat.shape) == 2 for feat in node_feats), "node_feats must be list of tensors with shape (n_features, dim_feature)"
+    """
+    node_feats: np.lib.npyio.NpzFile - npz file containing node features for each timestep
+    node_feats_timestep_idx: int - index of the timestep to use for the node features
+    adjacency_matrices: np.ndarray - adjacency matrices through time - weights are bhattacharyya coefficients (timesteps, n_clusters, n_clusters)
+    node_centers: np.ndarray - cluster centers through time (timesteps, n_clusters, 3)
+    node_centroids: np.ndarray - cluster centroids through time (timesteps, n_clusters, 3)
+    node_extents: np.ndarray - cluster extents through time (timesteps, n_clusters, 3)
+    model: Qwen2_5_VLForConditionalGeneration - model to use
+    processor: Qwen2_5_VLProcessor - processor to use
+    system_prompt: str - system prompt to use
+    """
     assert (
         len(adjacency_matrices)
         == len(node_centers)
         == len(node_centroids)
         == len(node_extents)
     ), "timestep mismatch"
+
+    # node feat indices correspond to cluster ids
+    node_feat_indices = sorted(list(node_feats.keys()), key=lambda x: int(x))
+    node_feats = [node_feats[idx] for idx in node_feat_indices]
+    node_feats = [i[node_feats_timestep_idx] for i in node_feats]
 
     if system_prompt is None:
         system_prompt = """
@@ -610,9 +626,6 @@ def prompt_with_graph(
     with open("qwen_messages.json", "w") as fp:
         json.dump(messages, fp)
 
-    # print(f"messages: {messages}")
-    print(f"shape of node_feats: {len(node_feats)}")
-
     return generate_with_vision_features(
         messages=messages,
         vision_features=[torch.Tensor(f) for f in node_feats],
@@ -625,7 +638,7 @@ def prompt_with_graph(
 
 def prompt_with_dynamic_graph(
     question: str,
-    node_feats: List[np.ndarray],
+    node_feats: np.lib.npyio.NpzFile,
     adjacency_matrices: np.ndarray,
     node_centers: np.ndarray,
     node_centroids: np.ndarray,
@@ -634,16 +647,16 @@ def prompt_with_dynamic_graph(
     processor: Qwen2_5_VLProcessor,
     system_prompt: str,
 ):
-    assert all(len(feat.shape) == 3 for feat in node_feats), "node_feats must be list of tensors with shape (n_timesteps, n_features, dim_feature)"
     assert (
         len(adjacency_matrices)
         == len(node_centers)
         == len(node_centroids)
         == len(node_extents)
     ), "timestep mismatch"
-    object_content = []
-    for i in range(len(node_feats)):
-        object_content.extend([])
+
+    # node feat indices correspond to cluster ids
+    node_feat_indices = sorted(list(node_feats.keys()), key=lambda x: int(x))
+    node_feats = [node_feats[idx] for idx in node_feat_indices]
 
     graph_content = []
     for t in range(len(adjacency_matrices)):
@@ -713,9 +726,6 @@ def prompt_with_dynamic_graph(
             "role": "user",
             "content": [
                 {"type": "text", "text": "<scene-graph>\n"},
-                {"type": "text", "text": "<objects>\n"},
-                *object_content,
-                {"type": "text", "text": "</objects>\n"},
                 {"type": "text", "text": "<spatial-graphs>\n"},
                 *graph_content,
                 {"type": "text", "text": "</spatial-graphs>\n"},
@@ -731,12 +741,9 @@ def prompt_with_dynamic_graph(
     with open("qwen_messages.json", "w") as fp:
         json.dump(messages, fp)
 
-    # print(f"messages: {messages}")
-    print(f"shape of node_feats: {len(node_feats)}")
-
     feature_list = []
-    for t in range(len(node_feats)):
-        for n in range(node_feats[t].shape[0]):
+    for n in range(len(node_feats)):
+        for t in range(node_feats[n].shape[0]):
             feature_list.append(torch.Tensor(node_feats[n][t]))
 
     # TODO include l2 distances on edges as well

@@ -19,7 +19,7 @@ from typing import List, Dict, Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from benchmark.benchmark_config import BenchmarkConfig
-from qwen_vl import get_patched_qwen, prompt_with_graph
+from qwen_vl import get_patched_qwen, prompt_with_static_graph
 from qwen_vl_utils import process_vision_info
 
 #TODO: change "field of view" query focus for video01_16345 (does not make sense for graph)
@@ -318,7 +318,7 @@ class TemporalFrameEvaluator:
             return self._query_multiframe(image_paths, prompt)
         
         # Use existing prompt_with_graph from qwen_vl.py
-        response = prompt_with_graph(
+        response = prompt_with_static_graph(
             node_feats=graph_data['node_feats'],
             adjacency_matrices=graph_data['adjacency_matrices'],
             node_centers=graph_data['node_centers'],
