@@ -1,5 +1,5 @@
 defaults:
-  - clips: dynamic_2grasper
+  - clips: high_interaction
   - preprocessing: default
   - feature_extraction: qwen25
   - autoencoder: qwen25
@@ -18,8 +18,10 @@ skip_eval: true
 cholec80_root: data/cholec80
 cholecseg8k_root: data/cholecseg8k
 cholect50_root: data/cholect50
-preprocessed_root: data/scene_good_on_qwen2_5
-output_root: output/scene_good_on_qwen2_5
+preprocessed_root: data/preprocessed_high_interaction_single_frame_pc
+output_root: output/high_interaction_single_frame_pc/dl_True
+
+whole_pipeline_clips_sequentially: true
 
 config_dumps:
   - ${output_root}/config.yaml

@@ -1,7 +1,4 @@
-graph_subdir: ${graph_extraction.graph_output_subdir}
-
-# Layers to extract text->vision attentions from (indices into transformer blocks)
 layers: [14, 16, 18, 20, 22]
-
-# Optional matplotlib colormap for heatmaps
 colormap: "jet"
+use_bnb_4bit: false
+use_bnb_8bit: false

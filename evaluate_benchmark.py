@@ -11,6 +11,7 @@ from benchmark.temporal_evaluator import TemporalFrameEvaluator
 from benchmark.spatial import (
     get_patched_qwen_for_spatial_grounding,
     extract_text_to_vision_attention,
+    get_proj_matrix_from_timestep,
 )
 from rerun_utils import (
     init_and_save_rerun,
@@ -20,15 +21,10 @@ from rerun_utils import (
 import numpy as np
 import torch
 
-# rerun is used via helper functions imported from rerun_utils
-
 import json
-from scene.dataset_readers import readColmapSceneInfo, CameraInfo
-from scene.cameras import Camera
 import os
 
-import matplotlib.pyplot as plt
-import cv2
+from scene.dataset_readers import readColmapSceneInfo
 
 
 def _build_benchmark_config(cfg: DictConfig, clip: DictConfig) -> BenchmarkConfig:
@@ -45,14 +41,7 @@ def _build_benchmark_config(cfg: DictConfig, clip: DictConfig) -> BenchmarkConfi
     clip_name = str(clip.name)
     video_dir = preprocessed_root / clip_name
 
-    # Get path configuration from eval config (with defaults)
-    images_subdir = "images"
-    graph_subdir = "graph"
-    if cfg.get("eval") is not None and cfg.eval.get("paths") is not None:
-        images_subdir = cfg.eval.paths.get("images_subdir", "images")
-        graph_subdir = cfg.eval.paths.get("graph_subdir", "graph")
-
-    graph_dir = output_root / clip_name / graph_subdir
+    graph_dir = output_root / clip_name / cfg.eval.paths.graph_subdir
 
     # Convert nested eval configs (OmegaConf) to plain dicts
     triplets_cfg = None
@@ -79,8 +68,8 @@ def _build_benchmark_config(cfg: DictConfig, clip: DictConfig) -> BenchmarkConfi
         results_dir=output_root / "benchmark",
         video_dir=video_dir,
         graph_dir=graph_dir,
-        images_subdir=images_subdir,
-        graph_subdir=graph_subdir,
+        images_subdir=cfg.eval.paths.images_subdir,
+        graph_subdir=cfg.eval.paths.graph_subdir,
         model_name="qwen",
         qwen_version=qwen_version,
         use_4bit_quantization=use_4bit,
@@ -96,9 +85,9 @@ def evaluate_triplets(clip: DictConfig, cfg: DictConfig):
     if triplets_cfg is None:
         return
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"TRIPLETS EVALUATION: {clip.name}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     try:
         selector = TripletsFrameSelector(bench_cfg)
@@ -117,7 +106,8 @@ def evaluate_triplets(clip: DictConfig, cfg: DictConfig):
 
     evaluator = TripletsFrameEvaluator(bench_cfg)
     results = evaluator.run_ablation_study(
-        samples, ablations=bench_cfg.triplets_config["ablations"]  # type: ignore[index]
+        samples,
+        ablations=bench_cfg.triplets_config["ablations"],  # type: ignore[index]
     )
 
     # Save to required output dir
@@ -136,9 +126,9 @@ def evaluate_temporal(clip: DictConfig, cfg: DictConfig):
     if temporal_cfg is None:
         return
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"TEMPORAL EVALUATION: {clip.name}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     # Check if clip has temporal annotations specified
     if not hasattr(clip, "temporal_eval_file") or clip.temporal_eval_file is None:
@@ -210,74 +200,6 @@ def get_timestep_from_frame(frame: str, image_dir: Path) -> int:
     return timestep
 
 
-def get_proj_matrix_from_timestep(
-    timestep: int, train_cameras: list, frame: str
-) -> torch.Tensor:
-    # Get the camera parameters for the timestep
-    camera_info = train_cameras[timestep]
-    assert isinstance(
-        camera_info, CameraInfo
-    ), "camera_info must be a CameraInfo object"
-
-    # Instantiate a Camera object from the camera info
-    image = camera_info.image
-    R = camera_info.R
-    T = camera_info.T
-    FovX = camera_info.FovX
-    FovY = camera_info.FovY
-    time = camera_info.time
-    mask = camera_info.mask
-    camera = Camera(
-        colmap_id=timestep,
-        R=R,
-        T=T,
-        FoVx=FovX,
-        FoVy=FovY,
-        image=image,
-        gt_alpha_mask=None,
-        image_name=f"{frame}",
-        uid=timestep,
-        data_device=torch.device("cuda"),
-        time=time,
-        mask=mask,
-    )
-
-    # Get projection matrix from camera object
-    # full_proj_transform includes the world to cam as well, seems to be correct
-    # projection_matrix = camera.projection_matrix
-    full_proj_matrix = camera.full_proj_transform
-    return full_proj_matrix, camera.image_width, camera.image_height
-
-
-def project_3d_to_2d(
-    positions: np.ndarray, proj_matrix: torch.Tensor, img_width: int, img_height: int
-) -> np.ndarray:
-    # Expecting positions to be (N, 3)
-    assert positions.shape[1] == 3, "Positions must be (N, 3)"
-
-    # Conver to homogeneous coordinates
-    ones = torch.ones(
-        positions.shape[0], 1, dtype=positions.dtype, device=positions.device
-    )
-    positions = torch.cat([positions, ones], dim=1)  # (N, 4)
-
-    # Apply full projection transform: world to image space
-    # Apparently full_proj_transform is transposed, seems to be correct
-    coords = (proj_matrix.T @ positions.T).T  # (N, 4)
-
-    # Perspective division to get NDC (Normalized Device Coordinates)
-    w = coords[:, 3]
-    ndc = coords[:, :3] / (w.unsqueeze(1) + 1e-7)  # (N, 3) [x, y, z] in [-1, 1]
-
-    # Convert NDC to pixel coordinates
-    # NDC: x, y in [-1, 1] → Pixel: u in [0, width], v in [0, height]
-    pixels_x = (ndc[:, 0] + 1.0) * 0.5 * img_width
-    pixels_y = (ndc[:, 1] + 1.0) * 0.5 * img_height
-
-    pixels = np.stack([pixels_x, pixels_y], axis=-1)  # (N, 2)
-    return pixels
-
-
 def evaluate_spatial(clip: DictConfig, cfg: DictConfig):
     """Compute text-to-vision attention over sampled scene points and log heatmaps to rerun.
 
@@ -303,15 +225,9 @@ def evaluate_spatial(clip: DictConfig, cfg: DictConfig):
     if cfg.eval is None or cfg.eval.spatial is None:
         return
 
-    bench_cfg = _build_benchmark_config(cfg, clip)
-    spatial_cfg = bench_cfg.spatial_config
-    assert spatial_cfg is not None, "cfg.eval.spatial must be provided"
-    if spatial_cfg is None:
-        return
-
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"SPATIAL EVALUATION: {clip.name}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     # Check if clip has spatial evaluation file specified
     if not hasattr(clip, "spatial_eval_file") or clip.spatial_eval_file is None:
@@ -322,9 +238,7 @@ def evaluate_spatial(clip: DictConfig, cfg: DictConfig):
         )
         return
 
-    # Use configured graph_subdir or fall back to the one in spatial_cfg if specified
-    graph_subdir = spatial_cfg.get("graph_subdir", bench_cfg.graph_subdir)
-    graph_dir = bench_cfg.output_root / clip.name / graph_subdir
+    graph_dir = Path(cfg.output_root) / clip.name / cfg.eval.paths.graph_subdir
 
     # Load required artifacts
     splat_feats_path = graph_dir / "splat_spatial_grounding_feats.npy"
@@ -352,9 +266,7 @@ def evaluate_spatial(clip: DictConfig, cfg: DictConfig):
 
     splat_feats = np.load(splat_feats_path)  # (T, N, D)
     splat_indices = np.load(splat_indices_path)  # (N,)
-    positions = np.load(positions_path)  # (M, 3), filtered gaussians
-
-    T, N, D = splat_feats.shape
+    positions = np.load(positions_path)  # (T, N, 3)
 
     # Get spatial eval data from file
     spatial_eval_file = Path(clip.spatial_eval_file)
@@ -388,20 +300,13 @@ def evaluate_spatial(clip: DictConfig, cfg: DictConfig):
     spatial_prompts = spatial_eval_data["spatial_prompts"]
     spatial_prompts_frames = spatial_eval_data["spatial_prompts_frames"]
 
-    # Basic spatial eval setup
-    layers = list(map(int, spatial_cfg["layers"]))
-    cmap_name = str(spatial_cfg["colormap"])  # required
-
     # Compute relevant dirs from cfg
-    colmap_root = os.path.join(cfg.preprocessed_root, clip.name)
-    image_dir = os.path.join(cfg.preprocessed_root, clip.name, bench_cfg.images_subdir)
+    colmap_root = Path(cfg.preprocessed_root) / clip.name
+    image_dir = Path(cfg.preprocessed_root) / clip.name / cfg.eval.paths.images_subdir
 
     # Check if image directory exists
     if not Path(image_dir).exists():
         print(f"ERROR: Images directory not found: {image_dir}")
-        print(
-            f"Expected structure: {cfg.preprocessed_root}/{clip.name}/{bench_cfg.images_subdir}/"
-        )
         print("Skipping spatial evaluation due to missing data.")
         return
 
@@ -418,9 +323,9 @@ def evaluate_spatial(clip: DictConfig, cfg: DictConfig):
         return
 
     # Load patched model with attentions enabled
-    use_4bit = bench_cfg.use_4bit_quantization
     model, processor = get_patched_qwen_for_spatial_grounding(
-        use_bnb_4bit=use_4bit, use_bnb_8bit=False
+        use_bnb_4bit=cfg.eval.spatial.use_bnb_4bit,
+        use_bnb_8bit=cfg.eval.spatial.use_bnb_8bit,
     )
 
     for prompt, frame in zip(spatial_prompts, spatial_prompts_frames):
@@ -443,7 +348,7 @@ def evaluate_spatial(clip: DictConfig, cfg: DictConfig):
             model=model,
             processor=processor,
             vision_features=vision_features,
-            layers=layers,
+            layers=cfg.eval.spatial.layers,
             prompt=prompt,
             substring=substring,
         )
@@ -470,11 +375,11 @@ def evaluate_spatial(clip: DictConfig, cfg: DictConfig):
     log_spatial_grounding_heatmaps(
         base_path="spatial_grounding",
         positions=point_positions,
-        layers=layers,
+        layers=cfg.eval.spatial.layers,
         tokens=tokens,
         query_token_indices=query_token_indices,
         scores=scores.detach().cpu().numpy(),
-        cmap_name=cmap_name,
+        cmap_name=cfg.eval.spatial.colormap,
         timestep=timestep,
     )
 

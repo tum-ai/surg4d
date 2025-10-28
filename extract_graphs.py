@@ -222,7 +222,6 @@ def cluster_distances(
     positions_at_timestep: List[np.ndarray],
     cfg: DictConfig,
 ):
-    # ! UNTESTED, DOES NOT RUN ON CAMP MACHINE BECAUSE OF TOO LITTLE RAM
     dist_matrix = 0
     for norm_lf in norm_lf_at_timestep:
         d_lf = 1 - (norm_lf @ norm_lf.T)
@@ -888,7 +887,6 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
         )  # instance latents through time (timesteps, n_filtered_gaussians, lang_dim)
 
         np.save(out / "opacities.npy", gaussians._opacity.detach().cpu().numpy())
-        np.save(out / "positions.npy", gaussians.get_xyz.detach().cpu().numpy())
         np.save(out / "colors.npy", gaussians.get_features.detach().cpu().numpy())
 
     cluster_feats_dict = {}
@@ -933,11 +931,8 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
     np.savez(
         out / "cluster_spatial_grounding_indices.npz", **cluster_indices
     )  # (cluster_id -> (n_feats,)) (ATTENTION: indices are into cluster gaussians, not the whole splat)
+    np.save(out / "positions.npy", pos_through_time) # (T, n_filtered_gaussians, 3)
     np.save(out / "clusters.npy", clusters)  # (n_filtered_gaussians,)
-    filtered_scene_dir = out / "filtered_scene"
-    filtered_scene_dir.mkdir(parents=True, exist_ok=True)
-    gaussians.save_ply(filtered_scene_dir / "point_cloud.ply")
-    gaussians.save_deformation(filtered_scene_dir)
 
     # Visualize to rerun
     rr.init("clusters")

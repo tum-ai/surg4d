@@ -1,8 +1,11 @@
 import torch
+import numpy as np
 from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLProcessor
 from typing import List
 
 import qwen_vl
+from scene.dataset_readers import CameraInfo
+from scene.cameras import Camera
 
 
 def get_patched_qwen_for_spatial_grounding(
@@ -126,3 +129,71 @@ def extract_text_to_vision_attention(
         "query_token_indices": query_token_indices,
         "vision_token_indices": vision_token_indices,
     }
+
+def project_3d_to_2d(
+    positions: np.ndarray, proj_matrix: torch.Tensor, img_width: int, img_height: int
+) -> np.ndarray:
+    # Expecting positions to be (N, 3)
+    assert positions.shape[1] == 3, "Positions must be (N, 3)"
+
+    # Conver to homogeneous coordinates
+    ones = torch.ones(
+        positions.shape[0], 1, dtype=positions.dtype, device=positions.device
+    )
+    positions = torch.cat([positions, ones], dim=1)  # (N, 4)
+
+    # Apply full projection transform: world to image space
+    # Apparently full_proj_transform is transposed, seems to be correct
+    coords = (proj_matrix.T @ positions.T).T  # (N, 4)
+
+    # Perspective division to get NDC (Normalized Device Coordinates)
+    w = coords[:, 3]
+    ndc = coords[:, :3] / (w.unsqueeze(1) + 1e-7)  # (N, 3) [x, y, z] in [-1, 1]
+
+    # Convert NDC to pixel coordinates
+    # NDC: x, y in [-1, 1] → Pixel: u in [0, width], v in [0, height]
+    pixels_x = (ndc[:, 0] + 1.0) * 0.5 * img_width
+    pixels_y = (ndc[:, 1] + 1.0) * 0.5 * img_height
+
+    pixels = np.stack([pixels_x, pixels_y], axis=-1)  # (N, 2)
+    return pixels
+
+def get_proj_matrix_from_timestep(
+    timestep: int, train_cameras: list, frame: str
+) -> torch.Tensor:
+    # Get the camera parameters for the timestep
+    camera_info = train_cameras[timestep]
+    assert isinstance(
+        camera_info, CameraInfo
+    ), "camera_info must be a CameraInfo object"
+
+    # Instantiate a Camera object from the camera info
+    image = camera_info.image
+    R = camera_info.R
+    T = camera_info.T
+    FovX = camera_info.FovX
+    FovY = camera_info.FovY
+    time = camera_info.time
+    mask = camera_info.mask
+    camera = Camera(
+        colmap_id=timestep,
+        R=R,
+        T=T,
+        FoVx=FovX,
+        FoVy=FovY,
+        image=image,
+        gt_alpha_mask=None,
+        image_name=f"{frame}",
+        uid=timestep,
+        data_device=torch.device("cuda"),
+        time=time,
+        mask=mask,
+    )
+
+    # Get projection matrix from camera object
+    # full_proj_transform includes the world to cam as well, seems to be correct
+    # projection_matrix = camera.projection_matrix
+    full_proj_matrix = camera.full_proj_transform
+    return full_proj_matrix, camera.image_width, camera.image_height
+
+

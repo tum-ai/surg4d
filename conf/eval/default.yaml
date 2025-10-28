@@ -22,7 +22,7 @@ paths:
   images_subdir: "images"
   
   # Subdirectory within output clip dir that contains graph data
-  graph_subdir: "graph"
+  graph_subdir: ${graph_extraction.graph_output_subdir}
   
   # Can override these per evaluation type if needed
   # e.g., different graph subdirs for different ablations
