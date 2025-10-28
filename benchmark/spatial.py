@@ -1,10 +1,12 @@
+from pathlib import Path
+from omegaconf import DictConfig
 import torch
 import numpy as np
 from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLProcessor
 from typing import List
 
 import qwen_vl
-from scene.dataset_readers import CameraInfo
+from scene.dataset_readers import CameraInfo, readColmapSceneInfo
 from scene.cameras import Camera
 
 
@@ -130,6 +132,7 @@ def extract_text_to_vision_attention(
         "vision_token_indices": vision_token_indices,
     }
 
+
 def project_3d_to_2d(
     positions: np.ndarray, proj_matrix: torch.Tensor, img_width: int, img_height: int
 ) -> np.ndarray:
@@ -137,8 +140,9 @@ def project_3d_to_2d(
     assert positions.shape[1] == 3, "Positions must be (N, 3)"
 
     # Conver to homogeneous coordinates
+    positions = torch.tensor(positions, device=proj_matrix.device, dtype=proj_matrix.dtype)
     ones = torch.ones(
-        positions.shape[0], 1, dtype=positions.dtype, device=positions.device
+        (positions.shape[0], 1), dtype=positions.dtype, device=positions.device
     )
     positions = torch.cat([positions, ones], dim=1)  # (N, 4)
 
@@ -158,14 +162,15 @@ def project_3d_to_2d(
     pixels = np.stack([pixels_x, pixels_y], axis=-1)  # (N, 2)
     return pixels
 
+
 def get_proj_matrix_from_timestep(
     timestep: int, train_cameras: list, frame: str
 ) -> torch.Tensor:
     # Get the camera parameters for the timestep
     camera_info = train_cameras[timestep]
-    assert isinstance(
-        camera_info, CameraInfo
-    ), "camera_info must be a CameraInfo object"
+    assert isinstance(camera_info, CameraInfo), (
+        "camera_info must be a CameraInfo object"
+    )
 
     # Instantiate a Camera object from the camera info
     image = camera_info.image
@@ -197,3 +202,120 @@ def get_proj_matrix_from_timestep(
     return full_proj_matrix, camera.image_width, camera.image_height
 
 
+def splat_predict_query_list(
+    queries_list,
+    *,
+    model,
+    processor,
+    ts_feats,
+    pos_t,
+    layers,
+    top_k,
+    frame_number,
+    clip_name: str,
+    train_cameras,
+    prompt_template: str,
+):
+    outputs = []
+    for query in queries_list:
+        substring = query["query"]
+        prompt = prompt_template.format(substring=substring)
+        attn_out = extract_text_to_vision_attention(
+            model=model,
+            processor=processor,
+            vision_features=torch.tensor(ts_feats, device=model.device),
+            layers=layers,
+            prompt=prompt,
+            substring=substring,
+        )
+        attn_scores = attn_out["scores"]
+
+        out_item = {"query": substring, "predictions": {}}
+        for layer_idx, layer in enumerate(layers):
+            layer_scores = attn_scores[layer_idx]
+            layer_scores = layer_scores.mean(dim=0)
+            top_scores, top_indices = layer_scores.topk(k=top_k, sorted=True)
+            top_scores = top_scores.detach().cpu().numpy()
+            top_indices = top_indices.detach().cpu().numpy()
+
+            top_positions = pos_t[top_indices]
+
+            frame_name = f"{clip_name}_{frame_number:06d}.jpg"
+            proj_matrix, img_width, img_height = get_proj_matrix_from_timestep(
+                frame_number, train_cameras, frame_name
+            )
+            top_pixels = project_3d_to_2d(
+                top_positions, proj_matrix, img_width, img_height
+            )
+
+            out_item["predictions"][layer] = {
+                "scores": top_scores.tolist(),
+                "pixel_coords": top_pixels.tolist(),
+                "positions": top_positions.tolist(),
+            }
+        outputs.append(out_item)
+    return outputs
+
+
+def splat_feat_queries(
+    model,
+    processor,
+    splat_feats,
+    splat_indices,
+    positions,
+    clip_gt,
+    clip: DictConfig,
+    cfg: DictConfig,
+):
+    # load cameras
+    scene_info = readColmapSceneInfo(
+        Path(cfg.preprocessed_root) / clip.name, images=None, eval=False
+    )
+    train_cameras = scene_info.train_cameras
+
+    # positions are (T, N, 3); we'll subset per-timestep inside the loop
+
+    results = {}
+    for timestep, timestep_queries in clip_gt.items():
+        t = int(timestep)
+        ts_feats = splat_feats[t]
+        # Subset positions for this timestep and the chosen splat indices
+        pos_t = positions[t][splat_indices]
+
+        # Prepare grouped containers matching GT schema
+        results[timestep] = {"objects": [], "actions": []}
+
+        layers = cfg.eval.spatial.layers
+        top_k = cfg.eval.spatial.top_k_scores
+        frame_number = timestep_queries["frame_number"]
+        prompt_template = cfg.eval.spatial.splat_prompt_template
+
+        results[timestep]["objects"] = splat_predict_query_list(
+            timestep_queries.get("objects", []),
+            model=model,
+            processor=processor,
+            ts_feats=ts_feats,
+            pos_t=pos_t,
+            layers=layers,
+            top_k=top_k,
+            frame_number=frame_number,
+            clip_name=clip.name,
+            train_cameras=train_cameras,
+            prompt_template=prompt_template,
+        )
+
+        results[timestep]["actions"] = splat_predict_query_list(
+            timestep_queries.get("actions", []),
+            model=model,
+            processor=processor,
+            ts_feats=ts_feats,
+            pos_t=pos_t,
+            layers=layers,
+            top_k=top_k,
+            frame_number=frame_number,
+            clip_name=clip.name,
+            train_cameras=train_cameras,
+            prompt_template=prompt_template,
+        )
+
+    return results

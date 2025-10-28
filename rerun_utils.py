@@ -486,3 +486,95 @@ def log_spatial_grounding_heatmaps(
             cmap_name=cmap_name,
             timestep=timestep,
         )
+
+
+def log_spatial_predictions(
+    base_path: str,
+    clip_name: str,
+    positions_through_time: np.ndarray,
+    results: dict,
+    cmap_name: str = "jet",
+):
+    """Visualize spatial grounding predictions.
+
+    Expects grouped results per timestep: {"objects": [...], "actions": [...]}.
+    Logs, per timestep, a base point cloud for context and per-query, per-layer
+    top-k predictions colored by score under .../objects/... and .../actions/....
+
+    Args:
+        base_path: Root entity path under which to log heatmaps.
+        clip_name: Name of the clip; used to namespace logs.
+        positions_through_time: Array of shape (T, N, 3) or (N, 3) with point positions.
+        results: Grouped prediction dict as produced by splat_feat_queries.
+        cmap_name: Matplotlib colormap name.
+    """
+    for timestep_key, queries in results.items():
+        try:
+            timestep_int = int(timestep_key)
+        except Exception:
+            timestep_int = timestep_key  # type: ignore[assignment]
+
+        # Choose positions for this timestep; support (T, N, 3) and (N, 3)
+        try:
+            point_positions = positions_through_time[timestep_int]
+        except Exception:
+            point_positions = positions_through_time
+
+        # Base point cloud for context
+        log_basic_points(
+            entity_path=f"{base_path}/{clip_name}/t{int(timestep_int):06d}/base_points",
+            positions=point_positions,
+            color=[180, 180, 180],
+            timestep=int(timestep_int),
+        )
+
+        # Support only grouped (dict with objects/actions) format
+        assert isinstance(queries, dict), "log_spatial_predictions expects grouped results (dict with 'objects' and 'actions')."
+        log_spatial_query_group(
+            base_path=base_path,
+            clip_name=clip_name,
+            timestep_int=int(timestep_int),
+            group_name="objects",
+            query_list=queries.get("objects", []),
+            cmap_name=cmap_name,
+        )
+        log_spatial_query_group(
+            base_path=base_path,
+            clip_name=clip_name,
+            timestep_int=int(timestep_int),
+            group_name="actions",
+            query_list=queries.get("actions", []),
+            cmap_name=cmap_name,
+        )
+
+
+def log_spatial_query_group(
+    *,
+    base_path: str,
+    clip_name: str,
+    timestep_int: int,
+    group_name: str | None,
+    query_list: list,
+    cmap_name: str,
+):
+    prefix = f"{base_path}/{clip_name}/t{int(timestep_int):06d}/"
+    if group_name:
+        prefix = f"{prefix}{group_name}/"
+    for qidx, qitem in enumerate(query_list):
+        qname = qitem.get("query", f"query_{qidx}")
+        preds = qitem.get("predictions", {})
+        for layer_idx, pred in preds.items():
+            layer_str = str(layer_idx)
+            pos_arr = np.array(pred.get("positions", []), dtype=float)
+            score_arr = np.array(pred.get("scores", []), dtype=float)
+            if pos_arr.size == 0 or score_arr.size == 0:
+                continue
+            score_arr = score_arr.reshape(-1)
+            log_scalar_values_over_points(
+                entity_path=f"{prefix}{qname}/layer_{layer_str}",
+                positions=pos_arr,
+                values=score_arr,
+                labels=[f"{qname}:{float(s):.4f}" for s in score_arr],
+                cmap_name=cmap_name,
+                timestep=int(timestep_int),
+            )
