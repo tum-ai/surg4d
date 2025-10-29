@@ -17,6 +17,7 @@ def compute_spatial_metrics(cfg: DictConfig):
     aggregated_file.parent.mkdir(parents=True, exist_ok=True)
 
     ks: list[int] = list(cm_cfg.l2_top_ks)
+    layers_filter = {str(layer_idx) for layer_idx in cm_cfg.layers}
 
     methods = ["splat", "static_graph", "frame_attn"]
 
@@ -98,6 +99,8 @@ def compute_spatial_metrics(cfg: DictConfig):
                         per_layer_out: dict[str, dict[str, float]] = {}
                         for layer_key, layer_pred in preds_by_layer.items():
                             lkey = str(layer_key)
+                            if lkey not in layers_filter:
+                                continue
                             coords = np.array(layer_pred.get("pixel_coords", []), dtype=np.float64)
                             vals = _min_l2_at_k(coords, gt_xy)
                             per_layer_out[lkey] = {f"min_l2@{k}": float(v) for k, v in zip(ks, vals.tolist())}
@@ -158,14 +161,14 @@ def compute_spatial_metrics(cfg: DictConfig):
         # Save per-clip file with query-wise metrics
         clip_out = {
             "clip": clip_name,
-            "config": {"l2_top_ks": ks},
+            "config": {"l2_top_ks": ks, "layers": sorted(list(layers_filter), key=lambda x: int(x))},
             "methods": per_clip_results,
         }
         with (out_dir / f"{clip_name}.json").open("w") as f:
             json.dump(clip_out, f, indent=2)
 
     # Save dataset-wide summary
-    summary = {"config": {"l2_top_ks": ks}, "methods": {}}
+    summary = {"config": {"l2_top_ks": ks, "layers": sorted(list(layers_filter), key=lambda x: int(x))}, "methods": {}}
     for method in methods:
         if method not in dataset_stats:
             continue
@@ -188,7 +191,7 @@ def compute_spatial_metrics(cfg: DictConfig):
         summary["methods"][method] = out_m
 
     with aggregated_file.open("w") as f:
-        json.dump({"summary": summary, "config": {"l2_top_ks": ks}}, f, indent=2)
+        json.dump({"summary": summary, "config": {"l2_top_ks": ks, "layers": sorted(list(layers_filter), key=lambda x: int(x))}}, f, indent=2)
 
 def compute_temporal_metrics(cfg: DictConfig):
     if cfg.compute_metrics.temporal is None:
