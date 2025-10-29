@@ -14,3 +14,4 @@ preprocess/preprocess_result
 outputs/
 multirun/
 benchmark/results/
+labeling/clips/

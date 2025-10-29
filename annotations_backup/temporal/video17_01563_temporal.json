@@ -1,0 +1,34 @@
+{
+  "clip_info": {
+    "clip_name": "video17_01563",
+    "num_frames": 20,
+    "annotation_instructions": "Add temporal queries below. Each query should have a unique query_id."
+  },
+  "annotations": [
+    {
+      "query_id": "video17_01563_q1",
+      "query_type": "action_onset",
+      "question": "When does the grasper let go of the gallbladder?",
+      "answer_format": "Frame X",
+      "ground_truth": {
+        "frame": 11
+      },
+      "notes": "Optional: Add notes about this annotation"
+    },
+    {
+      "query_id": "video17_01563_q2",
+      "query_type": "action_duration",
+      "question": "During which frames is tissue being grasped?",
+      "answer_format": "Frames X-Y (or multiple ranges: X-Y, A-B)",
+      "ground_truth": {
+        "ranges": [
+          [
+            0,
+            10
+          ]
+        ]
+      },
+      "notes": "Use multiple ranges if action happens multiple times"
+    }
+  ]
+}

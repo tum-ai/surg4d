@@ -68,7 +68,7 @@ class CholecT50Loader:
             triplet = {
                 'triplet_id': int(triplet_id),
                 # 'triplet_name': categories['triplet'][str(int(triplet_id))],
-                'instrument': 'null_instrument',
+                'instrument': categories['instrument'][str(int(instrument_id))],
                 'verb': categories['verb'][str(int(verb_id))],
                 'target': categories['target'][str(int(target_id))],
                 'phase': categories['phase'][str(int(phase_id))],

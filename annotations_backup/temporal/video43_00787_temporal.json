@@ -1,0 +1,24 @@
+{
+  "clip_info": {
+    "clip_name": "video43_00787",
+    "num_frames": 20,
+    "annotation_instructions": "Add temporal queries below. Each query should have a unique query_id."
+  },
+  "annotations": [
+    {
+      "query_id": "video43_00787_q1",
+      "query_type": "action_duration",
+      "question": "During which frames is the grasper pulling the gallbladder?",
+      "answer_format": "Frames X-Y (or multiple ranges: X-Y, A-B)",
+      "ground_truth": {
+        "ranges": [
+          [
+            0,
+            19
+          ]
+        ]
+      },
+      "notes": "Use multiple ranges if action happens multiple times"
+    }
+  ]
+}

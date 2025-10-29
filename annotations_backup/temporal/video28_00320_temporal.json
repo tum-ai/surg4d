@@ -1,0 +1,21 @@
+{
+  "clip_info": {
+    "clip_name": "video28_00320",
+    "num_frames": 20,
+    "annotation_instructions": "Add temporal queries below. Each query should have a unique query_id."
+  },
+  "annotations": [
+    {
+      "query_id": "video28_00320_q1",
+      "query_type": "action_duration",
+      "question": "During which frames is tissue being grasped?",
+      "answer_format": "Frames X-Y (or multiple ranges: X-Y, A-B)",
+      "ground_truth": {
+        "ranges": [
+          []
+        ]
+      },
+      "notes": "Use multiple ranges if action happens multiple times"
+    }
+  ]
+}
