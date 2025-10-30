@@ -6,10 +6,10 @@ import numpy as np
 import torch
 from pathlib import Path
 import json
-import numpy as np
 from typing import Dict, List
 from benchmark.cholect50_utils import CholecT50Loader
 from benchmark.benchmark_config import normalize_for_matching
+from sklearn.metrics import average_precision_score
 
 def compute_spatial_metrics(cfg: DictConfig):
     if cfg.compute_metrics.spatial is None:
@@ -574,6 +574,38 @@ def compute_triplets_metrics(cfg: DictConfig):
                     best['triplet'] = True
         return best
 
+    def _sets_from_triplets(trips: List[Dict]) -> Dict[str, set[str]]:
+        inst_set: set[str] = set()
+        verb_set: set[str] = set()
+        targ_set: set[str] = set()
+        iv_set: set[str] = set()
+        it_set: set[str] = set()
+        ivt_set: set[str] = set()
+        for t in trips or []:
+            i = normalize_for_matching(t.get('instrument')) if t.get('instrument') is not None else None
+            v = normalize_for_matching(t.get('verb')) if t.get('verb') is not None else None
+            tg = normalize_for_matching(t.get('target')) if t.get('target') is not None else None
+            if i:
+                inst_set.add(i)
+            if v:
+                verb_set.add(v)
+            if tg:
+                targ_set.add(tg)
+            if i and v:
+                iv_set.add(f"{i}|{v}")
+            if i and tg:
+                it_set.add(f"{i}|{tg}")
+            if i and v and tg:
+                ivt_set.add(f"{i}|{v}|{tg}")
+        return {
+            'i': inst_set,
+            'v': verb_set,
+            't': targ_set,
+            'iv': iv_set,
+            'it': it_set,
+            'ivt': ivt_set,
+        }
+
     # Per-clip processing
     for clip in cfg.clips:
         clip_name = str(clip.name)
@@ -652,12 +684,54 @@ def compute_triplets_metrics(cfg: DictConfig):
         verb_acc = sum(1 for r in items if r['metrics'].get('verb')) / n
         target_acc = sum(1 for r in items if r['metrics'].get('target')) / n
         triplet_acc = sum(1 for r in items if r['metrics'].get('triplet')) / n
+        # Compute mAPs for i, v, t, iv, it, ivt using sklearn average_precision_score
+        # Build per-sample label presence sets for GT and predictions
+        gt_sets = []
+        pred_sets = []
+        for r in items:
+            gt_sets.append(_sets_from_triplets(r.get('ground_truth') or []))
+            pred_sets.append(_sets_from_triplets(r.get('predicted') or []))
+
+        def _compute_map(key: str) -> float:
+            # Build class list: classes that appear at least once in GT across samples
+            classes: set[str] = set()
+            for s in gt_sets:
+                classes.update(s[key])
+            if not classes:
+                return 0.0
+            ap_values: list[float] = []
+            for cls in sorted(classes):
+                y_true = [1 if (cls in s[key]) else 0 for s in gt_sets]
+                # Use binary presence as score (degenerate but consistent when no confidences)
+                y_score = [1.0 if (cls in s[key]) else 0.0 for s in pred_sets]
+                if sum(y_true) == 0:
+                    continue
+                try:
+                    ap = float(average_precision_score(y_true, y_score))
+                except Exception:
+                    ap = 0.0
+                ap_values.append(ap)
+            return float(np.mean(ap_values)) if ap_values else 0.0
+
+        map_i = _compute_map('i')
+        map_v = _compute_map('v')
+        map_t = _compute_map('t')
+        map_iv = _compute_map('iv')
+        map_it = _compute_map('it')
+        map_ivt = _compute_map('ivt')
+
         summary[ablation] = {
             'metrics': {
                 'instrument_acc': round(float(instrument_acc), 2),
                 'verb_acc': round(float(verb_acc), 2),
                 'target_acc': round(float(target_acc), 2),
                 'triplet_acc': round(float(triplet_acc), 2),
+                'mAP_i': round(float(map_i), 3),
+                'mAP_v': round(float(map_v), 3),
+                'mAP_t': round(float(map_t), 3),
+                'mAP_iv': round(float(map_iv), 3),
+                'mAP_it': round(float(map_it), 3),
+                'mAP_ivt': round(float(map_ivt), 3),
                 'count': len(items),
             }
         }

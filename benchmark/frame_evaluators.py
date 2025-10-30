@@ -21,8 +21,10 @@ from benchmark.benchmark_config import BenchmarkConfig, normalize_for_matching
 from benchmark.cholect50_utils import CholecT50Loader
 from qwen_vl import (
     get_patched_qwen,
-    prompt_with_static_graph,
+    prompt_with_graph_at_timestep,
     prompt_with_dynamic_graph,
+    prompt_with_descriptors_at_timestep,
+    prompt_with_dynamic_descriptors,
 )
 from qwen_vl_utils import process_vision_info
 
@@ -48,6 +50,11 @@ class TripletsFrameEvaluator:
                 device_map=config.device
             )
             print("✓ Model loaded")
+
+        # Cache for on-the-fly generated overlays
+        self._overlay_cache: dict[str, Path] = {}
+        # Where to dump overlays for inspection (strictly from config)
+        self._overlay_dump_root = Path(str(self.config.triplets_config['mask_overlay_viz_output_dir']))
 
     
     def _query_single_frame(self, image_path: Path, prompt: str, system_prompt: str | None = None) -> str:
@@ -143,8 +150,112 @@ class TripletsFrameEvaluator:
         print(f"output_text: {output_text}")
         
         return output_text
+
+    # ---------------------------------------------------------------------
+    # Instance-mask overlay utilities
+    # ---------------------------------------------------------------------
+    def _parse_frame_index(self, frame_path: Path) -> Optional[int]:
+        name = frame_path.stem  # e.g., frame_000012
+        try:
+            if "_" in name:
+                return int(name.split("_")[-1])
+            return int(name)
+        except Exception:
+            return None
+
+    def _instance_mask_path_for_frame(self, frame_path: Path) -> Optional[Path]:
+        # Assume masks live under clip_dir/instance_masks/frame_XXXXXX.npy
+        clip_dir = frame_path.parent.parent  # images/<file>.jpg -> <clip_dir>
+        masks_dir = clip_dir / "instance_masks"
+        idx = self._parse_frame_index(frame_path)
+        if idx is None:
+            return None
+        cand = masks_dir / f"frame_{idx:06d}.npy"
+        return cand if cand.exists() else None
+
+    def _build_overlay_for_frame(self, frame_path: Path, *, alpha: float = 0.35) -> Path:
+        """Create (or reuse from cache) a colored overlay PNG for a given frame.
+
+        Colors one unique instance id with one color using a distinctive palette.
+        """
+        # Cache hit
+        key = str(frame_path)
+        if key in self._overlay_cache and Path(self._overlay_cache[key]).exists():
+            return self._overlay_cache[key]
+
+        import numpy as _np
+        import cv2 as _cv2
+
+        mask_path = self._instance_mask_path_for_frame(frame_path)
+        # If no mask, fall back to original image
+        if mask_path is None:
+            self._overlay_cache[key] = frame_path
+            return frame_path
+
+        img = _cv2.imread(str(frame_path))
+        if img is None:
+            self._overlay_cache[key] = frame_path
+            return frame_path
+        try:
+            S = _np.load(str(mask_path))
+        except Exception:
+            self._overlay_cache[key] = frame_path
+            return frame_path
+
+        if S.ndim != 2:
+            # If unexpected shape, ignore
+            self._overlay_cache[key] = frame_path
+            return frame_path
+
+        H, W = S.shape
+        if img.shape[0] != H or img.shape[1] != W:
+            img = _cv2.resize(img, (W, H))
+
+        # Distinct color palette (cycled)
+        palette = _np.array(
+            [
+                [230, 25, 75],   # red
+                [60, 180, 75],   # green
+                [0, 130, 200],   # blue
+                [245, 130, 48],  # orange
+                [145, 30, 180],  # purple
+                [70, 240, 240],  # cyan
+                [240, 50, 230],  # magenta
+                [210, 245, 60],  # lime
+                [250, 190, 190], # pink
+                [0, 128, 128],   # teal
+                [230, 190, 255], # lavender
+                [170, 110, 40],  # brown
+                [255, 250, 200], # beige
+                [128, 0, 0],     # maroon
+                [170, 255, 195], # mint
+                [128, 128, 0],   # olive
+                [255, 215, 180], # apricot
+                [0, 0, 128],     # navy
+            ],
+            dtype=_np.uint8,
+        )
+
+        overlay = img.copy()
+        valid_ids = sorted([int(i) for i in _np.unique(S) if i > 0])
+        for sid in valid_ids:
+            mask = S == sid
+            if not _np.any(mask):
+                continue
+            color = palette[sid % len(palette)].tolist()
+            overlay[mask] = ((1 - alpha) * overlay[mask] + alpha * _np.array(color)).astype(_np.uint8)
+
+        # Write overlay next to dumps root, under clip folder
+        clip_name = frame_path.parent.parent.name
+        out_dir = self._overlay_dump_root / clip_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{frame_path.stem}_overlay.png"
+        _cv2.imwrite(str(out_path), overlay)
+
+        self._overlay_cache[key] = out_path
+        return out_path
     
-    def _query_with_static_graph(self, graph_path: Path, prompt: str, system_prompt: str = None, timestep: Optional[int] = None) -> str:
+    def _query_with_static_graph(self, graph_path: Path, prompt: str, timestep: int, system_prompt: str = None) -> str:
         """Query model with static graph at a specific timestep"""
         
         # Load graph data
@@ -155,13 +266,10 @@ class TripletsFrameEvaluator:
 
         print(f"loaded graph data: T={graph_data['adjacency_matrices'].shape[0]}")
         
-        # Use existing prompt_with_graph from qwen_vl.py
-        if timestep is None:
-            timestep = 0
-        response = prompt_with_static_graph(
+        response = prompt_with_graph_at_timestep(
             question=prompt,
             node_feats=graph_data['node_feats_npz'],
-            node_feats_timestep_idx=int(timestep),
+            timestep_idx=int(timestep),
             adjacency_matrices=graph_data['adjacency_matrices'],
             node_centers=graph_data['node_centers'],
             node_centroids=graph_data['node_centroids'],
@@ -224,6 +332,48 @@ class TripletsFrameEvaluator:
             model=self.model,
             processor=self.processor,
             system_prompt=system_prompt or "You are an expert visceral surgeon analyzing dynamic scene graphs."
+        )
+        return response
+
+    def _query_with_static_descriptors(self, graph_path: Path, prompt: str, timestep: int, system_prompt: str = None) -> str:
+        """Query model with descriptor-only features at a specific timestep (no graph structure)."""
+        graph_data = self._load_graph_data(graph_path)
+        if graph_data is None:
+            return ""
+
+        response = prompt_with_descriptors_at_timestep(
+            question=prompt,
+            node_feats=graph_data['node_feats_npz'],
+            timestep_idx=int(timestep),
+            adjacency_matrices=graph_data['adjacency_matrices'],
+            node_centers=graph_data['node_centers'],
+            node_centroids=graph_data['node_centroids'],
+            node_extents=graph_data['node_extents'],
+            model=self.model,
+            processor=self.processor,
+            system_prompt=system_prompt or "You are an expert visceral surgeon analyzing static descriptors.",
+        )
+        return response
+
+    def _query_with_dynamic_descriptors(self, graph_path: Path, prompt: str, system_prompt: str = None, timestep: Optional[int] = None) -> str:
+        """Query model with descriptor-only features over time (no graph structure), instructing evaluation at a timestep."""
+        graph_data = self._load_graph_data(graph_path)
+        if graph_data is None:
+            return ""
+
+        # Include timestep in the prompt text
+        prompt_text = prompt.replace("{timestep}", str(int(timestep or 0)))
+
+        response = prompt_with_dynamic_descriptors(
+            question=prompt_text,
+            node_feats=graph_data['node_feats_npz'],
+            adjacency_matrices=graph_data['adjacency_matrices'],
+            node_centers=graph_data['node_centers'],
+            node_centroids=graph_data['node_centroids'],
+            node_extents=graph_data['node_extents'],
+            model=self.model,
+            processor=self.processor,
+            system_prompt=system_prompt or "You are an expert visceral surgeon analyzing dynamic descriptors.",
         )
         return response
     
@@ -420,6 +570,12 @@ class TripletsFrameEvaluator:
             graph_timestep = int(sample.end_frame // max(1, frame_stride))
             prompt_text = prompt.replace("{timestep}", str(graph_timestep))
             response = self._query_single_frame(sample.image_paths[sample.end_frame], prompt_text, system_prompt=system_prompt)
+        elif condition == "single_frame_mask_overlay":
+            graph_timestep = int(sample.end_frame // max(1, frame_stride))
+            prompt_text = prompt.replace("{timestep}", str(graph_timestep))
+            base_frame = sample.image_paths[sample.end_frame]
+            overlay_frame = self._build_overlay_for_frame(base_frame)
+            response = self._query_single_frame(overlay_frame, prompt_text, system_prompt=system_prompt)
         elif condition == "multiframe":
             # All stride-4 frames across the clip; instruct to evaluate timestep
             stride = max(1, frame_stride)
@@ -427,6 +583,13 @@ class TripletsFrameEvaluator:
             use_video_mode = bool(self.config.triplets_config.get('multiframe_video_mode', True))
             prompt_text = prompt.replace("{timestep}", str(int(sample.end_frame // stride)))
             response = self._query_multiframe(stride_frames, prompt_text, video_mode=use_video_mode, system_prompt=system_prompt)
+        elif condition == "multiframe_mask_overlay":
+            stride = max(1, frame_stride)
+            base_frames = [p for idx, p in enumerate(sample.image_paths) if idx % stride == 0]
+            overlay_frames = [self._build_overlay_for_frame(p) for p in base_frames]
+            use_video_mode = bool(self.config.triplets_config.get('multiframe_video_mode', True))
+            prompt_text = prompt.replace("{timestep}", str(int(sample.end_frame // stride)))
+            response = self._query_multiframe(overlay_frames, prompt_text, video_mode=use_video_mode, system_prompt=system_prompt)
         elif condition == "static_graph":
             if sample.graph_path is None:
                 print(f"Warning: No graph available for {sample.sample_id}, skipping static_graph; falling back to single_frame")
@@ -457,6 +620,23 @@ class TripletsFrameEvaluator:
                     system_prompt=system_prompt,
                     timestep=graph_timestep,
                 )
+        elif condition == "static_descriptors":
+            graph_timestep = max(0, sample.end_frame // max(1, frame_stride))
+            prompt_text = prompt.replace("{timestep}", str(int(graph_timestep)))
+            response = self._query_with_static_descriptors(
+                sample.graph_path,
+                prompt_text,
+                system_prompt=system_prompt,
+                timestep=graph_timestep,
+            )
+        elif condition == "dynamic_descriptors":
+            graph_timestep = max(0, sample.end_frame // max(1, frame_stride))
+            response = self._query_with_dynamic_descriptors(
+                sample.graph_path,
+                prompt,
+                system_prompt=system_prompt,
+                timestep=graph_timestep,
+            )
         else:
             raise ValueError(f"Unknown condition: {condition}")
         
@@ -589,7 +769,7 @@ class TripletsFrameEvaluator:
                 
                 prompts_cfg = self.config.triplets_config.get('prompts', {})
                 systems_cfg = self.config.triplets_config.get('system_prompts', {})
-                if ablation in ("single_frame", "multiframe", "static_graph", "dynamic_graph"):
+                if ablation in ("single_frame", "single_frame_mask_overlay", "multiframe", "multiframe_mask_overlay", "static_graph", "dynamic_graph", "static_descriptors", "dynamic_descriptors"):
                     prompt = prompts_cfg.get(ablation)
                     system_prompt = systems_cfg.get(ablation)
                     if prompt is None:

@@ -881,6 +881,148 @@ def prompt_with_dynamic_graph(
     )
 
 
+def prompt_with_descriptors_at_timestep(
+    question: str,
+    node_feats: np.lib.npyio.NpzFile,
+    timestep_idx: int,
+    adjacency_matrices: np.ndarray,
+    node_centers: np.ndarray,
+    node_centroids: np.ndarray,
+    node_extents: np.ndarray,
+    model: Qwen2_5_VLForConditionalGeneration,
+    processor: Qwen2_5_VLProcessor,
+    system_prompt: str = None,
+):
+    """
+    Ablation of prompt_with_graph_at_timestep: only pass cluster descriptor images
+    for a single timestep, without any graph structure (no nodes/edges/geometry).
+
+    node_feats: np.lib.npyio.NpzFile - npz file containing node features through time
+    timestep_idx: int - index of the timestep to use for the node features
+    """
+    # keep signature parity; inputs other than node_feats/timestep are unused here
+    _ = adjacency_matrices, node_centers, node_centroids, node_extents
+
+    # node feat indices correspond to cluster ids
+    node_feat_indices = sorted(list(node_feats.keys()), key=lambda x: int(x))
+    node_feats_list = [node_feats[idx] for idx in node_feat_indices]
+    node_feats_t = [i[timestep_idx] for i in node_feats_list]
+
+    # Create a descriptor-only prompt with images, no graph structure
+    descriptor_content = []
+    descriptor_content.append({"type": "text", "text": f'<descriptors t="{timestep_idx}">\n'})
+    for i in range(len(node_feats_t)):
+        descriptor_content.extend(
+            [
+                {"type": "text", "text": f'<descriptor id="{i}">'},
+                {"type": "image", "image": None},
+                {"type": "text", "text": "</descriptor>\n"},
+            ]
+        )
+    descriptor_content.append({"type": "text", "text": "</descriptors>\n"})
+
+    messages = [
+        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "<descriptors>\n"},
+                *descriptor_content,
+                {"type": "text", "text": "</descriptors>\n"},
+                {"type": "text", "text": "<prompt>"},
+                {"type": "text", "text": question},
+                {"type": "text", "text": "</prompt>\n"},
+                {"type": "text", "text": "\nYour response:\n"},
+            ],
+        },
+    ]
+
+    with open("qwen_messages.json", "w") as fp:
+        json.dump(messages, fp)
+
+    return generate_with_vision_features(
+        messages=messages,
+        vision_features=[torch.Tensor(f) for f in node_feats_t],
+        model=model,
+        processor=processor,
+        max_tokens=5012,
+    )
+
+
+def prompt_with_dynamic_descriptors(
+    question: str,
+    node_feats: np.lib.npyio.NpzFile,
+    adjacency_matrices: np.ndarray,
+    node_centers: np.ndarray,
+    node_centroids: np.ndarray,
+    node_extents: np.ndarray,
+    model: Qwen2_5_VLForConditionalGeneration,
+    processor: Qwen2_5_VLProcessor,
+    system_prompt: str,
+):
+    """
+    Ablation of prompt_with_dynamic_graph: pass only descriptor images separated by
+    timestep, omitting all graph structure (no nodes/edges/geometry).
+    """
+    assert (
+        len(adjacency_matrices)
+        == len(node_centers)
+        == len(node_centroids)
+        == len(node_extents)
+    ), "timestep mismatch"
+
+    # node feat indices correspond to cluster ids
+    node_feat_indices = sorted(list(node_feats.keys()), key=lambda x: int(x))
+    node_feats_list = [node_feats[idx] for idx in node_feat_indices]
+
+    # Build descriptor-only content with timestep separation
+    content = []
+    for t in range(len(adjacency_matrices)):
+        content.append({"type": "text", "text": f'<descriptors t="{t}">\n'})
+        # number of clusters = len(node_feats_list)
+        for n in range(len(node_feats_list)):
+            content.extend(
+                [
+                    {"type": "text", "text": f'<descriptor id="{n}">'},
+                    {"type": "image", "image": None},
+                    {"type": "text", "text": "</descriptor>\n"},
+                ]
+            )
+        content.append({"type": "text", "text": "</descriptors>\n"})
+
+    messages = [
+        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "<descriptors>\n"},
+                *content,
+                {"type": "text", "text": "</descriptors>\n"},
+                {"type": "text", "text": "<prompt>"},
+                {"type": "text", "text": question},
+                {"type": "text", "text": "</prompt>\n"},
+                {"type": "text", "text": "\nYour response:\n"},
+            ],
+        },
+    ]
+
+    with open("qwen_messages.json", "w") as fp:
+        json.dump(messages, fp)
+
+    # Keep the same feature ordering pattern as prompt_with_dynamic_graph
+    feature_list = []
+    for n in range(len(node_feats_list)):
+        for t in range(node_feats_list[n].shape[0]):
+            feature_list.append(torch.Tensor(node_feats_list[n][t]))
+
+    return generate_with_vision_features(
+        messages=messages,
+        vision_features=feature_list,
+        model=model,
+        processor=processor,
+        max_tokens=5012,
+    )
+
 def crop_patch_features(patch_feat: torch.Tensor, cw, ch, cx1, cx2, cy1, cy2):
     return patch_feat.reshape(ch, cw, -1)[cy1 : cy2 + 1, cx1 : cx2 + 1].flatten(
         end_dim=1
