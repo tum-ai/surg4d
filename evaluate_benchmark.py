@@ -23,6 +23,7 @@ from benchmark.spatial import (
     frame_attn_feat_queries,
     splat_graph_feat_queries,
     frame_attn_refine_feat_queries,
+    frame_direct_feat_queries,
 )
 from rerun_utils import (
     init_and_save_rerun,
@@ -350,6 +351,16 @@ def evaluate_spatial(
         clip=clip,
         cfg=cfg,
     )
+    # Direct Qwen prompting on frame to return a pixel
+    results_frame_direct = frame_direct_feat_queries(
+        model=model,
+        processor=processor,
+        preprocessed_root=Path(cfg.preprocessed_root),
+        images_subdir=cfg.eval.paths.images_subdir,
+        clip_gt=gt_data,
+        clip=clip,
+        cfg=cfg,
+    )
 
     # save predictions
     all_results = {
@@ -358,6 +369,7 @@ def evaluate_spatial(
         "frame_attn": results_frame_attn,
         "splat_graph": results_splat_graph,
         "frame_attn_refine": results_frame_attn_refine,
+        "frame_direct": results_frame_direct,
     }
     out_dir = Path(cfg.eval.spatial.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -416,6 +428,16 @@ def evaluate_spatial(
             viz_dir=Path(cfg.eval.spatial.visualizations_dir),
             method_name="frame_attn_refine",
         )
+        # And dump for frame_direct method
+        dump_spatial_prediction_visualizations(
+            results_splat=results_frame_direct,
+            clip_name=clip.name,
+            preprocessed_root=Path(cfg.preprocessed_root),
+            images_subdir=cfg.eval.paths.images_subdir,
+            gt_data=gt_data,
+            viz_dir=Path(cfg.eval.spatial.visualizations_dir),
+            method_name="frame_direct",
+        )
 
     # Initialize rerun sink for spatial visualization
     init_and_save_rerun(graph_dir / "visualization_spatial.rrd")
@@ -450,6 +472,14 @@ def evaluate_spatial(
         clip_name=clip.name,
         positions_through_time=positions,
         results=results_frame_attn_refine,
+        cmap_name=cfg.eval.spatial.colormap,
+    )
+    # And log frame_direct results
+    log_spatial_predictions(
+        base_path="frame_direct",
+        clip_name=clip.name,
+        positions_through_time=positions,
+        results=results_frame_direct,
         cmap_name=cfg.eval.spatial.colormap,
     )
 

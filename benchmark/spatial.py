@@ -6,11 +6,13 @@ from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLProcessor
 from typing import List, Dict, Any, Optional
 import cv2
 import re
+import os
 
 import qwen_vl
 from scene.dataset_readers import CameraInfo, readColmapSceneInfo
 from scene.cameras import Camera
 from PIL import Image
+from autoencoder.model_qwen import QwenAutoencoder
 
 
 def get_patched_qwen_for_spatial_grounding(
@@ -41,6 +43,7 @@ def extract_text_to_vision_attention(
     *,
     vision_patch_positions: Optional[torch.Tensor] = None,
     vision_patch_grid_thw: Optional[torch.Tensor] = None,
+    zero_vision_positional_encodings: bool = False,
 ):
     """Extract attention scores from substring query tokens to vision tokens across layers.
 
@@ -100,9 +103,33 @@ def extract_text_to_vision_attention(
             return_dict=True,
             custom_patch_features=[vision_features],
         )
-        if vision_patch_positions is not None:
+        # Optional positional encoding control
+        if zero_vision_positional_encodings:
+            # Override all vision token positional ids with zeros (t=h=w=0)
+            zeros_pos = torch.zeros(
+                (len(vision_token_indices), 3), dtype=torch.long, device=model.device
+            )
+            model_kwargs["custom_vision_patch_positions"] = zeros_pos
+            model_kwargs["custom_vision_token_indices"] = [vision_token_indices]
+        elif vision_patch_positions is not None:
             model_kwargs["custom_vision_patch_positions"] = vision_patch_positions
             model_kwargs["custom_vision_token_indices"] = [vision_token_indices]
+
+        # Debug: print applied positional ids for a small window around the middle
+        if bool(int(os.getenv("DEBUG_VISION_POS_ENC", "0"))):
+            count = max(1, int(os.getenv("DEBUG_VISION_POS_ENC_COUNT", "5")))
+            n = len(vision_token_indices)
+            if n > 0:
+                mid = n // 2
+                half = max(0, (count - 1) // 2)
+                start = max(0, mid - half)
+                end = min(n, start + count)
+                # ensure we have exactly up to `count` indices if possible
+                if end - start < count:
+                    start = max(0, end - count)
+                debug_abs_tok_idx = vision_token_indices[start:end]
+                model_kwargs["debug_print_vision_positional_encodings"] = True
+                model_kwargs["debug_positional_token_indices"] = debug_abs_tok_idx
         outputs = model(
             **inputs,
             **model_kwargs,
@@ -368,6 +395,7 @@ def splat_predict_query_list(
     prompt_template: str,
     system_prompt: str,
     use_frame_patch_grid: bool = False,
+    zero_vision_positional_encodings: bool = False,
 ):
     outputs = []
     frame_idx = int(frame_number)
@@ -423,6 +451,7 @@ def splat_predict_query_list(
             system_prompt=system_prompt,
             vision_patch_positions=patch_positions_tensor,
             vision_patch_grid_thw=grid_thw_tensor,
+            zero_vision_positional_encodings=zero_vision_positional_encodings,
         )
         attn_scores = attn_out["scores"]
 
@@ -469,6 +498,7 @@ def splat_feat_queries(
     results = {}
     splat_system_prompt = cfg.eval.spatial.splat_system_prompt
     use_frame_grid = bool(getattr(cfg.eval.spatial, "use_frame_patch_grid_for_splat", False))
+    zero_posenc = bool(getattr(cfg.eval.spatial, "splat_zero_positional_encodings", False))
 
     for timestep, timestep_queries in clip_gt.items():
         t = int(timestep)
@@ -496,6 +526,7 @@ def splat_feat_queries(
             prompt_template=prompt_template,
             system_prompt=splat_system_prompt,
             use_frame_patch_grid=use_frame_grid,
+            zero_vision_positional_encodings=zero_posenc,
         )
 
         results[timestep]["actions"] = splat_predict_query_list(
@@ -512,6 +543,7 @@ def splat_feat_queries(
             prompt_template=prompt_template,
             system_prompt=splat_system_prompt,
             use_frame_patch_grid=use_frame_grid,
+            zero_vision_positional_encodings=zero_posenc,
         )
 
     return results
@@ -632,11 +664,11 @@ def static_graph_predict_query_list(
         substring = query["query"]
         question = _format_only_substring(prompt_template, substring)
 
-        # Call Qwen with the static graph at this timestep
-        response = qwen_vl.prompt_with_static_graph(
+        # Call Qwen with the graph at this specific timestep
+        response = qwen_vl.prompt_with_graph_at_timestep(
             question=question,
             node_feats=node_feats_npz,
-            node_feats_timestep_idx=int(timestep_idx),
+            timestep_idx=int(timestep_idx),
             adjacency_matrices=adjacency_matrices,
             node_centers=node_centers,
             node_centroids=node_centroids,
@@ -648,8 +680,14 @@ def static_graph_predict_query_list(
 
         point3d = _parse_point_from_json(response)
         if point3d is None:
-            # Fallback to origin if parsing fails
-            point3d = [0.0, 0.0, 0.0]
+            # 3D failure: fall back to 2D corner pixel (0,0), omit 3D position to avoid skew
+            out_item = {"query": substring, "predictions": {}, "raw_response": response}
+            out_item["predictions"]["0"] = {
+                "pixel_coords": [[0.0, 0.0]],
+                "positions": [],
+            }
+            outputs.append(out_item)
+            continue
 
         # Project to pixel coords
         pos_arr = np.array(point3d, dtype=np.float32).reshape(1, 3)
@@ -771,6 +809,7 @@ def splat_graph_predict_query_list(
     max_proposals: int | None = None,
     include_scores_in_context: bool = False,
     use_frame_patch_grid: bool = False,
+    zero_vision_positional_encodings: bool = False,
 ):
     """Use SPLAT attention to propose 3D points, then refine via static-graph prompting.
 
@@ -825,6 +864,7 @@ def splat_graph_predict_query_list(
                 system_prompt=system_prompt_splat_attn,
                 vision_patch_positions=patch_positions_tensor,
                 vision_patch_grid_thw=grid_thw_tensor,
+                zero_vision_positional_encodings=zero_vision_positional_encodings,
             )
             attn_scores = attn_out["scores"]  # [1, Q, V]
 
@@ -870,10 +910,10 @@ def splat_graph_predict_query_list(
             ]
         question = question + "\n\n" + "\n".join(lines)
 
-        response = qwen_vl.prompt_with_static_graph(
+        response = qwen_vl.prompt_with_graph_at_timestep(
             question=question,
             node_feats=node_feats_npz,
-            node_feats_timestep_idx=int(timestep_idx),
+            timestep_idx=int(timestep_idx),
             adjacency_matrices=adjacency_matrices,
             node_centers=node_centers,
             node_centroids=node_centroids,
@@ -885,7 +925,14 @@ def splat_graph_predict_query_list(
 
         point3d = _parse_point_from_json(response)
         if point3d is None:
-            point3d = [0.0, 0.0, 0.0]
+            # 3D failure: fall back to 2D corner pixel (0,0), omit 3D position to avoid skew
+            out_item = {"query": substring, "predictions": {}, "raw_response": response}
+            out_item["predictions"]["0"] = {
+                "pixel_coords": [[0.0, 0.0]],
+                "positions": [],
+            }
+            outputs.append(out_item)
+            continue
 
         pos_arr = np.array(point3d, dtype=np.float32).reshape(1, 3)
         pixels = project_3d_to_2d(pos_arr, proj_matrix, img_width, img_height)
@@ -946,6 +993,7 @@ def splat_graph_feat_queries(
 
     results: Dict[str, Any] = {}
     use_frame_grid = bool(getattr(cfg.eval.spatial, "use_frame_patch_grid_for_splat_graph", False))
+    zero_posenc = bool(getattr(cfg.eval.spatial, "splat_graph_zero_positional_encodings", False))
     for timestep, timestep_queries in clip_gt.items():
         t = int(timestep)
         ts_feats = splat_feats[t]
@@ -978,6 +1026,7 @@ def splat_graph_feat_queries(
             max_proposals=max_props,
             include_scores_in_context=include_scores,
             use_frame_patch_grid=use_frame_grid,
+            zero_vision_positional_encodings=zero_posenc,
         )
 
         results[timestep]["actions"] = splat_graph_predict_query_list(
@@ -1004,6 +1053,7 @@ def splat_graph_feat_queries(
             max_proposals=max_props,
             include_scores_in_context=include_scores,
             use_frame_patch_grid=use_frame_grid,
+            zero_vision_positional_encodings=zero_posenc,
         )
 
     return results
@@ -1316,6 +1366,87 @@ def frame_attn_feat_queries(
             image=image,
             layers=layers,
             max_proposals=cfg.eval.spatial.frame_attn_refine_max_proposals,
+            prompt_template=prompt_template,
+            system_prompt=system_prompt,
+        )
+
+    return results
+
+
+def frame_direct_predict_query_list(
+    queries_list,
+    *,
+    model,
+    processor,
+    image: Image.Image,
+    prompt_template: str,
+    system_prompt: str,
+):
+    outputs = []
+    for query in queries_list:
+        substring = query["query"]
+        question = _format_only_substring(prompt_template, substring)
+
+        response = qwen_vl.ask_qwen_about_image(
+            image=image,
+            prompt=question,
+            model=model,
+            processor=processor,
+            system_prompt=system_prompt,
+        )
+
+        px = _parse_pixel_from_json(response)
+        if px is None:
+            px = [0.0, 0.0]
+
+        out_item = {"query": substring, "predictions": {}, "raw_response": response}
+        out_item["predictions"]["0"] = {
+            "pixel_coords": [px],
+        }
+        outputs.append(out_item)
+    return outputs
+
+
+def frame_direct_feat_queries(
+    *,
+    model,
+    processor,
+    preprocessed_root: Path | str,
+    images_subdir: str,
+    clip_gt: Dict[str, Any],
+    clip: DictConfig,
+    cfg: DictConfig,
+):
+    """Run direct Qwen prompting on the frame to return a single pixel per query."""
+    results: Dict[str, Any] = {}
+    images_dir = Path(preprocessed_root) / clip.name / images_subdir
+
+    prompt_template = cfg.eval.spatial.frame_direct_prompt_template
+    system_prompt = cfg.eval.spatial.frame_direct_system_prompt
+
+    for timestep, timestep_queries in clip_gt.items():
+        frame_number = int(timestep_queries["frame_number"])  # local idx
+        frame_path = images_dir / f"frame_{frame_number:06d}.jpg"
+        if not frame_path.exists():
+            continue
+        image = Image.open(frame_path).convert("RGB")
+
+        results[timestep] = {"objects": [], "actions": []}
+
+        results[timestep]["objects"] = frame_direct_predict_query_list(
+            timestep_queries.get("objects", []),
+            model=model,
+            processor=processor,
+            image=image,
+            prompt_template=prompt_template,
+            system_prompt=system_prompt,
+        )
+
+        results[timestep]["actions"] = frame_direct_predict_query_list(
+            timestep_queries.get("actions", []),
+            model=model,
+            processor=processor,
+            image=image,
             prompt_template=prompt_template,
             system_prompt=system_prompt,
         )
