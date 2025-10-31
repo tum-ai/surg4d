@@ -113,219 +113,372 @@ system_prompts:
 prompts:
   single_frame: |
     YOUR TASK: Identify instrument-verb-target triplets that are CURRENTLY ACTIVE and CLEARLY VISIBLE in this image.
+    
+    ⚠️ MANDATORY CONFIDENCE VARIANCE REQUIREMENT ⚠️
+    READ THIS FIRST - YOUR RESPONSE WILL BE REJECTED IF YOU VIOLATE THESE RULES:
+    
+    STEP 1: Assess EACH triplet's visibility/certainty level INDEPENDENTLY
+    STEP 2: Assign confidence from the appropriate tier based on that specific triplet's evidence quality
+    STEP 3: VERIFY that your confidence values span multiple tiers (unless only 1 triplet)
+    
+    ❌ UNACCEPTABLE (will be rejected):
+    - Using 0.92 for all triplets: [0.92, 0.92, 0.92]
+    - Using only 1-2 values: [0.92, 0.73, 0.92, 0.73]
+    - Staying in one tier: [0.90, 0.91, 0.92, 0.93]
+    
+    ✅ ACCEPTABLE:
+    - Diverse values across tiers: [0.94, 0.76, 0.52]
+    - Using full range: [0.93, 0.67, 0.44, 0.21]
+    - Values vary by visibility: [0.91, 0.78, 0.59]
+    
+    CONFIDENCE TIER SYSTEM (assess each triplet independently):
+    Tier 1 (0.90-0.95): ALL components clearly visible AND action definitively happening AND no ambiguity
+    Tier 2 (0.70-0.80): Instrument/target clear BUT action partially obscured OR minor ambiguity about verb
+    Tier 3 (0.50-0.65): Instrument clear BUT target partially obscured OR action inferred from position
+    Tier 4 (0.30-0.45): Multiple interpretations possible OR significant occlusion but context suggests this
+    Tier 5 (0.10-0.25): Speculative interpretation OR minimal evidence BUT anatomically plausible
+    
     CRITICAL RULES:
     - ONLY report triplets where both the instrument and the action are visible
     - Do NOT infer from procedure context; return {"triplets": []} if unsure
-    - REASON ABOUT COMBINATIONS: Verify that each instrument/verb/target combination is surgically plausible and consistent with the visible evidence before including it.
-    - ONLY report triplets for which you have high confidence! Do not include triplets that you are unsure about.
-    - IMPORTANT: Values for "instrument", "verb", and "target" MUST be STRING LABELS from VALID CATEGORIES below. Never output numeric IDs.
+    - REASON ABOUT COMBINATIONS: Verify that each instrument/verb/target combination is surgically plausible
+    - IMPORTANT: Values for "instrument", "verb", and "target" MUST be STRING LABELS from VALID CATEGORIES below. Never output numeric IDs
+    
     VALID CATEGORIES:
     - instrument: ["grasper", "bipolar", "hook", "scissors", "clipper", "irrigator"]
     - verb: ["grasp", "retract", "dissect", "coagulate", "clip", "cut", "aspirate", "irrigate", "pack", "null_verb"]
     - target: ["gallbladder", "cystic_plate", "cystic_duct", "cystic_artery", "cystic_pedicle", "blood_vessel", "fluid", "abdominal_wall_cavity", "liver", "adhesion", "omentum", "peritoneum", "gut", "specimen_bag", "null_target"]
-    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>"}, ...]}
+    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float>}, ...]}
 
     OUTPUT CONSTRAINTS:
     You may briefly reason first. Then, on a new line at the end, output ONLY the final JSON object.
-    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>"}, ...]}
-    - Keys MUST be exactly: instrument, verb, target. Values MUST be lowercase strings from VALID CATEGORIES.
-    - No extra fields; no IDs; no nested objects; return {"triplets": []} if unsure.
+    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float 0.0-1.0>}, ...]}
+    - Keys MUST be exactly: instrument, verb, target, confidence. Values for I/V/T MUST be lowercase strings from VALID CATEGORIES.
+    - confidence MUST be a float from the tier ranges above, with variance between predictions
+    - Order triplets by confidence (highest first)
+    - Return {"triplets": []} if no triplets are clearly visible
     - Wrap ONLY the JSON object in a single ```json fenced block, or return the bare JSON. No text outside the JSON.
     EXAMPLES (valid):
     - ```json
       {"triplets": []}
       ```
     - ```json
-      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct"}]}
+      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct","confidence":0.95}]}
+      ```
+    - ```json
+      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"gallbladder","confidence":0.9}, {"instrument":"hook","verb":"dissect","target":"cystic_plate","confidence":0.7}]}
       ```
     EXAMPLES (invalid):
     - {"subject":"grasper","action":"grasp","object":"cystic_duct"}  # wrong keys
+    - {"instrument":"grasper","verb":"grasp","target":"cystic_duct"}  # missing confidence
+    - {"instrument":"grasper","verb":"grasp","target":"cystic_duct"}  # missing confidence
   single_frame_mask_overlay: |
     YOUR TASK: Identify instrument-verb-target triplets that are CURRENTLY ACTIVE and CLEARLY VISIBLE in this image.
+    
+    ⚠️ MANDATORY CONFIDENCE VARIANCE REQUIREMENT ⚠️
+    YOUR RESPONSE WILL BE REJECTED IF ALL CONFIDENCE VALUES ARE THE SAME!
+    
+    STEP 1: Assess EACH triplet's visibility/certainty level INDEPENDENTLY
+    STEP 2: Assign confidence from the appropriate tier based on that specific triplet's evidence quality
+    STEP 3: VERIFY that your confidence values span multiple tiers (unless only 1 triplet)
+    
+    ❌ UNACCEPTABLE: [0.92, 0.92, 0.92] or [0.92, 0.73, 0.92, 0.73]
+    ✅ ACCEPTABLE: [0.94, 0.76, 0.52] or [0.93, 0.67, 0.44, 0.21]
+    
+    CONFIDENCE TIER SYSTEM (assess each triplet independently):
+    Tier 1 (0.90-0.95): ALL components clearly visible AND action definitively happening AND no ambiguity
+    Tier 2 (0.70-0.80): Instrument/target clear BUT action partially obscured OR minor ambiguity about verb
+    Tier 3 (0.50-0.65): Instrument clear BUT target partially obscured OR action inferred from position
+    Tier 4 (0.30-0.45): Multiple interpretations possible OR significant occlusion but context suggests this
+    Tier 5 (0.10-0.25): Speculative interpretation OR minimal evidence BUT anatomically plausible
+    
     CRITICAL RULES:
     - ONLY report triplets where both the instrument and the action are visible
     - Do NOT infer from procedure context; return {"triplets": []} if unsure
-    - REASON ABOUT COMBINATIONS: Verify that each instrument/verb/target combination is surgically plausible and consistent with the visible evidence before including it.
-    - ONLY report triplets for which you have high confidence! Do not include triplets that you are unsure about.
-    - IMPORTANT: Values for "instrument", "verb", and "target" MUST be STRING LABELS from VALID CATEGORIES below. Never output numeric IDs.
+    - REASON ABOUT COMBINATIONS: Verify that each instrument/verb/target combination is surgically plausible
+    - IMPORTANT: Values for "instrument", "verb", and "target" MUST be STRING LABELS from VALID CATEGORIES below. Never output numeric IDs
+    
     VALID CATEGORIES:
     - instrument: ["grasper", "bipolar", "hook", "scissors", "clipper", "irrigator"]
     - verb: ["grasp", "retract", "dissect", "coagulate", "clip", "cut", "aspirate", "irrigate", "pack", "null_verb"]
     - target: ["gallbladder", "cystic_plate", "cystic_duct", "cystic_artery", "cystic_pedicle", "blood_vessel", "fluid", "abdominal_wall_cavity", "liver", "adhesion", "omentum", "peritoneum", "gut", "specimen_bag", "null_target"]
-    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>"}, ...]}
+    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float>}, ...]}
 
     OUTPUT CONSTRAINTS:
     You may briefly reason first. Then, on a new line at the end, output ONLY the final JSON object.
-    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>"}, ...]}
-    - Keys MUST be exactly: instrument, verb, target. Values MUST be lowercase strings from VALID CATEGORIES.
-    - No extra fields; no IDs; no nested objects; return {"triplets": []} if unsure.
+    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float 0.0-1.0>}, ...]}
+    - Keys MUST be exactly: instrument, verb, target, confidence. Values for I/V/T MUST be lowercase strings from VALID CATEGORIES.
+    - confidence MUST be a float from the tier ranges above, with variance between predictions
+    - Order triplets by confidence (highest first)
+    - Return {"triplets": []} if no triplets are clearly visible
     - Wrap ONLY the JSON object in a single ```json fenced block, or return the bare JSON. No text outside the JSON.
     EXAMPLES (valid):
     - ```json
       {"triplets": []}
       ```
     - ```json
-      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct"}]}
+      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct","confidence":0.95}]}
       ```
     EXAMPLES (invalid):
     - {"subject":"grasper","action":"grasp","object":"cystic_duct"}  # wrong keys
+    - {"instrument":"grasper","verb":"grasp","target":"cystic_duct"}  # missing confidence
   multiframe: |
     YOUR TASK: Identify instrument-verb-target triplets that are ACTIVE at timestep t = {timestep}.
-    Use the frames as temporal context strictly to improve confidence; the output must reflect only timestep t.
+    
+    ⚠️ MANDATORY CONFIDENCE VARIANCE REQUIREMENT ⚠️
+    YOUR RESPONSE WILL BE REJECTED IF ALL CONFIDENCE VALUES ARE THE SAME!
+    
+    STEP 1: Assess EACH triplet at timestep t INDEPENDENTLY based on visibility + temporal continuity
+    STEP 2: Assign confidence from the appropriate tier
+    STEP 3: VERIFY values span multiple tiers
+    
+    ❌ UNACCEPTABLE: [0.92, 0.92] or [0.73, 0.73, 0.73]
+    ✅ ACCEPTABLE: [0.94, 0.71, 0.48] or [0.91, 0.62]
+    
+    CONFIDENCE TIER SYSTEM (assess each triplet independently):
+    Tier 1 (0.90-0.95): Triplet clearly active at t AND temporal context strongly confirms continuity
+    Tier 2 (0.70-0.80): Active at t BUT temporal context shows action starting/ending OR minor discontinuity
+    Tier 3 (0.50-0.65): Likely active at t BUT temporal context ambiguous OR action inferred from nearby frames
+    Tier 4 (0.30-0.45): Uncertain at exact timestep t BUT temporal pattern suggests plausible
+    Tier 5 (0.10-0.25): Speculative based on temporal context OR visible before/after but unclear at t
+    
     CRITICAL TEMPORAL FOCUS:
     - Evaluate ONLY timestep t. Other frames are context only.
     - If an instrument/verb/target is not active at t, do not include it even if it appears before/after.
     - REASON ABOUT COMBINATIONS: Ensure instrument, verb, and target form a consistent action at t.
-    - ONLY report triplets for which you have high confidence! Do not include triplets that you are unsure about.
-    - IMPORTANT: Values for "instrument", "verb", and "target" MUST be STRING LABELS from VALID CATEGORIES below. Never output numeric IDs.
+    - IMPORTANT: Values for "instrument", "verb", and "target" MUST be STRING LABELS from VALID CATEGORIES below. Never output numeric IDs
+    
     VALID CATEGORIES:
     - instrument: ["grasper", "bipolar", "hook", "scissors", "clipper", "irrigator"]
     - verb: ["grasp", "retract", "dissect", "coagulate", "clip", "cut", "aspirate", "irrigate", "pack", "null_verb"]
     - target: ["gallbladder", "cystic_plate", "cystic_duct", "cystic_artery", "cystic_pedicle", "blood_vessel", "fluid", "abdominal_wall_cavity", "liver", "adhesion", "omentum", "peritoneum", "gut", "specimen_bag", "null_target"]
-    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>"}, ...]}
+    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float>}, ...]}
 
     OUTPUT CONSTRAINTS:
     You may briefly reason first. Then, on a new line at the end, output ONLY the final JSON object.
-    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>"}, ...]}
-    - Keys MUST be exactly: instrument, verb, target. Values MUST be lowercase strings from VALID CATEGORIES.
-    - No extra fields; no IDs; no nested objects; return {"triplets": []} if unsure.
+    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float 0.0-1.0>}, ...]}
+    - Keys MUST be exactly: instrument, verb, target, confidence. Values for I/V/T MUST be lowercase strings from VALID CATEGORIES.
+    - confidence MUST be a float from the tier ranges above, with variance between predictions
+    - Order triplets by confidence (highest first)
+    - Return {"triplets": []} if no triplets are active at t
     - Wrap ONLY the JSON object in a single ```json fenced block, or return the bare JSON. No text outside the JSON.
     EXAMPLES (valid):
     - ```json
       {"triplets": []}
       ```
     - ```json
-      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct"}]}
+      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct","confidence":0.95}]}
       ```
     EXAMPLES (invalid):
     - {"subject":"grasper","action":"grasp","object":"cystic_duct"}  # wrong keys
+    - {"instrument":"grasper","verb":"grasp","target":"cystic_duct"}  # missing confidence
+    - {"instrument":"grasper","verb":"grasp","target":"cystic_duct"}  # missing confidence
   multiframe_mask_overlay: |
     YOUR TASK: Identify instrument-verb-target triplets that are ACTIVE at timestep t = {timestep}.
-    Use the frames as temporal context strictly to improve confidence; the output must reflect only timestep t.
+    
+    ⚠️ MANDATORY CONFIDENCE VARIANCE REQUIREMENT ⚠️
+    DO NOT output the same confidence value repeatedly!
+    
+    ❌ UNACCEPTABLE: [0.92, 0.92] or [0.73, 0.73, 0.73]
+    ✅ ACCEPTABLE: [0.94, 0.71, 0.48] or [0.91, 0.62]
+    
+    CONFIDENCE TIER SYSTEM (assess each triplet independently):
+    Tier 1 (0.90-0.95): Triplet clearly active at t AND temporal context strongly confirms continuity
+    Tier 2 (0.70-0.80): Active at t BUT temporal context shows action starting/ending OR minor discontinuity
+    Tier 3 (0.50-0.65): Likely active at t BUT temporal context ambiguous OR action inferred from nearby frames
+    Tier 4 (0.30-0.45): Uncertain at exact timestep t BUT temporal pattern suggests plausible
+    Tier 5 (0.10-0.25): Speculative based on temporal context OR visible before/after but unclear at t
+    
     CRITICAL TEMPORAL FOCUS:
     - Evaluate ONLY timestep t. Other frames are context only.
     - If an instrument/verb/target is not active at t, do not include it even if it appears before/after.
     - REASON ABOUT COMBINATIONS: Ensure instrument, verb, and target form a consistent action at t.
-    - ONLY report triplets for which you have high confidence! Do not include triplets that you are unsure about.
-    - IMPORTANT: Values for "instrument", "verb", and "target" MUST be STRING LABELS from VALID CATEGORIES below. Never output numeric IDs.
+    - IMPORTANT: Values for "instrument", "verb", and "target" MUST be STRING LABELS from VALID CATEGORIES below. Never output numeric IDs
+    
     VALID CATEGORIES:
     - instrument: ["grasper", "bipolar", "hook", "scissors", "clipper", "irrigator"]
     - verb: ["grasp", "retract", "dissect", "coagulate", "clip", "cut", "aspirate", "irrigate", "pack", "null_verb"]
     - target: ["gallbladder", "cystic_plate", "cystic_duct", "cystic_artery", "cystic_pedicle", "blood_vessel", "fluid", "abdominal_wall_cavity", "liver", "adhesion", "omentum", "peritoneum", "gut", "specimen_bag", "null_target"]
-    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>"}, ...]}
+    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float>}, ...]}
 
     OUTPUT CONSTRAINTS:
     You may briefly reason first. Then, on a new line at the end, output ONLY the final JSON object.
-    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>"}, ...]}
-    - Keys MUST be exactly: instrument, verb, target. Values MUST be lowercase strings from VALID CATEGORIES.
-    - No extra fields; no IDs; no nested objects; return {"triplets": []} if unsure.
+    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float 0.0-1.0>}, ...]}
+    - Keys MUST be exactly: instrument, verb, target, confidence. Values for I/V/T MUST be lowercase strings from VALID CATEGORIES.
+    - confidence MUST be a float from the tier ranges above, with variance between predictions
+    - Order triplets by confidence (highest first)
+    - Return {"triplets": []} if no triplets are visible
     - Wrap ONLY the JSON object in a single ```json fenced block, or return the bare JSON. No text outside the JSON.
     EXAMPLES (valid):
     - ```json
       {"triplets": []}
       ```
     - ```json
-      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct"}]}
+      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct","confidence":0.95}]}
       ```
     EXAMPLES (invalid):
     - {"subject":"grasper","action":"grasp","object":"cystic_duct"}  # wrong keys
+    - {"instrument":"grasper","verb":"grasp","target":"cystic_duct"}  # missing confidence
   static_descriptors: |
     You are given a static scene with descriptors.
     YOUR TASK: Identify instrument-verb-target triplets that are CURRENTLY ACTIVE and CLEARLY VISIBLE in this scene.
-    - REASON ABOUT COMBINATIONS: Ensure instrument, verb, and target form a consistent action per the scene evidence.
-    - ONLY report triplets for which you have high confidence! Do not include triplets that you are unsure about.
-    - IMPORTANT: Values for "instrument", "verb", and "target" MUST be STRING LABELS from VALID CATEGORIES below. Never output numeric IDs.
+    
+    ⚠️ MANDATORY CONFIDENCE VARIANCE ⚠️
+    Different descriptors have different clarity → Use different confidence values!
+    ❌ UNACCEPTABLE: [0.92, 0.92] ✅ ACCEPTABLE: [0.93, 0.68, 0.44]
+    
+    CONFIDENCE TIER SYSTEM (assess each triplet independently):
+    Tier 1 (0.90-0.95): Descriptors unambiguously describe all components AND action explicitly indicated
+    Tier 2 (0.70-0.80): Descriptors clearly identify components BUT action inferred from spatial relationships
+    Tier 3 (0.50-0.65): Descriptors partially match components OR action inferred from typical workflow
+    Tier 4 (0.30-0.45): Descriptors suggest multiple possible triplets OR incomplete info but plausible
+    Tier 5 (0.10-0.25): Descriptors provide minimal evidence OR highly speculative interpretation
+    
+    CRITICAL RULES:
+    - REASON ABOUT COMBINATIONS: Ensure instrument, verb, and target form a consistent action
+    - IMPORTANT: Values for "instrument", "verb", and "target" MUST be STRING LABELS from VALID CATEGORIES below. Never output numeric IDs
+    
     VALID CATEGORIES:
     - instrument: ["grasper", "bipolar", "hook", "scissors", "clipper", "irrigator"]
     - verb: ["grasp", "retract", "dissect", "coagulate", "clip", "cut", "aspirate", "irrigate", "pack", "null_verb"]
     - target: ["gallbladder", "cystic_plate", "cystic_duct", "cystic_artery", "cystic_pedicle", "blood_vessel", "fluid", "abdominal_wall_cavity", "liver", "adhesion", "omentum", "peritoneum", "gut", "specimen_bag", "null_target"]
-    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>"}, ...]}
+    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float>}, ...]}
 
     OUTPUT CONSTRAINTS:
     You may briefly reason first. Then, on a new line at the end, output ONLY the final JSON object.
-    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>"}, ...]}
-    - Keys MUST be exactly: instrument, verb, target. Values MUST be lowercase strings from VALID CATEGORIES.
-    - No extra fields; no IDs; no nested objects; if unsure, select the most plausible triplet(s) supported by the graph evidence; avoid empty unless no instrument-action-target is present.
+    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float 0.0-1.0>}, ...]}
+    - Keys MUST be exactly: instrument, verb, target, confidence. Values for I/V/T MUST be lowercase strings from VALID CATEGORIES.
+    - confidence MUST be a float from the tier ranges above, with variance between predictions
+    - Order triplets by confidence (highest first)
+    - Select the most plausible triplet(s) supported by the graph evidence
     - Wrap ONLY the JSON object in a single ```json fenced block, or return the bare JSON. No text outside the JSON.
     EXAMPLES (valid):
     - ```json
-      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct"}]}
+      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct","confidence":0.95}]}
       ```
     EXAMPLES (invalid):
     - {"subject":"grasper","action":"grasp","object":"cystic_duct"}  # wrong keys
+    - {"instrument":"grasper","verb":"grasp","target":"cystic_duct"}  # missing confidence
   static_graph: |
     You are given a static scene graph.
     YOUR TASK: Identify instrument-verb-target triplets that are CURRENTLY ACTIVE and CLEARLY VISIBLE in this graph.
-    - REASON ABOUT COMBINATIONS: Ensure instrument, verb, and target form a consistent action per the graph evidence.
-    - ONLY report triplets for which you have high confidence! Do not include triplets that you are unsure about.
-    - IMPORTANT: Values for "instrument", "verb", and "target" MUST be STRING LABELS from VALID CATEGORIES below. Never output numeric IDs.
+    
+    ⚠️ MANDATORY CONFIDENCE VARIANCE ⚠️
+    Different edges have different overlap scores → Use different confidence values!
+    ❌ UNACCEPTABLE: [0.92, 0.92] ✅ ACCEPTABLE: [0.93, 0.71, 0.49]
+    
+    CONFIDENCE TIER SYSTEM (assess each triplet independently):
+    Tier 1 (0.90-0.95): Strong edge connection (overlap>0.7) AND descriptors unambiguously identify triplet components
+    Tier 2 (0.70-0.80): Moderate edge connection (overlap 0.4-0.7) OR descriptors clearly match but action inferred from spatial proximity
+    Tier 3 (0.50-0.65): Weak edge connection (overlap<0.4) OR descriptors partially ambiguous but graph structure supports interpretation
+    Tier 4 (0.30-0.45): No direct edge BUT close centroid distance suggests interaction OR descriptors allow multiple interpretations
+    Tier 5 (0.10-0.25): Minimal graph evidence OR highly speculative based on surgical context alone
+    
+    VARIANCE REQUIREMENTS:
+    - NEVER assign the same confidence to all triplets in a single response
+    - If predicting multiple triplets, they MUST span at least 2 different tiers unless only 1 triplet is predicted
+    - Use the FULL range within each tier (e.g., use 0.92, 0.73, 0.54, not just 0.95, 0.75, 0.55)
+    
     VALID CATEGORIES:
     - instrument: ["grasper", "bipolar", "hook", "scissors", "clipper", "irrigator"]
     - verb: ["grasp", "retract", "dissect", "coagulate", "clip", "cut", "aspirate", "irrigate", "pack", "null_verb"]
     - target: ["gallbladder", "cystic_plate", "cystic_duct", "cystic_artery", "cystic_pedicle", "blood_vessel", "fluid", "abdominal_wall_cavity", "liver", "adhesion", "omentum", "peritoneum", "gut", "specimen_bag", "null_target"]
-    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>"}, ...]}
+    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float>}, ...]}
 
     OUTPUT CONSTRAINTS:
     You may briefly reason first. Then, on a new line at the end, output ONLY the final JSON object.
-    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>"}, ...]}
-    - Keys MUST be exactly: instrument, verb, target. Values MUST be lowercase strings from VALID CATEGORIES.
-    - No extra fields; no IDs; no nested objects; if unsure, select the most plausible triplet(s) supported by the graph evidence; avoid empty unless no instrument-action-target is present.
+    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float 0.0-1.0>}, ...]}
+    - Keys MUST be exactly: instrument, verb, target, confidence. Values for I/V/T MUST be lowercase strings from VALID CATEGORIES.
+    - confidence MUST be a float from the tier ranges above, with variance between predictions
+    - Order triplets by confidence (highest first)
+    - Select the most plausible triplet(s) supported by the graph evidence
     - Wrap ONLY the JSON object in a single ```json fenced block, or return the bare JSON. No text outside the JSON.
     EXAMPLES (valid):
     - ```json
-      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct"}]}
+      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct","confidence":0.95}]}
       ```
     EXAMPLES (invalid):
     - {"subject":"grasper","action":"grasp","object":"cystic_duct"}  # wrong keys
+    - {"instrument":"grasper","verb":"grasp","target":"cystic_duct"}  # missing confidence
   dynamic_descriptors: |
     You are given a dynamic scene with descriptors over time.
     YOUR TASK: Determine which instrument-verb-target triplets are active using descriptors. Answer ONLY for the specified timestep t, other timesteps are context only.
+    
+    ⚠️ MANDATORY CONFIDENCE VARIANCE ⚠️
+    Different descriptors at t have different clarity → Use different confidence values!
+    ❌ UNACCEPTABLE: [0.92, 0.92] ✅ ACCEPTABLE: [0.93, 0.68, 0.42]
+    
+    CONFIDENCE TIER SYSTEM (assess each triplet independently):
+    Tier 1 (0.90-0.95): Descriptors at t unambiguously identify triplet AND temporal evolution shows clear continuity
+    Tier 2 (0.70-0.80): Descriptors at t clearly match triplet BUT temporal context shows action transition
+    Tier 3 (0.50-0.65): Descriptors at t partially match OR action strongly inferred from temporal trajectory
+    Tier 4 (0.30-0.45): Descriptors at t ambiguous OR temporal context suggests action but descriptors don't confirm
+    Tier 5 (0.10-0.25): Minimal descriptor evidence at t OR highly speculative based on temporal pattern
+    
     TIMESTEPS:
     - Evaluate ONLY the specified timestep t.
-    - REASON ABOUT COMBINATIONS: Ensure instrument, verb, and target form a consistent action at t per the temporal scene evidence.
-    - ONLY report triplets for which you have high confidence! Do not include triplets that you are unsure about.
+    - REASON ABOUT COMBINATIONS: Ensure instrument, verb, and target form a consistent action at t per the temporal scene evidence
+    
     VALID CATEGORIES:
     - instrument: ["grasper", "bipolar", "hook", "scissors", "clipper", "irrigator"]
     - verb: ["grasp", "retract", "dissect", "coagulate", "clip", "cut", "aspirate", "irrigate", "pack", "null_verb"]
     - target: ["gallbladder", "cystic_plate", "cystic_duct", "cystic_artery", "cystic_pedicle", "blood_vessel", "fluid", "abdominal_wall_cavity", "liver", "adhesion", "omentum", "peritoneum", "gut", "specimen_bag", "null_target"]
-    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>"}, ...]}
+    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float>}, ...]}
 
     OUTPUT CONSTRAINTS:
     You may briefly reason first. Then, on a new line at the end, output ONLY the final JSON object.
-    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>"}, ...]}
-    - Keys MUST be exactly: instrument, verb, target. Values MUST be lowercase strings from VALID CATEGORIES.
+    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float 0.0-1.0>}, ...]}
+    - Keys MUST be exactly: instrument, verb, target, confidence. Values for I/V/T MUST be lowercase strings from VALID CATEGORIES.
+    - confidence MUST be a float from the tier ranges above, with variance between predictions
     - No extra fields; no IDs; no nested objects; if unsure, select the most plausible triplet(s) supported by temporal scene evidence; avoid empty unless no instrument-action-target is present.
     - Wrap ONLY the JSON object in a single ```json fenced block, or return the bare JSON. No text outside the JSON.
     EXAMPLES (valid):
     - ```json
-      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct"}]}
+      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct","confidence":0.95}]}
       ```
     EXAMPLES (invalid):
     - {"subject":"grasper","action":"grasp","object":"cystic_duct"}  # wrong keys
+    - {"instrument":"grasper","verb":"grasp","target":"cystic_duct"}  # missing confidence
   dynamic_graph: |
     You are given a dynamic scene graph over time.
     YOUR TASK: Evaluate ONLY timestep t = {timestep}. Use the temporal evolution to disambiguate, but output triplets active at t.
-    TIMESTEPS:
-    - Evaluate ONLY the specified timestep t.
-    - REASON ABOUT COMBINATIONS: Ensure instrument, verb, and target form a consistent action at t per the temporal graph evidence.
-    - ONLY report triplets for which you have high confidence! Do not include triplets that you are unsure about.
+    
+    ⚠️ MANDATORY CONFIDENCE VARIANCE ⚠️
+    Different edges at t have different overlap scores → Use different confidence values!
+    ❌ UNACCEPTABLE: [0.92, 0.92] ✅ ACCEPTABLE: [0.94, 0.72, 0.51]
+    
+    CONFIDENCE TIER SYSTEM (assess each triplet independently):
+    Tier 1 (0.90-0.95): Strong edge at t (overlap>0.7) AND descriptors unambiguous AND temporal trajectory confirms sustained action
+    Tier 2 (0.70-0.80): Moderate edge at t (overlap 0.4-0.7) OR temporal context shows action starting/ending at t
+    Tier 3 (0.50-0.65): Weak edge at t (overlap<0.4) BUT temporal pattern strongly suggests interaction OR descriptors partially ambiguous
+    Tier 4 (0.30-0.45): No direct edge at t BUT close centroids AND temporal evolution suggests transient interaction
+    Tier 5 (0.10-0.25): Minimal graph evidence at t OR speculative based on temporal trends without strong structural support
+    
+    VARIANCE REQUIREMENTS:
+    - NEVER assign the same confidence to all triplets in a single response
+    - If predicting multiple triplets, they MUST span at least 2 different tiers unless only 1 triplet is predicted
+    - Use the FULL range within each tier (e.g., use 0.92, 0.73, 0.54, not just 0.95, 0.75, 0.55)
+    - Consider MULTIPLE GROUND TRUTH possibilities: if evidence supports multiple valid triplet interpretations, assign higher confidence to most supported and lower to alternatives
+    
     VALID CATEGORIES:
     - instrument: ["grasper", "bipolar", "hook", "scissors", "clipper", "irrigator"]
     - verb: ["grasp", "retract", "dissect", "coagulate", "clip", "cut", "aspirate", "irrigate", "pack", "null_verb"]
     - target: ["gallbladder", "cystic_plate", "cystic_duct", "cystic_artery", "cystic_pedicle", "blood_vessel", "fluid", "abdominal_wall_cavity", "liver", "adhesion", "omentum", "peritoneum", "gut", "specimen_bag", "null_target"]
-    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>"}, ...]}
+    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float>}, ...]}
 
     OUTPUT CONSTRAINTS:
     You may briefly reason first. Then, on a new line at the end, output ONLY the final JSON object.
-    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>"}, ...]}
-    - Keys MUST be exactly: instrument, verb, target. Values MUST be lowercase strings from VALID CATEGORIES.
+    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float 0.0-1.0>}, ...]}
+    - Keys MUST be exactly: instrument, verb, target, confidence. Values for I/V/T MUST be lowercase strings from VALID CATEGORIES.
+    - confidence MUST be a float from the tier ranges above, with variance between predictions
     - No extra fields; no IDs; no nested objects; if unsure, select the most plausible triplet(s) supported by temporal graph evidence; avoid empty unless no instrument-action-target is present.
     - Wrap ONLY the JSON object in a single ```json fenced block, or return the bare JSON. No text outside the JSON.
     EXAMPLES (valid):
     - ```json
-      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct"}]}
+      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct","confidence":0.95}]}
       ```
     EXAMPLES (invalid):
     - {"subject":"grasper","action":"grasp","object":"cystic_duct"}  # wrong keys
+    - {"instrument":"grasper","verb":"grasp","target":"cystic_duct"}  # missing confidence
 
 
