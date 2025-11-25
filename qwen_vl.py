@@ -42,7 +42,7 @@ def forward(
     cache_position: Optional[torch.LongTensor] = None,
     second_per_grid_ts: Optional[torch.Tensor] = None,
     **kwargs: Unpack[TransformersKwargs],
-) -> Union[tuple, Qwen2_5_VLModelOutputWithPast]:
+    ) -> Union[tuple, Qwen2_5_VLModelOutputWithPast]:
     r"""
     image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
         The temporal, height and width of feature shape of each image in LLM.
@@ -71,9 +71,14 @@ def forward(
     if inputs_embeds is None:
         inputs_embeds = self.get_input_embeddings()(input_ids)
 
+    # Track whether custom vision features are being used and capture mask safely
+    image_mask = None
+    using_custom_vision_features = False
+
     if pixel_values is not None:
         if "custom_patch_features" in kwargs:
             image_embeds = kwargs["custom_patch_features"]
+            using_custom_vision_features = True
         else:
             image_embeds = self.get_image_features(pixel_values, image_grid_thw)
         image_embeds = torch.cat(image_embeds, dim=0).to(
@@ -131,6 +136,64 @@ def forward(
             delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=1)
             position_ids += delta.to(position_ids.device)
 
+    # Optional: override vision token position ids with custom patch assignments
+    # Expect kwargs["custom_vision_patch_positions"] as (num_vision_tokens, 3 [t,h,w]) per batch item
+    # and kwargs["custom_vision_token_indices"] as List[List[int]] token indices for vision placeholders
+    custom_patch_pos = kwargs.pop("custom_vision_patch_positions", None)
+    custom_tok_idx = kwargs.pop("custom_vision_token_indices", None)
+    if custom_patch_pos is not None and custom_tok_idx is not None and position_ids is not None:
+        # Ensure tensor on correct device/dtype
+        if not torch.is_tensor(custom_patch_pos):
+            custom_patch_pos = torch.as_tensor(custom_patch_pos, device=inputs_embeds.device)
+        custom_patch_pos = custom_patch_pos.to(device=inputs_embeds.device, dtype=position_ids.dtype)
+
+        # Handle batch = 1 common case; support lists per batch
+        if isinstance(custom_tok_idx, (list, tuple)) and len(custom_tok_idx) > 0 and isinstance(custom_tok_idx[0], (list, tuple)):
+            token_indices_per_batch = custom_tok_idx
+        else:
+            token_indices_per_batch = [custom_tok_idx]
+
+        batch_size = position_ids.shape[1]
+        # If a single positions tensor is provided, reuse for all batch items
+        per_batch_positions = [custom_patch_pos for _ in range(batch_size)]
+
+        for b in range(min(batch_size, len(token_indices_per_batch))):
+            tok_idx = token_indices_per_batch[b]
+            if tok_idx is None or len(tok_idx) == 0:
+                continue
+            # Expect shape (N, 3), slice if longer than tok count
+            pos_b = per_batch_positions[b]
+            if pos_b.dim() == 2 and pos_b.shape[-1] == 3:
+                # Align length
+                n = min(len(tok_idx), pos_b.shape[0])
+                assign = pos_b[:n].T  # (3, n)
+                # Overwrite t/h/w indices for the selected token positions
+                position_ids[:, b, tok_idx[:n]] = assign
+
+    # Always zero out positional encodings for any custom vision tokens
+    # When using custom patch features, relative patch geometry should not affect prompts
+    if using_custom_vision_features and (position_ids is not None):
+        # If we have the image_mask from placeholder computation, derive token indices
+        if image_mask is not None:
+            token_mask = image_mask.any(dim=-1)  # (batch, seq)
+            if token_mask.ndim == 2:
+                for b in range(token_mask.shape[0]):
+                    tok_idx_b = torch.nonzero(token_mask[b], as_tuple=False).squeeze(-1)
+                    if tok_idx_b.numel() > 0:
+                        position_ids[:, b, tok_idx_b] = 0
+        # Also support explicit token indices if provided
+        if custom_tok_idx is not None:
+            if isinstance(custom_tok_idx, (list, tuple)) and len(custom_tok_idx) > 0 and isinstance(custom_tok_idx[0], (list, tuple)):
+                token_indices_per_batch = custom_tok_idx
+            else:
+                token_indices_per_batch = [custom_tok_idx]
+            batch_size = position_ids.shape[1]
+            for b in range(min(batch_size, len(token_indices_per_batch))):
+                tok_idx = token_indices_per_batch[b]
+                if tok_idx is None or len(tok_idx) == 0:
+                    continue
+                position_ids[:, b, tok_idx] = 0
+
     outputs = self.language_model(
         input_ids=None,
         position_ids=position_ids,
@@ -164,12 +227,12 @@ def square_crop_image(image: Image.Image, xslide=0, yslide=0):
 
 
 def get_patched_qwen(
-    use_bnb_4bit: bool = True,
+    use_bnb_4bit: bool = False,
     use_bnb_8bit: bool = False,
-    attn_implementation: str = "sdpa", # "flash_attention_2" or "sdpa"
+    attn_implementation: str = "sdpa",  # "flash_attention_2" or "sdpa"
     torch_dtype: torch.dtype = torch.bfloat16,
     device_map: Union[str, Dict[str, str]] = "auto",
-    max_memory: Optional[Dict[str, str]] = {0: "18.0GB", "cpu": "46.0GB"},
+    max_memory: Optional[Dict[str, str]] = None,
 ):
     """Get a monkey-patched Qwen2_5_VL model/processor that supports raw patch features.
 
@@ -320,7 +383,7 @@ def ask_qwen_about_image(
     prompt: str,
     model: Qwen2_5_VLForConditionalGeneration,
     processor: Qwen2_5_VLProcessor,
-    system_prompt: str = "You are a medical assistant designed to aid medical practitioners during a cholecystectomy procedure. The surgeon user will ask you a question and show you their current situation, and you give a concise answer."
+    system_prompt: str = "You are a medical assistant designed to aid medical practitioners during a cholecystectomy procedure. The surgeon user will ask you a question and show you their current situation, and you give a concise answer.",
 ):
     messages = [
         {
@@ -421,13 +484,12 @@ def model_inputs(
         messages, tokenize=False, add_generation_prompt=True
     )
 
-    # create some mock images so the processor precomputes correct image_grid_thw
-    # (we override actual features in model forward pass)
-    mock_images = []
+    # create mock images so the processor precomputes grid; features are passed as-is
+    mock_images: List[Image.Image] = []
     for i in range(len(vision_features)):
-        w, h = closest_factor_pair(vision_features[i].shape[0])
-        # print(f'{vision_features[i].shape[0]} features mocked by {w}x{h} image')
-        assert w * h == vision_features[i].shape[0]
+        n = int(vision_features[i].shape[0])
+        w, h = closest_factor_pair(n)
+        assert w * h == n
         mock_img = Image.new(
             "RGB", (EFFECTIVE_PATCH_SIZE * w, EFFECTIVE_PATCH_SIZE * h), color="red"
         )
@@ -470,10 +532,10 @@ def generate_with_vision_features(
     response = output_text[0]
     return response
 
-
-def prompt_with_graph(
+def prompt_with_graph_at_timestep(
     question: str,
-    node_feats: List[np.ndarray],
+    node_feats: np.lib.npyio.NpzFile,
+    timestep_idx: int,
     adjacency_matrices: np.ndarray,
     node_centers: np.ndarray,
     node_centroids: np.ndarray,
@@ -482,51 +544,169 @@ def prompt_with_graph(
     processor: Qwen2_5_VLProcessor,
     system_prompt: str = None,
 ):
-    assert len(adjacency_matrices) == len(node_centers) == len(node_centroids) == len(node_extents), "timestep mismatch"
+    """
+    node_feats: np.lib.npyio.NpzFile - npz file containing node features for each timestep
+    timestep_idx: int - index of the timestep to use for the node features
+    adjacency_matrices: np.ndarray - adjacency matrices through time - weights are bhattacharyya coefficients (timesteps, n_clusters, n_clusters)
+    node_centers: np.ndarray - cluster centers through time (timesteps, n_clusters, 3)
+    node_centroids: np.ndarray - cluster centroids through time (timesteps, n_clusters, 3)
+    node_extents: np.ndarray - cluster extents through time (timesteps, n_clusters, 3)
+    model: Qwen2_5_VLForConditionalGeneration - model to use
+    processor: Qwen2_5_VLProcessor - processor to use
+    system_prompt: str - system prompt to use
+    """
+    assert (
+        len(adjacency_matrices)
+        == len(node_centers)
+        == len(node_centroids)
+        == len(node_extents)
+    ), "timestep mismatch"
 
-    if system_prompt is None:
-        system_prompt = """
-        You are an assistant that answers questions about scene graphs.
-        
-        A scene graph represents a 3D scene through time as
-        a list of graphs, where each graphs corresponds to a
-        timestep.
-        Each graph contains a set of nodes and edges.
-        Each node corresponds to an object present in the scene,
-        and associated properties like its position, extent,
-        etc. at the respective timestep.
-        Edge weights correspond to distances between objects
-        at the respective timestep.
-        Each object is represented by an image of the
-        object.
-        The scene graph as a whole is given as a list of
-        objects followed by a list of graphs.
+    # node feat indices correspond to cluster ids
+    node_feat_indices = sorted(list(node_feats.keys()), key=lambda x: int(x))
+    node_feats = [node_feats[idx] for idx in node_feat_indices]
+    node_feats = [i[timestep_idx] for i in node_feats]
+    A = adjacency_matrices[timestep_idx]
+    centroids = node_centroids[timestep_idx]
+    extents = node_extents[timestep_idx]
 
-        You will be given a scene graph and a question by the user.
-        You answer the question ONLY based on the scene graph
-        and context provided by this system prompt.
+    graph_content = []
+    graph_content.append(
+        {
+            "type": "text",
+            "text": '<spatial-graph>\n',
+        }
+    )
+    for n in range(A.shape[0]):
+        graph_content.extend(
+            [
+                {
+                    "type": "text",
+                    "text": f'<node id="{n}">\n',
+                },
+                {
+                    "type": "text",
+                    "text": "<descriptor>",
+                },
+                {
+                    "type": "image",
+                    "image": None,
+                },
+                {
+                    "type": "text",
+                    "text": "</descriptor>\n",
+                },
+                {
+                    "type": "text",
+                    "text": f'<centroid x="{centroids[n][0]:.2f}" y="{centroids[n][1]:.2f}" z="{centroids[n][2]:.2f}"/>\n',
+                },
+                {
+                    "type": "text",
+                    "text": f'<extent x="{extents[n][0]:.2f}" y="{extents[n][1]:.2f}" z="{extents[n][2]:.2f}"/>\n',
+                },
+                {
+                    "type": "text",
+                    "text": "</node>\n",
+                },
+            ]
+        )
+    for n in range(A.shape[0]):
+        for m in range(A.shape[1]):
+            if A[n, m] > 0:
+                graph_content.append(
+                    {
+                        "type": "text",
+                        "text": f'<edge from="{n}" to="{m}" overlap_score="{A[n, m]:.2f}" centroid_distance="{np.linalg.norm(centroids[n] - centroids[m]):.2f}"/>\n',
+                    }
+                )
+    graph_content.append(
+        {
+            "type": "text",
+            "text": "</spatial-graph>\n",
+        }
+    )
 
-        You answer with nothing but the response to the question.
-        You keep the response as concise as possible, while
-        answering all aspects the question.
-        """
+    # TODO: adapt question and system_prompt
+    messages = [
+        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "<scene-graph>\n"},
+                *graph_content,
+                {"type": "text", "text": "</scene-graph>\n"},
+                {"type": "text", "text": "<prompt>"},
+                {"type": "text", "text": question},
+                {"type": "text", "text": "</prompt>\n"},
+                {"type": "text", "text": "\nYour response:\n"},
+            ],
+        },
+    ]
 
+    with open("qwen_messages.json", "w") as fp:
+        json.dump(messages, fp)
+
+    return generate_with_vision_features(
+        messages=messages,
+        vision_features=[torch.Tensor(f) for f in node_feats],
+        model=model,
+        processor=processor,
+        # TODO: increase this?
+        max_tokens=5012,
+    )
+
+def prompt_with_static_graph(
+    question: str,
+    node_feats: np.lib.npyio.NpzFile,
+    node_feats_timestep_idx: int,
+    adjacency_matrices: np.ndarray,
+    node_centers: np.ndarray,
+    node_centroids: np.ndarray,
+    node_extents: np.ndarray,
+    model: Qwen2_5_VLForConditionalGeneration,
+    processor: Qwen2_5_VLProcessor,
+    system_prompt: str = None,
+):
+    """
+    node_feats: np.lib.npyio.NpzFile - npz file containing node features for each timestep
+    node_feats_timestep_idx: int - index of the timestep to use for the node features
+    adjacency_matrices: np.ndarray - adjacency matrices through time - weights are bhattacharyya coefficients (timesteps, n_clusters, n_clusters)
+    node_centers: np.ndarray - cluster centers through time (timesteps, n_clusters, 3)
+    node_centroids: np.ndarray - cluster centroids through time (timesteps, n_clusters, 3)
+    node_extents: np.ndarray - cluster extents through time (timesteps, n_clusters, 3)
+    model: Qwen2_5_VLForConditionalGeneration - model to use
+    processor: Qwen2_5_VLProcessor - processor to use
+    system_prompt: str - system prompt to use
+    """
+    assert (
+        len(adjacency_matrices)
+        == len(node_centers)
+        == len(node_centroids)
+        == len(node_extents)
+    ), "timestep mismatch"
+
+    # node feat indices correspond to cluster ids
+    node_feat_indices = sorted(list(node_feats.keys()), key=lambda x: int(x))
+    node_feats = [node_feats[idx] for idx in node_feat_indices]
+    node_feats = [i[node_feats_timestep_idx] for i in node_feats]
     object_content = []
     for i in range(len(node_feats)):
-        object_content.extend([
-            {
-                "type": "text",
-                "text": f'<object id="{i}">',
-            },
-            {
-                "type": "image",
-                "image": None,
-            },
-            {
-                "type": "text",
-                "text": "</object>\n",
-            }
-        ])
+        object_content.extend(
+            [
+                {
+                    "type": "text",
+                    "text": f'<object id="{i}">',
+                },
+                {
+                    "type": "image",
+                    "image": None,
+                },
+                {
+                    "type": "text",
+                    "text": "</object>\n",
+                },
+            ]
+        )
 
     graph_content = []
     for t in range(len(adjacency_matrices)):
@@ -538,44 +718,42 @@ def prompt_with_graph(
             }
         )
         for n in range(A.shape[0]):
-            graph_content.extend([
-                {
-                    "type": "text",
-                    "text": f'<node id="{n}">\n',
-                },
-                {
-                    "type": "text",
-                    "text": f'<center x="{node_centers[t][n][0]:.2f}" y="{node_centers[t][n][1]:.2f}" z="{node_centers[t][n][2]:.2f}"/>\n',
-                },
-                {
-                    "type": "text",
-                    "text": f'<centroid x="{node_centroids[t][n][0]:.2f}" y="{node_centroids[t][n][1]:.2f}" z="{node_centroids[t][n][2]:.2f}"/>\n',
-                },
-                {
-                    "type": "text",
-                    "text": f'<extent x="{node_extents[t][n][0]:.2f}" y="{node_extents[t][n][1]:.2f}" z="{node_extents[t][n][2]:.2f}"/>\n',
-                },
-                {
-                    "type": "text",
-                    "text": '</node>\n',
-                }
-            ])
+            graph_content.extend(
+                [
+                    {
+                        "type": "text",
+                        "text": f'<node object-id="{n}">\n',
+                    },
+                    {
+                        "type": "text",
+                        "text": f'<centroid x="{node_centroids[t][n][0]:.2f}" y="{node_centroids[t][n][1]:.2f}" z="{node_centroids[t][n][2]:.2f}"/>\n',
+                    },
+                    {
+                        "type": "text",
+                        "text": f'<extent x="{node_extents[t][n][0]:.2f}" y="{node_extents[t][n][1]:.2f}" z="{node_extents[t][n][2]:.2f}"/>\n',
+                    },
+                    {
+                        "type": "text",
+                        "text": "</node>\n",
+                    },
+                ]
+            )
         for n in range(A.shape[0]):
             for m in range(A.shape[1]):
                 if A[n, m] > 0:
                     graph_content.append(
                         {
                             "type": "text",
-                            "text": f'<edge from="{n}" to="{m}" dist="{A[n, m]:.2f}"/>\n',
+                            "text": f'<edge from="{n}" to="{m}" overlap_score="{A[n, m]:.2f}" centroid_distance="{np.linalg.norm(node_centroids[t][n] - node_centroids[t][m]):.2f}"/>\n',
                         }
                     )
         graph_content.append(
             {
                 "type": "text",
-                "text": '</spatial-graph>\n',
+                "text": "</spatial-graph>\n",
             }
         )
-    # TODO: adapt question and system_prompt 
+    # TODO: adapt question and system_prompt
     messages = [
         {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
         {
@@ -589,19 +767,16 @@ def prompt_with_graph(
                 *graph_content,
                 {"type": "text", "text": "</spatial-graphs>\n"},
                 {"type": "text", "text": "</scene-graph>\n"},
-                {"type": "text", "text": '<question>'},
+                {"type": "text", "text": "<prompt>"},
                 {"type": "text", "text": question},
-                {"type": "text", "text": "</question>\n"},
+                {"type": "text", "text": "</prompt>\n"},
                 {"type": "text", "text": "\nYour response:\n"},
             ],
         },
     ]
 
-    with open('qwen_messages.json', 'w') as fp:
+    with open("qwen_messages.json", "w") as fp:
         json.dump(messages, fp)
-
-    # print(f"messages: {messages}")
-    print(f"shape of node_feats: {len(node_feats)}")
 
     return generate_with_vision_features(
         messages=messages,
@@ -612,6 +787,270 @@ def prompt_with_graph(
         max_tokens=5012,
     )
 
+
+def prompt_with_dynamic_graph(
+    question: str,
+    node_feats: np.lib.npyio.NpzFile,
+    adjacency_matrices: np.ndarray,
+    node_centers: np.ndarray,
+    node_centroids: np.ndarray,
+    node_extents: np.ndarray,
+    model: Qwen2_5_VLForConditionalGeneration,
+    processor: Qwen2_5_VLProcessor,
+    system_prompt: str,
+):
+    assert (
+        len(adjacency_matrices)
+        == len(node_centers)
+        == len(node_centroids)
+        == len(node_extents)
+    ), "timestep mismatch"
+
+    # node feat indices correspond to cluster ids
+    node_feat_indices = sorted(list(node_feats.keys()), key=lambda x: int(x))
+    node_feats = [node_feats[idx] for idx in node_feat_indices]
+
+    graph_content = []
+    for t in range(len(adjacency_matrices)):
+        A = adjacency_matrices[t]
+        graph_content.append(
+            {
+                "type": "text",
+                "text": f'<spatial-graph t="{t}">\n',
+            }
+        )
+        for n in range(A.shape[0]):
+            graph_content.extend(
+                [
+                    {
+                        "type": "text",
+                        "text": f'<node id="{n}">\n',
+                    },
+                    {
+                        "type": "text",
+                        "text": "<descriptor>",
+                    },
+                    {
+                        "type": "image",
+                        "image": None,
+                    },
+                    {
+                        "type": "text",
+                        "text": "</descriptor>\n",
+                    },
+                    {
+                        "type": "text",
+                        "text": f'<center x="{node_centers[t][n][0]:.2f}" y="{node_centers[t][n][1]:.2f}" z="{node_centers[t][n][2]:.2f}"/>\n',
+                    },
+                    {
+                        "type": "text",
+                        "text": f'<centroid x="{node_centroids[t][n][0]:.2f}" y="{node_centroids[t][n][1]:.2f}" z="{node_centroids[t][n][2]:.2f}"/>\n',
+                    },
+                    {
+                        "type": "text",
+                        "text": f'<extent x="{node_extents[t][n][0]:.2f}" y="{node_extents[t][n][1]:.2f}" z="{node_extents[t][n][2]:.2f}"/>\n',
+                    },
+                    {
+                        "type": "text",
+                        "text": "</node>\n",
+                    },
+                ]
+            )
+        for n in range(A.shape[0]):
+            for m in range(A.shape[1]):
+                if A[n, m] > 0:
+                    centroid_dist = float(np.linalg.norm(node_centroids[t][n] - node_centroids[t][m]))
+                    graph_content.append(
+                        {
+                            "type": "text",
+                            "text": f'<edge from="{n}" to="{m}" overlap_score="{A[n, m]:.2f}" centroid_distance="{centroid_dist:.2f}"/>\n',
+                        }
+                    )
+        graph_content.append(
+            {
+                "type": "text",
+                "text": "</spatial-graph>\n",
+            }
+        )
+    # TODO: adapt question and system_prompt
+    messages = [
+        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "<scene-graph>\n"},
+                {"type": "text", "text": "<spatial-graphs>\n"},
+                *graph_content,
+                {"type": "text", "text": "</spatial-graphs>\n"},
+                {"type": "text", "text": "</scene-graph>\n"},
+                {"type": "text", "text": "<prompt>"},
+                {"type": "text", "text": question},
+                {"type": "text", "text": "</prompt>\n"},
+                {"type": "text", "text": "\nYour response:\n"},
+            ],
+        },
+    ]
+
+    with open("qwen_messages.json", "w") as fp:
+        json.dump(messages, fp)
+
+    feature_list = []
+    for n in range(len(node_feats)):
+        for t in range(node_feats[n].shape[0]):
+            feature_list.append(torch.Tensor(node_feats[n][t]))
+
+    # TODO include l2 distances on edges as well
+    return generate_with_vision_features(
+        messages=messages,
+        vision_features=feature_list,
+        model=model,
+        processor=processor,
+        # TODO: increase this?
+        max_tokens=5012,
+    )
+
+
+def prompt_with_descriptors_at_timestep(
+    question: str,
+    node_feats: np.lib.npyio.NpzFile,
+    timestep_idx: int,
+    adjacency_matrices: np.ndarray,
+    node_centers: np.ndarray,
+    node_centroids: np.ndarray,
+    node_extents: np.ndarray,
+    model: Qwen2_5_VLForConditionalGeneration,
+    processor: Qwen2_5_VLProcessor,
+    system_prompt: str = None,
+):
+    """
+    Ablation of prompt_with_graph_at_timestep: only pass cluster descriptor images
+    for a single timestep, without any graph structure (no nodes/edges/geometry).
+
+    node_feats: np.lib.npyio.NpzFile - npz file containing node features through time
+    timestep_idx: int - index of the timestep to use for the node features
+    """
+    # keep signature parity; inputs other than node_feats/timestep are unused here
+    _ = adjacency_matrices, node_centers, node_centroids, node_extents
+
+    # node feat indices correspond to cluster ids
+    node_feat_indices = sorted(list(node_feats.keys()), key=lambda x: int(x))
+    node_feats_list = [node_feats[idx] for idx in node_feat_indices]
+    node_feats_t = [i[timestep_idx] for i in node_feats_list]
+
+    # Create a descriptor-only prompt with images, no graph structure
+    descriptor_content = []
+    descriptor_content.append({"type": "text", "text": f'<descriptors t="{timestep_idx}">\n'})
+    for i in range(len(node_feats_t)):
+        descriptor_content.extend(
+            [
+                {"type": "text", "text": f'<descriptor id="{i}">'},
+                {"type": "image", "image": None},
+                {"type": "text", "text": "</descriptor>\n"},
+            ]
+        )
+    descriptor_content.append({"type": "text", "text": "</descriptors>\n"})
+
+    messages = [
+        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "<descriptors>\n"},
+                *descriptor_content,
+                {"type": "text", "text": "</descriptors>\n"},
+                {"type": "text", "text": "<prompt>"},
+                {"type": "text", "text": question},
+                {"type": "text", "text": "</prompt>\n"},
+                {"type": "text", "text": "\nYour response:\n"},
+            ],
+        },
+    ]
+
+    with open("qwen_messages.json", "w") as fp:
+        json.dump(messages, fp)
+
+    return generate_with_vision_features(
+        messages=messages,
+        vision_features=[torch.Tensor(f) for f in node_feats_t],
+        model=model,
+        processor=processor,
+        max_tokens=5012,
+    )
+
+
+def prompt_with_dynamic_descriptors(
+    question: str,
+    node_feats: np.lib.npyio.NpzFile,
+    adjacency_matrices: np.ndarray,
+    node_centers: np.ndarray,
+    node_centroids: np.ndarray,
+    node_extents: np.ndarray,
+    model: Qwen2_5_VLForConditionalGeneration,
+    processor: Qwen2_5_VLProcessor,
+    system_prompt: str,
+):
+    """
+    Ablation of prompt_with_dynamic_graph: pass only descriptor images separated by
+    timestep, omitting all graph structure (no nodes/edges/geometry).
+    """
+    assert (
+        len(adjacency_matrices)
+        == len(node_centers)
+        == len(node_centroids)
+        == len(node_extents)
+    ), "timestep mismatch"
+
+    # node feat indices correspond to cluster ids
+    node_feat_indices = sorted(list(node_feats.keys()), key=lambda x: int(x))
+    node_feats_list = [node_feats[idx] for idx in node_feat_indices]
+
+    # Build descriptor-only content with timestep separation
+    content = []
+    for t in range(len(adjacency_matrices)):
+        content.append({"type": "text", "text": f'<descriptors t="{t}">\n'})
+        # number of clusters = len(node_feats_list)
+        for n in range(len(node_feats_list)):
+            content.extend(
+                [
+                    {"type": "text", "text": f'<descriptor id="{n}">'},
+                    {"type": "image", "image": None},
+                    {"type": "text", "text": "</descriptor>\n"},
+                ]
+            )
+        content.append({"type": "text", "text": "</descriptors>\n"})
+
+    messages = [
+        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "<descriptors>\n"},
+                *content,
+                {"type": "text", "text": "</descriptors>\n"},
+                {"type": "text", "text": "<prompt>"},
+                {"type": "text", "text": question},
+                {"type": "text", "text": "</prompt>\n"},
+                {"type": "text", "text": "\nYour response:\n"},
+            ],
+        },
+    ]
+
+    with open("qwen_messages.json", "w") as fp:
+        json.dump(messages, fp)
+
+    # Keep the same feature ordering pattern as prompt_with_dynamic_graph
+    feature_list = []
+    for n in range(len(node_feats_list)):
+        for t in range(node_feats_list[n].shape[0]):
+            feature_list.append(torch.Tensor(node_feats_list[n][t]))
+
+    return generate_with_vision_features(
+        messages=messages,
+        vision_features=feature_list,
+        model=model,
+        processor=processor,
+        max_tokens=5012,
+    )
 
 def crop_patch_features(patch_feat: torch.Tensor, cw, ch, cx1, cx2, cy1, cy2):
     return patch_feat.reshape(ch, cw, -1)[cy1 : cy2 + 1, cx1 : cx2 + 1].flatten(
@@ -636,12 +1075,20 @@ def get_patch_segmasks(im_height, im_width):
     # )
     # patch_coords = torch.floor_divide(rowcol, EFFECTIVE_PATCH_SIZE)
     # return patch_coords[0] * patches_width + patch_coords[1]
-    patches_height = im_height // EFFECTIVE_PATCH_SIZE + ((im_height // PATCH_SIZE) % 4 == 3) # cursed behavior
-    patches_width = im_width // EFFECTIVE_PATCH_SIZE + ((im_width // PATCH_SIZE) % 4 == 3)    # -,,-
+    patches_height = im_height // EFFECTIVE_PATCH_SIZE + (
+        (im_height // PATCH_SIZE) % 4 == 3
+    )  # cursed behavior
+    patches_width = im_width // EFFECTIVE_PATCH_SIZE + (
+        (im_width // PATCH_SIZE) % 4 == 3
+    )  # -,,-
     rowcol = torch.stack(
         torch.meshgrid(
-            torch.arange(patches_height * EFFECTIVE_PATCH_SIZE + ((im_height // PATCH_SIZE) % 4 == 3) * PATCH_SIZE),
-            torch.arange(patches_width * EFFECTIVE_PATCH_SIZE) + ((im_width // PATCH_SIZE) % 4 == 3) * PATCH_SIZE,
+            torch.arange(
+                patches_height * EFFECTIVE_PATCH_SIZE
+                + ((im_height // PATCH_SIZE) % 4 == 3) * PATCH_SIZE
+            ),
+            torch.arange(patches_width * EFFECTIVE_PATCH_SIZE)
+            + ((im_width // PATCH_SIZE) % 4 == 3) * PATCH_SIZE,
             indexing="ij",
         )
     )

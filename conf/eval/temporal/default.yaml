@@ -5,146 +5,239 @@
 # Query-specific questions and ground truth are in JSON annotation files
 
 # Ablations to run (similar to triplets evaluation)
-ablations: ["multiframe", "multiframe_graph"]
+ablations: ["multiframe", "multiframe_graph", "multiframe_descriptors"]
 
-# ============================================================================
-# EVALUATION METRICS - Category-specific metric configurations
-# ============================================================================
+# Ground-truth temporal labels location (no preprocessing required)
+# The evaluator will construct file paths as:
+#   ${eval.temporal.labels_root}/${clip.name}_temporal.json
+labels_root: data/temporal_labels
+labels_filename_template: "{clip_name}_temporal.json"
+
+# Where to dump per-clip prediction files during eval
+output_dir: ${eval.output_dir}/temporal
+
+# Metric configs (we compute in compute_metrics as well)
 metrics:
-  # Action Onset Detection: "When does X start happening?"
   action_onset:
     type: "frame_error"
-    tolerance: 3  # Accept prediction if within ±3 frames of ground truth
-    
-  # Action Offset Detection: "When does X stop happening?"
+    tolerance: 1
   action_offset:
     type: "frame_error"
-    tolerance: 3  # Accept prediction if within ±3 frames of ground truth
-    
-  # Action Duration/Range: "During which frames does X happen?"
+    tolerance: 1
   action_duration:
     type: "iou"
-    threshold: 0.5  # Minimum IoU to consider prediction correct
-    
-  # Multiple Event Ordering: "Which happens first, X or Y?"
+    threshold: 0.5
   multiple_event_ordering:
     type: "composite"
-    # Evaluate both order correctness and temporal IoU per event
-    order_weight: 0.5  # Weight for correct ordering
-    iou_weight: 0.5    # Weight for frame range accuracy
+    order_weight: 0.5
+    iou_weight: 0.5
     iou_threshold: 0.5
-    
-  # Count/Frequency: "How many times does X happen?"
   count_frequency:
     type: "composite"
-    # Evaluate both count accuracy and temporal IoU per occurrence
-    count_weight: 0.5  # Weight for correct count
-    iou_weight: 0.5    # Weight for frame range accuracy per occurrence
+    count_weight: 0.5
+    iou_weight: 0.5
     iou_threshold: 0.5
 
 # ============================================================================
-# SYSTEM PROMPT - For graph-based temporal reasoning (multiframe_graph ablation)
+# SYSTEM PROMPTS - Per-ablation and per-task
 # ============================================================================
-system_prompt: |
-  You are an expert visceral surgeon analyzing surgical scene graphs for temporal reasoning.
-  
-  SCENE GRAPH STRUCTURE:
-  You are provided with a spatiotemporal scene graph representing a cholecystectomy procedure:
-  - <objects>: Each object (node) is a distinct entity (instruments or anatomy), represented by visual appearance
-  - <spatial-graphs>: A sequence of graphs over time, where each graph at timestep t contains:
-    - <node id="N">: Spatial properties of object N at time t
-      - <center>: 3D position of the object's bounding box center
-      - <centroid>: 3D center of mass of the object
-      - <extent>: 3D size/dimensions of the object
-    - <edge from="N" to="M" dist="D"/>: Spatial proximity between objects (smaller distance = closer)
-  
-  TEMPORAL REASONING WITH GRAPHS:
-  Use the graph to identify WHEN actions occur by analyzing:
-  
-  1. SPATIAL RELATIONSHIPS OVER TIME:
-     - Track edge distances across timesteps
-     - DECREASING distance = objects approaching/starting interaction
-     - SMALL stable distance = ongoing interaction (grasp, retract, etc.)
-     - INCREASING distance = objects separating/ending interaction
-  
-  2. OBJECT APPEARANCE/DISAPPEARANCE:
-     - Compare node positions across timesteps
-     - Objects entering field of view: position changes from absent to present
-     - Objects leaving field of view: position changes to absent or extents reduce significantly
-  
-  3. MOTION PATTERNS:
-     - Track node center/centroid positions over time
-     - Consistent direction = moving towards/away from something
-     - Stable position = stationary (e.g., grasping)
-  
-  4. TEMPORAL EVENTS:
-     - Identify frame/timestep when significant changes occur
-     - Use visual features to confirm what you detect spatially
-  
-  Always provide frame numbers or frame ranges in your answer based on when you observe these changes.
+system_prompts:
+  # 2D video-only ablation (multiframe)
+  multiframe:
+    action_onset: |
+      You are an expert visceral surgeon analyzing a cholecystectomy video sequence for temporal reasoning.
 
-# ============================================================================
-# BASE PROMPT - Template for all temporal queries (video-only ablation)
-# ============================================================================
-base_prompt: |
-  You are an expert visceral surgeon analyzing a cholecystectomy video sequence.
-  
-  YOUR TASK: Answer the following temporal question about when specific actions or events occur.
-  
-  VIDEO INFORMATION:
-  - Total frames: {num_frames}
-  - Frame range: frame_000000 to frame_{last_frame:06d}
-  - Frames are numbered sequentially starting from 0
-  
-  CRITICAL RULES:
-  1. Carefully observe the video frames to identify when actions/events occur
-  2. ONLY report timings you are confident about based on visual evidence
-  3. Use frame numbers to specify timing (e.g., frame 25, frames 10-30)
-  4. If you cannot determine the timing with confidence, state this clearly
-  5. DO NOT guess or infer based on typical procedures - use only what you see
-  
-  QUESTION: {question}
-  
-  ANSWER FORMAT: {answer_format}
-  
-  RESPONSE STRUCTURE:
-  1. First, describe what you observe across the frames relevant to the question
-  2. Then, provide your answer in the exact format specified above
-  3. Finally, state your confidence level (high/medium/low)
+      INPUT FORMAT:
+      - Video frames across timesteps t=0..T-1
+
+      TEMPORAL REASONING WITH VIDEO:
+      Use the video to identify WHEN actions occur:
+      - Carefully track the motion of objects over time.
+      - Reason through the video frame by frame.
+
+    action_duration: |
+      You are an expert visceral surgeon analyzing a cholecystectomy video sequence for temporal reasoning.
+
+      INPUT FORMAT:
+      - Video frames across timesteps t=0..T-1
+
+      TEMPORAL REASONING WITH VIDEO:
+      Use the video to identify WHEN actions occur:
+      - Carefully track the motion of objects over time.
+      - Reason through the video frame by frame.
+
+  # Graph ablation (multiframe_graph)
+  multiframe_graph:
+    action_onset: |
+      You are an expert visceral surgeon analyzing surgical scene graphs for temporal reasoning.
+
+      INPUT FORMAT:
+      - <scene-graph>
+        - <spatial-graphs> across timesteps t=0..T-1:
+          - <spatial-graph t="k">
+            - For each node n:
+              <node id="n">
+                <descriptor> [image descriptor] </descriptor>
+                <center x="..." y="..." z="..."/>
+                <centroid x="..." y="..." z="..."/>
+                <extent x="..." y="..." z="..."/>
+              </node>
+            - For each interacting pair (n,m):
+              <edge from="n" to="m" overlap_score="..." centroid_distance="..."/>
+          - </spatial-graph>
+        - </spatial-graphs>
+      - </scene-graph>
+
+      TEMPORAL REASONING WITH GRAPHS:
+      Use the graph to identify WHEN actions occur:
+      - Carefully track the motion of nodes over time by paying attention to the changes in node positions, edge distances, and overlap scores across timesteps. Pay SPECIAL attention to drastic changes.
+      - Identify object relationships by paying attention to the object descriptors and their changes over time.
+      - Reason through the graph timestep by timestep.
+
+    action_duration: |
+      You are an expert visceral surgeon analyzing surgical scene graphs for temporal reasoning.
+
+      INPUT FORMAT:
+      - <scene-graph>
+        - <spatial-graphs> across timesteps t=0..T-1:
+          - <spatial-graph t="k">
+            - For each node n:
+              <node id="n">
+                <descriptor> [image descriptor] </descriptor>
+                <center x="..." y="..." z="..."/>
+                <centroid x="..." y="..." z="..."/>
+                <extent x="..." y="..." z="..."/>
+              </node>
+            - For each interacting pair (n,m):
+              <edge from="n" to="m" overlap_score="..." centroid_distance="..."/>
+          - </spatial-graph>
+        - </spatial-graphs>
+      - </scene-graph>
+
+      TEMPORAL REASONING WITH GRAPHS:
+      Use the graph to identify WHEN actions occur:
+      - Carefully track the motion of nodes over time by paying attention to the changes in node positions, edge distances, and overlap scores across timesteps. Pay SPECIAL attention to drastic changes.
+      - Identify object relationships by paying attention to the object descriptors and their changes over time.
+      - Reason through the graph timestep by timestep.
+
+  # Descriptors-only ablation (multiframe_descriptors)
+  multiframe_descriptors:
+    action_onset: |
+      You are an expert visceral surgeon analyzing descriptor images over time for temporal reasoning.
+
+      INPUT FORMAT:
+      - <descriptors> across timesteps t=0..T-1
+        - At each timestep, a set of <descriptor id="d"> entries containing image descriptors
+      - </descriptors>
+
+      TEMPORAL REASONING WITH DESCRIPTORS:
+      Use descriptor appearance changes and emergence/disappearance patterns over time to identify WHEN actions occur.
+
+    action_duration: |
+      You are an expert visceral surgeon analyzing descriptor images over time for temporal reasoning.
+
+      INPUT FORMAT:
+      - <descriptors> across timesteps t=0..T-1
+        - At each timestep, a set of <descriptor id="d"> entries containing image descriptors
+      - </descriptors>
+
+      TEMPORAL REASONING WITH DESCRIPTORS:
+      Use consistency and changes in descriptor evidence over time to segment WHEN actions occur.
+
+
+# Task-specific prompts for video-only ablation
+base_prompts:
+  action_onset: |
+    You are an expert visceral surgeon analyzing a cholecystectomy video sequence.
+
+    YOUR TASK: Identify the frame when the specified action first starts.
+
+    The video has {num_frames} frames, numbered 0..{last_frame}.
+
+    QUESTION: {question}
+
+    ANSWER FORMAT: {answer_format}
+
+    You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object: {{"frame": <int>}}
+
+  action_duration: |
+    You are an expert visceral surgeon analyzing a cholecystectomy video sequence.
+
+    YOUR TASK: Identify the frame range(s) during which the specified action occurs.
+
+    The video has {num_frames} frames, numbered 0..{last_frame}.
+
+    QUESTION: {question}
+
+    ANSWER FORMAT: {answer_format}
+
+    You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object: {{"ranges": [[<int>, <int>], ...]}}
 
 # ============================================================================
 # GRAPH-ENHANCED PROMPT - For multiframe_graph ablation
 # ============================================================================
-graph_prompt: |
-  You are an expert visceral surgeon analyzing both a cholecystectomy video AND its scene graph.
-  
-  YOUR TASK: Answer the following temporal question by leveraging both visual and spatial-temporal graph information.
-  
-  VIDEO INFORMATION:
-  - Total frames: {num_frames}
-  - Frame range: frame_000000 to frame_{last_frame:06d}
-  - Frames are numbered sequentially starting from 0
-  
-  GRAPH INFORMATION:
-  - You have access to a 4D scene graph showing objects and their spatial relationships over time
-  - Use edge distances to detect when objects interact (small distance = interaction)
-  - Use node positions to track motion and detect when objects appear/disappear
-  - Use temporal changes in the graph to precisely identify when events occur
-  
-  REASONING STRATEGY:
-  1. Examine the scene graph to identify relevant objects (instruments, anatomy)
-  2. Track spatial relationships (edges) and positions (nodes) across timesteps
-  3. Identify when significant changes occur (threshold crossings, appearance/disappearance)
-  4. Verify your graph-based findings with the visual appearance of objects
-  5. Map timesteps back to frame numbers for your answer
-  
-  QUESTION: {question}
-  
-  ANSWER FORMAT: {answer_format}
-  
-  RESPONSE STRUCTURE:
-  1. Describe relevant objects and their relationships in the graph
-  2. Explain what temporal changes you observed in the graph
-  3. Provide your answer in the exact format specified above
-  4. State your confidence level (high/medium/low)
+## per-task prompts for graph ablation below
 
+# Task-specific prompts for graph ablation
+graph_prompts:
+  action_onset: |
+    You are an expert visceral surgeon analyzing both a cholecystectomy video AND its scene graph.
+
+    YOUR TASK: Identify the frame when the specified action first starts, leveraging temporal changes in the scene graph.
+
+    The graph has {num_frames} timesteps, numbered 0..{last_frame}.
+
+    GRAPH INFORMATION:
+    - Small edge distances indicate proximity. Large edge distances indicate separation.
+    - Large overlap scores indicate that objects interact or touch. Small overlap scores indicate that objects do not interact or touch.
+
+    QUESTION: {question}
+
+    ANSWER FORMAT: {answer_format}
+
+    You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object: {{"frame": <int>}}
+
+  action_duration: |
+    You are an expert visceral surgeon analyzing both a cholecystectomy video AND its scene graph.
+
+    YOUR TASK: Identify the frame range(s) during which the specified action occurs, leveraging temporal changes in the scene graph.
+
+    The graph has {num_frames} timesteps, numbered 0..{last_frame}.
+
+    GRAPH INFORMATION:
+    - Small edge distances indicate proximity. Large edge distances indicate separation.
+    - Large overlap scores indicate that objects interact or touch. Small overlap scores indicate that objects do not interact or touch.
+
+    QUESTION: {question}
+
+    ANSWER FORMAT: {answer_format}
+
+    You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object: {{"ranges": [[<int>, <int>], ...]}}
+
+# Task-specific prompts for descriptors-only ablation
+descriptors_prompts:
+  action_onset: |
+    You are an expert visceral surgeon analyzing descriptor images over time.
+
+    YOUR TASK: Identify the frame when the specified action first starts, leveraging temporal changes in descriptor evidence.
+
+    The descriptor sequence has {num_frames} timesteps, numbered 0..{last_frame}.
+
+    QUESTION: {question}
+
+    ANSWER FORMAT: {answer_format}
+
+    You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object: {{"frame": <int>}}
+
+  action_duration: |
+    You are an expert visceral surgeon analyzing descriptor images over time.
+
+    YOUR TASK: Identify the frame range(s) during which the specified action occurs, leveraging temporal changes in descriptor evidence.
+
+    The descriptor sequence has {num_frames} timesteps, numbered 0..{last_frame}.
+
+    QUESTION: {question}
+
+    ANSWER FORMAT: {answer_format}
+
+    You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object: {{"ranges": [[<int>, <int>], ...]}}

@@ -1,16 +1,20 @@
 defaults:
-  - triplets: default
+  # - triplets: default
   - temporal: default
   - spatial: default
   - _self_
 
 # nulling skips - comment out to enable
 triplets: null
-temporal: null
+# temporal: null
 # spatial: null
 
+# Quantization settings for the evaluation model (used across all eval stages)
+use_bnb_4bit: false
+use_bnb_8bit: false
+
 # Required output directory for benchmark results
-output_dir: ${output_root}/benchmark
+output_dir: ${output_root}/predictions
 
 # Optional output override for benchmark results
 output: null
@@ -22,7 +26,7 @@ paths:
   images_subdir: "images"
   
   # Subdirectory within output clip dir that contains graph data
-  graph_subdir: "graph"
+  graph_subdir: "graph_hailmary_final"
   
   # Can override these per evaluation type if needed
   # e.g., different graph subdirs for different ablations

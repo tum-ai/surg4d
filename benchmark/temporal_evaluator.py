@@ -12,14 +12,14 @@ Supports temporal query types:
 
 import sys
 import json
-import re
+# regex no longer needed; strict JSON parsing
 import numpy as np
 from pathlib import Path
 from typing import List, Dict, Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from benchmark.benchmark_config import BenchmarkConfig
-from qwen_vl import get_patched_qwen, prompt_with_graph
+from qwen_vl import prompt_with_dynamic_graph, prompt_with_dynamic_descriptors
 from qwen_vl_utils import process_vision_info
 
 #TODO: change "field of view" query focus for video01_16345 (does not make sense for graph)
@@ -28,7 +28,7 @@ from qwen_vl_utils import process_vision_info
 class TemporalFrameEvaluator:
     """Evaluator for temporal action localization"""
     
-    def __init__(self, config: BenchmarkConfig):
+    def __init__(self, config: BenchmarkConfig, model=None, processor=None):
         self.config = config
         self.temporal_cfg = config.temporal_config
         
@@ -50,18 +50,17 @@ class TemporalFrameEvaluator:
         print(f"Loaded {self.num_frames} frames from {config.video_dir}")
         
         # Load model
-        print("Loading Qwen VL model...")
-        self.model, self.processor = get_patched_qwen(
-            use_bnb_4bit=config.use_4bit_quantization,
-            device_map=config.device
-        )
+        # Reuse provided Qwen model and processor (non-attention variant used for spatial)
+        self.model = model
+        self.processor = processor
         
         # Increase max_pixels to allow more frames (default is ~12.8M pixels)
         # With 80 frames at 1920x1080, we need ~166M pixels
         # This will allow the model to process all 80 frames without downsampling
-        original_max_pixels = self.processor.image_processor.max_pixels
-        self.processor.image_processor.max_pixels = 200_000_000  # 200M pixels
-        print(f"✓ Model loaded (increased max_pixels from {original_max_pixels:,} to {self.processor.image_processor.max_pixels:,})")
+        if self.processor is not None and hasattr(self.processor, 'image_processor'):
+            original_max_pixels = self.processor.image_processor.max_pixels
+            self.processor.image_processor.max_pixels = 200_000_000  # 200M pixels
+            print(f"✓ Using shared model (increased max_pixels from {original_max_pixels:,} to {self.processor.image_processor.max_pixels:,})")
         
         # Initialize parsers and evaluators
         self._init_parsers()
@@ -169,11 +168,13 @@ class TemporalFrameEvaluator:
             Result dict with metrics
         """
         query_type = query_annotation['query_type']
+        # Store for prompt building
+        self.current_query_type = query_type
         
         # Stage 1: Query the model
         raw_response = self._query_model(
             question=query_annotation['question'],
-            answer_format=query_annotation['answer_format'],
+            answer_format=query_annotation.get('answer_format', ''),
             ablation=ablation
         )
         
@@ -220,29 +221,108 @@ class TemporalFrameEvaluator:
         ablation: str
     ) -> str:
         """Query the model based on ablation type"""
-        
+
         if ablation == "multiframe":
-            # Video-only: Use all frames, base_prompt
+            # Video-only: Downsample frames to align with graph timesteps if available
+            # Prefer task-specific template from Hydra
+            template = self.temporal_cfg['base_prompts'][getattr(self, 'current_query_type', '')]
+            selected_frames = self.video_frames
+            systems_cfg = self.temporal_cfg.get('system_prompts', {})
+            system_prompt = None
+            try:
+                mf_cfg = systems_cfg.get('multiframe')
+                if isinstance(mf_cfg, dict):
+                    system_prompt = mf_cfg.get(getattr(self, 'current_query_type', ''), None)
+                else:
+                    system_prompt = systems_cfg.get('multiframe', None)
+            except Exception:
+                system_prompt = None
+            try:
+                graph_data = self._load_graph_data(self.graph_path)
+                if graph_data is not None:
+                    num_ts = int(graph_data['adjacency_matrices'].shape[0])
+                    if num_ts > 0 and len(self.video_frames) > 0:
+                        stride = max(1, round(len(self.video_frames) / num_ts))
+                        selected_frames = self.video_frames[::stride]
+            except Exception:
+                selected_frames = self.video_frames
+            # Build prompt using the number of frames actually passed
             prompt = self._build_prompt(
-                template=self.temporal_cfg['base_prompt'],
+                template=template,
                 question=question,
-                answer_format=answer_format
+                answer_format=answer_format,
+                num_frames_override=len(selected_frames),
+                last_frame_override=len(selected_frames) - 1,
             )
-            response = self._query_multiframe(self.video_frames, prompt)
+            response = self._query_multiframe(selected_frames, prompt, system_prompt=system_prompt)
         
         elif ablation == "multiframe_graph":
-            # Video + Graph: Use graph_prompt and system_prompt
+            # Video + Graph: Use graph prompt and system prompt; prefer task-specific
+            template = self.temporal_cfg['graph_prompts'][getattr(self, 'current_query_type', '')]
+            systems_cfg = self.temporal_cfg.get('system_prompts', {})
+            # Prefer per-task prompt; fall back to legacy single system_prompt
+            try:
+                mg_cfg = systems_cfg.get('multiframe_graph')
+                if isinstance(mg_cfg, dict):
+                    system_prompt = mg_cfg.get(getattr(self, 'current_query_type', ''), None)
+                else:
+                    system_prompt = systems_cfg.get('multiframe_graph', None)
+            except Exception:
+                system_prompt = None
+            if system_prompt is None:
+                system_prompt = self.temporal_cfg.get('system_prompt', None)
+            # Determine graph timesteps for accurate prompt variables
+            graph_data = self._load_graph_data(self.graph_path)
+            if graph_data is not None:
+                num_ts = int(graph_data['adjacency_matrices'].shape[0])
+            else:
+                num_ts = self.num_frames
             prompt = self._build_prompt(
-                template=self.temporal_cfg['graph_prompt'],
+                template=template,
                 question=question,
-                answer_format=answer_format
+                answer_format=answer_format,
+                num_frames_override=num_ts,
+                last_frame_override=num_ts - 1,
             )
-            system_prompt = self.temporal_cfg.get('system_prompt', None)
             response = self._query_with_graph(
                 image_paths=self.video_frames,
                 graph_path=self.graph_path,
                 prompt=prompt,
                 system_prompt=system_prompt
+            )
+        
+        elif ablation == "multiframe_descriptors":
+            # Descriptors-only (no graph structure): Use descriptors prompt and system prompt; prefer task-specific
+            template = self.temporal_cfg['descriptors_prompts'][getattr(self, 'current_query_type', '')]
+            systems_cfg = self.temporal_cfg.get('system_prompts', {})
+            try:
+                md_cfg = systems_cfg.get('multiframe_descriptors')
+                if isinstance(md_cfg, dict):
+                    system_prompt = md_cfg.get(getattr(self, 'current_query_type', ''), None)
+                else:
+                    system_prompt = systems_cfg.get('multiframe_descriptors', None)
+            except Exception:
+                system_prompt = None
+            if system_prompt is None:
+                system_prompt = self.temporal_cfg.get('system_prompt', None)
+            # Determine descriptor timesteps via graph data (node_feats timeline)
+            graph_data = self._load_graph_data(self.graph_path)
+            if graph_data is not None:
+                num_ts = int(graph_data['adjacency_matrices'].shape[0])
+            else:
+                num_ts = self.num_frames
+            prompt = self._build_prompt(
+                template=template,
+                question=question,
+                answer_format=answer_format,
+                num_frames_override=num_ts,
+                last_frame_override=num_ts - 1,
+            )
+            response = self._query_with_descriptors(
+                image_paths=self.video_frames,
+                graph_path=self.graph_path,
+                prompt=prompt,
+                system_prompt=system_prompt,
             )
         
         else:
@@ -254,24 +334,34 @@ class TemporalFrameEvaluator:
         self, 
         template: str, 
         question: str, 
-        answer_format: str
+        answer_format: str,
+        *,
+        num_frames_override: int | None = None,
+        last_frame_override: int | None = None,
     ) -> str:
-        """Fill in prompt template with query-specific info"""
+        """Fill in prompt template with query-specific info.
+
+        Allows overriding num_frames/last_frame to reflect subsampled frames or graph timesteps actually passed to the model.
+        """
+        nf = num_frames_override if num_frames_override is not None else self.num_frames
+        lf = last_frame_override if last_frame_override is not None else (nf - 1)
         return template.format(
-            num_frames=self.num_frames,
-            last_frame=self.num_frames - 1,
+            num_frames=nf,
+            last_frame=lf,
             question=question,
-            answer_format=answer_format
+            answer_format=answer_format,
         )
     
-    def _query_multiframe(self, image_paths: List[Path], prompt: str) -> str:
+    def _query_multiframe(self, image_paths: List[Path], prompt: str, system_prompt: str | None = None) -> str:
         """Query model with multiple frames (video)"""
         
         content = []
         content.append({"type": "video", "video": [str(p) for p in image_paths]})
         content.append({"type": "text", "text": prompt})
-        
-        messages = [{"role": "user", "content": content}]
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": [{"type": "text", "text": system_prompt}]})
+        messages.append({"role": "user", "content": content})
         
         text = self.processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
@@ -317,19 +407,47 @@ class TemporalFrameEvaluator:
             print("Warning: Could not load graph, falling back to video-only")
             return self._query_multiframe(image_paths, prompt)
         
-        # Use existing prompt_with_graph from qwen_vl.py
-        response = prompt_with_graph(
+        # Use dynamic graph prompting across all timesteps
+        response = prompt_with_dynamic_graph(
+            question=prompt,
             node_feats=graph_data['node_feats'],
             adjacency_matrices=graph_data['adjacency_matrices'],
             node_centers=graph_data['node_centers'],
             node_centroids=graph_data['node_centroids'],
             node_extents=graph_data['node_extents'],
-            question=prompt,
             model=self.model,
             processor=self.processor,
-            system_prompt=system_prompt
+            system_prompt=system_prompt if system_prompt is not None else self.temporal_cfg.get('system_prompt', None),
         )
         
+        return response
+
+    def _query_with_descriptors(
+        self,
+        image_paths: List[Path],
+        graph_path: Path,
+        prompt: str,
+        system_prompt: str | None = None,
+    ) -> str:
+        """Query model with multiple frames AND descriptor features only (no graph)."""
+        # Load graph data to access descriptor npz timeline
+        graph_data = self._load_graph_data(graph_path)
+        if graph_data is None:
+            print("Warning: Could not load descriptor features, falling back to video-only")
+            return self._query_multiframe(image_paths, prompt, system_prompt=system_prompt)
+
+        response = prompt_with_dynamic_descriptors(
+            question=prompt,
+            node_feats=graph_data['node_feats'],
+            adjacency_matrices=graph_data['adjacency_matrices'],
+            node_centers=graph_data['node_centers'],
+            node_centroids=graph_data['node_centroids'],
+            node_extents=graph_data['node_extents'],
+            model=self.model,
+            processor=self.processor,
+            system_prompt=system_prompt if system_prompt is not None else self.temporal_cfg.get('system_prompt', None),
+        )
+
         return response
     
     def _load_graph_data(self, graph_path: Path) -> Optional[Dict]:
@@ -340,9 +458,8 @@ class TemporalFrameEvaluator:
                 return None
             
             # Load features
+            # Keep NPZ file object so downstream can select timestep appropriately
             qwen_feats_dict = np.load(qwen_feat_file)
-            cluster_ids = sorted([int(k) for k in qwen_feats_dict.keys()])
-            node_feats = [qwen_feats_dict[str(cluster_id)][0] for cluster_id in cluster_ids]
             
             # Load spatial properties
             adjacency_matrices = np.load(graph_path / "graph.npy")
@@ -351,7 +468,7 @@ class TemporalFrameEvaluator:
             extents = np.load(graph_path / "c_extents.npy")
             
             return {
-                'node_feats': node_feats,
+                'node_feats': qwen_feats_dict,
                 'adjacency_matrices': adjacency_matrices,
                 'node_centers': centers,
                 'node_centroids': centroids,
@@ -368,42 +485,22 @@ class TemporalFrameEvaluator:
     def _parse_single_frame(self, response: str) -> Optional[Dict]:
         """Parse response for action_onset or action_offset"""
         try:
-            # Try JSON first
+            # Expect strict JSON only
             start = response.find('{')
             end = response.rfind('}') + 1
             if start >= 0 and end > start:
                 json_str = response[start:end]
                 data = json.loads(json_str)
+                # Unwrap if model returned {"<query_type>": {...}}
+                if 'frame' not in data and hasattr(self, 'current_query_type') and isinstance(data, dict):
+                    inner = data.get(self.current_query_type)
+                    if isinstance(inner, dict):
+                        data = inner
+
                 if 'frame' in data:
-                    # Handle various frame value formats
                     frame_val = data['frame']
                     if isinstance(frame_val, (int, float)):
                         return {'frame': int(frame_val)}
-                    elif isinstance(frame_val, str):
-                        # Try to extract number from string
-                        if frame_val.lower() in ['n/a', 'na', 'none', 'null', 'unknown']:
-                            print(f"  Warning: Model returned '{frame_val}' for frame")
-                            return None
-                        # Try to parse as number
-                        try:
-                            return {'frame': int(frame_val)}
-                        except ValueError:
-                            pass
-            
-            # Fallback: regex patterns
-            patterns = [
-                r'frame[_\s]+(\d+)',
-                r'at frame (\d+)',
-                r'frame number (\d+)',
-                r'frame:\s*(\d+)',
-                r'(\d+)\s*(?:is|was)',  # "Frame 77 is when..."
-            ]
-            for pattern in patterns:
-                match = re.search(pattern, response.lower())
-                if match:
-                    return {'frame': int(match.group(1))}
-            
-            print("  Warning: Could not parse frame from response")
             return None
         
         except Exception as e:
@@ -413,37 +510,24 @@ class TemporalFrameEvaluator:
     def _parse_frame_ranges(self, response: str) -> Optional[Dict]:
         """Parse response for action_duration"""
         try:
-            # Try JSON first
+            # Expect strict JSON only
             start = response.find('{')
             end = response.rfind('}') + 1
             if start >= 0 and end > start:
                 json_str = response[start:end]
                 data = json.loads(json_str)
+                # Unwrap if model returned {"<query_type>": {...}}
+                if 'ranges' not in data and hasattr(self, 'current_query_type') and isinstance(data, dict):
+                    inner = data.get(self.current_query_type)
+                    if isinstance(inner, dict):
+                        data = inner
                 if 'ranges' in data:
                     ranges = []
                     for r in data['ranges']:
                         if isinstance(r, list) and len(r) == 2:
                             ranges.append([int(r[0]), int(r[1])])
-                        elif isinstance(r, list) and len(r) > 2:
-                            # Sometimes model returns [start, end, ...extra]
-                            ranges.append([int(r[0]), int(r[1])])
                     if ranges:
                         return {'ranges': ranges}
-            
-            # Fallback: regex patterns (more flexible)
-            patterns = [
-                r'frames?\s*(\d+)\s*[-–to]+\s*(\d+)',  # "frame 0-76" or "frames 0 to 76"
-                r'from\s+frame\s+(\d+)\s+to\s+frame\s+(\d+)',  # "from frame 0 to frame 76"
-                r'range\s*[:\s]+(\d+)\s*[-–to]+\s*(\d+)',  # "range: 0-76"
-                r'\[(\d+),\s*(\d+)\]',  # "[0, 76]"
-            ]
-            for pattern in patterns:
-                matches = re.findall(pattern, response.lower())
-                if matches:
-                    ranges = [[int(start), int(end)] for start, end in matches]
-                    return {'ranges': ranges}
-            
-            print("  Warning: Could not parse ranges from response")
             return None
         
         except Exception as e:
@@ -453,12 +537,17 @@ class TemporalFrameEvaluator:
     def _parse_ordered_events(self, response: str) -> Optional[Dict]:
         """Parse response for multiple_event_ordering"""
         try:
-            # Try JSON first
+            # Expect strict JSON only
             start = response.find('{')
             end = response.rfind('}') + 1
             if start >= 0 and end > start:
                 json_str = response[start:end]
                 data = json.loads(json_str)
+                # Unwrap if model returned {"<query_type>": {...}}
+                if 'events' not in data and hasattr(self, 'current_query_type') and isinstance(data, dict):
+                    inner = data.get(self.current_query_type)
+                    if isinstance(inner, dict):
+                        data = inner
                 if 'events' in data and isinstance(data['events'], list):
                     events = []
                     for event in data['events']:
@@ -466,34 +555,11 @@ class TemporalFrameEvaluator:
                             events.append({
                                 'order': int(event['order']),
                                 'description': event.get('description', ''),
-                                'frame_range': [int(event['frame_range'][0]), 
-                                              int(event['frame_range'][1])]
+                                'frame_range': [int(event['frame_range'][0]), int(event['frame_range'][1])]
                             })
                     if events:
                         events.sort(key=lambda x: x['order'])
                         return {'events': events}
-            
-            # Fallback: Try to extract "first" and "second" with frame ranges
-            # This is a simple heuristic for cases where model describes events in text
-            first_match = re.search(r'first.*?(?:frames?|from)\s*(\d+)\s*(?:to|-)\s*(\d+)', response.lower())
-            second_match = re.search(r'second.*?(?:frames?|from)\s*(\d+)\s*(?:to|-)\s*(\d+)', response.lower())
-            
-            if first_match and second_match:
-                events = [
-                    {
-                        'order': 1,
-                        'description': 'first event',
-                        'frame_range': [int(first_match.group(1)), int(first_match.group(2))]
-                    },
-                    {
-                        'order': 2,
-                        'description': 'second event',
-                        'frame_range': [int(second_match.group(1)), int(second_match.group(2))]
-                    }
-                ]
-                return {'events': events}
-            
-            print("  Warning: Could not parse ordered events from response")
             return None
         
         except Exception as e:
@@ -503,12 +569,17 @@ class TemporalFrameEvaluator:
     def _parse_count_and_ranges(self, response: str) -> Optional[Dict]:
         """Parse response for count_frequency"""
         try:
-            # Try JSON first
+            # Expect strict JSON only
             start = response.find('{')
             end = response.rfind('}') + 1
             if start >= 0 and end > start:
                 json_str = response[start:end]
                 data = json.loads(json_str)
+                # Unwrap if model returned {"<query_type>": {...}}
+                if 'count' not in data and hasattr(self, 'current_query_type') and isinstance(data, dict):
+                    inner = data.get(self.current_query_type)
+                    if isinstance(inner, dict):
+                        data = inner
                 if 'count' in data:
                     occurrences = []
                     if 'occurrences' in data and isinstance(data['occurrences'], list):
@@ -519,35 +590,6 @@ class TemporalFrameEvaluator:
                         'count': int(data['count']),
                         'occurrences': occurrences
                     }
-            
-            # Fallback: try to find count with various patterns
-            count_patterns = [
-                r'count[:\s]+(\d+)',
-                r'(\d+)\s+times?',
-                r'occurs\s+(\d+)',
-                r'happens\s+(\d+)',
-            ]
-            
-            for pattern in count_patterns:
-                match = re.search(pattern, response.lower())
-                if match:
-                    count = int(match.group(1))
-                    # Try to find ranges
-                    ranges_result = self._parse_frame_ranges(response)
-                    occurrences = ranges_result['ranges'] if ranges_result else []
-                    return {
-                        'count': count,
-                        'occurrences': occurrences
-                    }
-            
-            # Check for "never", "zero", "no times", etc.
-            if re.search(r'\b(?:never|zero|no times|not at all|does not)\b', response.lower()):
-                return {
-                    'count': 0,
-                    'occurrences': []
-                }
-            
-            print("  Warning: Could not parse count from response")
             return None
         
         except Exception as e:

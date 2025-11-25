@@ -2,8 +2,10 @@ import math
 from types import MethodType
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
+import numpy as np
 
 import torch
+import json
 from PIL import Image
 from transformers import AutoProcessor
 from transformers.models.qwen3_vl import Qwen3VLForConditionalGeneration
@@ -33,7 +35,7 @@ def _maybe_make_bnb_config(
 
 
 def get_patched_qwen3(
-    model_path: str = "Qwen/Qwen3-VL-7B-Instruct",
+    model_path: str = "Qwen/Qwen3-VL-8B-Instruct",
     use_bnb_4bit: bool = False,
     use_bnb_8bit: bool = False,
     attn_implementation: str = "sdpa",
@@ -83,6 +85,16 @@ def get_patched_qwen3(
             model.generation_config.return_legacy_cache = False
         except Exception:
             pass
+        # Enforce deterministic generation defaults centrally
+        try:
+            model.generation_config.do_sample = False
+            model.generation_config.temperature = 0.0
+            if hasattr(model.generation_config, "top_p"):
+                model.generation_config.top_p = 1.0
+            if hasattr(model.generation_config, "top_k"):
+                model.generation_config.top_k = 0
+        except Exception:
+            pass
 
     # 1) Patch prepare_inputs_for_generation to thread through `custom_patch_features`.
     orig_prepare = model.prepare_inputs_for_generation
@@ -99,6 +111,9 @@ def get_patched_qwen3(
         **kwargs,
     ):
         custom_patch_features = kwargs.pop("custom_patch_features", None)
+        if attention_mask is not None and input_ids is not None:
+            if attention_mask.shape[-1] != input_ids.shape[-1]:
+                attention_mask = attention_mask[..., -input_ids.shape[-1] :]
         model_inputs = orig_prepare(
             input_ids,
             past_key_values=past_key_values,
@@ -545,11 +560,12 @@ def generate_with_vision_features_qwen3(
         generated_ids = model.generate(
             **inputs,
             max_new_tokens=max_tokens,
+            custom_patch_features=adjusted,
         )
 
     generated_ids_trimmed = [
         out_ids[len(in_ids) :]
-        for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+        for in_ids, out_ids in zip(inputs["input_ids"], generated_ids)
     ]
     output_text = processor.batch_decode(
         generated_ids_trimmed,
@@ -557,3 +573,188 @@ def generate_with_vision_features_qwen3(
         clean_up_tokenization_spaces=False,
     )
     return output_text[0]
+
+
+def prompt_with_static_graph(
+    question: str,
+    node_feats: np.lib.npyio.NpzFile,
+    node_feats_timestep_idx: int,
+    adjacency_matrices: np.ndarray,
+    node_centers: np.ndarray,
+    node_centroids: np.ndarray,
+    node_extents: np.ndarray,
+    model: torch.nn.Module,
+    processor: Any,
+    system_prompt: str = None,
+):
+    assert (
+        len(adjacency_matrices)
+        == len(node_centers)
+        == len(node_centroids)
+        == len(node_extents)
+    ), "timestep mismatch"
+
+    node_feat_indices = sorted(list(node_feats.keys()), key=lambda x: int(x))
+    node_feats_list = [node_feats[idx] for idx in node_feat_indices]
+    node_feats_list = [i[node_feats_timestep_idx] for i in node_feats_list]
+
+    object_content: List[Dict[str, Any]] = []
+    for i in range(len(node_feats_list)):
+        object_content.extend(
+            [
+                {"type": "text", "text": f'<object id="{i}">'},
+                {"type": "image", "image": None},
+                {"type": "text", "text": "</object>\n"},
+            ]
+        )
+
+    graph_content: List[Dict[str, Any]] = []
+    for t in range(len(adjacency_matrices)):
+        A = adjacency_matrices[t]
+        graph_content.append({"type": "text", "text": f'<spatial-graph t="{t}">\n'})
+        for n in range(A.shape[0]):
+            graph_content.extend(
+                [
+                    {"type": "text", "text": f'<node object-id="{n}">\n'},
+                    {
+                        "type": "text",
+                        "text": f'<centroid x="{node_centroids[t][n][0]:.2f}" y="{node_centroids[t][n][1]:.2f}" z="{node_centroids[t][n][2]:.2f}"/>\n',
+                    },
+                    {
+                        "type": "text",
+                        "text": f'<extent x="{node_extents[t][n][0]:.2f}" y="{node_extents[t][n][1]:.2f}" z="{node_extents[t][n][2]:.2f}"/>\n',
+                    },
+                    {"type": "text", "text": "</node>\n"},
+                ]
+            )
+        for n in range(A.shape[0]):
+            for m in range(A.shape[1]):
+                if A[n, m] > 0:
+                    graph_content.append(
+                        {
+                            "type": "text",
+                            "text": f'<edge from="{n}" to="{m}" overlap_score="{A[n, m]:.2f}" centroid_distance="{np.linalg.norm(node_centroids[t][n] - node_centroids[t][m]):.2f}"/>\n',
+                        }
+                    )
+        graph_content.append({"type": "text", "text": "</spatial-graph>\n"})
+
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "<scene-graph>\n"},
+                {"type": "text", "text": "<objects>\n"},
+                *object_content,
+                {"type": "text", "text": "</objects>\n"},
+                {"type": "text", "text": "<spatial-graphs>\n"},
+                *graph_content,
+                {"type": "text", "text": "</spatial-graphs>\n"},
+                {"type": "text", "text": "</scene-graph>\n"},
+                {"type": "text", "text": "<prompt>"},
+                {"type": "text", "text": question},
+                {"type": "text", "text": "</prompt>\n"},
+                {"type": "text", "text": "\nYour response:\n"},
+            ],
+        },
+    ]
+
+    with open("qwen_messages.json", "w") as fp:
+        json.dump(messages, fp)
+
+    return generate_with_vision_features_qwen3(
+        messages=messages,
+        vision_features=[torch.Tensor(f) for f in node_feats_list],
+        model=model,
+        processor=processor,
+        max_tokens=5012,
+    )
+
+
+def prompt_with_dynamic_graph(
+    question: str,
+    node_feats: np.lib.npyio.NpzFile,
+    adjacency_matrices: np.ndarray,
+    node_centers: np.ndarray,
+    node_centroids: np.ndarray,
+    node_extents: np.ndarray,
+    model: torch.nn.Module,
+    processor: Any,
+    system_prompt: str,
+):
+    assert (
+        len(adjacency_matrices)
+        == len(node_centers)
+        == len(node_centroids)
+        == len(node_extents)
+    ), "timestep mismatch"
+
+    node_feat_indices = sorted(list(node_feats.keys()), key=lambda x: int(x))
+    node_feats_list = [node_feats[idx] for idx in node_feat_indices]
+
+    graph_content: List[Dict[str, Any]] = []
+    for t in range(len(adjacency_matrices)):
+        A = adjacency_matrices[t]
+        graph_content.append({"type": "text", "text": f'<spatial-graph t="{t}">\n'})
+        for n in range(A.shape[0]):
+            graph_content.extend(
+                [
+                    {"type": "text", "text": f'<node id="{n}">\n'},
+                    {"type": "text", "text": "<descriptor>"},
+                    {"type": "image", "image": None},
+                    {"type": "text", "text": "</descriptor>\n"},
+                    {
+                        "type": "text",
+                        "text": f'<centroid x="{node_centroids[t][n][0]:.2f}" y="{node_centroids[t][n][1]:.2f}" z="{node_centroids[t][n][2]:.2f}"/>\n',
+                    },
+                    {
+                        "type": "text",
+                        "text": f'<extent x="{node_extents[t][n][0]:.2f}" y="{node_extents[t][n][1]:.2f}" z="{node_extents[t][n][2]:.2f}"/>\n',
+                    },
+                    {"type": "text", "text": "</node>\n"},
+                ]
+            )
+        for n in range(A.shape[0]):
+            for m in range(A.shape[1]):
+                if A[n, m] > 0:
+                    graph_content.append(
+                        {
+                            "type": "text",
+                            "text": f'<edge from="{n}" to="{m}" overlap_score="{A[n, m]:.2f}" centroid_distance="{np.linalg.norm(node_centroids[t][n] - node_centroids[t][m]):.2f}"/>\n',
+                        }
+                    )
+        graph_content.append({"type": "text", "text": "</spatial-graph>\n"})
+
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "<scene-graph>\n"},
+                {"type": "text", "text": "<spatial-graphs>\n"},
+                *graph_content,
+                {"type": "text", "text": "</spatial-graphs>\n"},
+                {"type": "text", "text": "</scene-graph>\n"},
+                {"type": "text", "text": "<prompt>"},
+                {"type": "text", "text": question},
+                {"type": "text", "text": "</prompt>\n"},
+                {"type": "text", "text": "\nYour response:\n"},
+            ],
+        },
+    ]
+
+    with open("qwen_messages.json", "w") as fp:
+        json.dump(messages, fp)
+
+    feature_list: List[torch.Tensor] = []
+    for n in range(len(node_feats_list)):
+        for t in range(node_feats_list[n].shape[0]):
+            feature_list.append(torch.Tensor(node_feats_list[n][t]))
+
+    return generate_with_vision_features_qwen3(
+        messages=messages,
+        vision_features=feature_list,
+        model=model,
+        processor=processor,
+        max_tokens=5012,
+    )

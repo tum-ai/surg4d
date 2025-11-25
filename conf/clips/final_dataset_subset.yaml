@@ -1,0 +1,17 @@
+- name: video01_00240
+  video_id: 1
+  first_frame: 240
+  last_frame: 320
+  frame_stride: 1
+
+- name: video12_19500
+  video_id: 12
+  first_frame: 19500
+  last_frame: 19580
+  frame_stride: 1
+
+- name: video17_01563
+  video_id: 17
+  first_frame: 1563
+  last_frame: 1643
+  frame_stride: 1

@@ -1,8 +1,15 @@
+import gc
+import json
 from pathlib import Path
-from datetime import datetime
 from omegaconf import DictConfig, OmegaConf
+import os
+import random
 from tqdm import tqdm
 import hydra
+import numpy as np
+import torch
+from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLProcessor
+from qwen_vl import get_patched_qwen
 
 from benchmark.benchmark_config import BenchmarkConfig
 from benchmark.frame_selectors import TripletsFrameSelector
@@ -10,25 +17,18 @@ from benchmark.frame_evaluators import TripletsFrameEvaluator
 from benchmark.temporal_evaluator import TemporalFrameEvaluator
 from benchmark.spatial import (
     get_patched_qwen_for_spatial_grounding,
-    extract_text_to_vision_attention,
+    splat_feat_queries,
+    dump_spatial_prediction_visualizations,
+    static_graph_feat_queries,
+    frame_attn_feat_queries,
+    splat_graph_feat_queries,
+    frame_attn_refine_feat_queries,
+    frame_direct_feat_queries,
 )
 from rerun_utils import (
     init_and_save_rerun,
-    log_spatial_grounding_heatmaps,
-    log_basic_points,
+    log_spatial_predictions,
 )
-import numpy as np
-import torch
-
-# rerun is used via helper functions imported from rerun_utils
-
-import json
-from scene.dataset_readers import readColmapSceneInfo, CameraInfo
-from scene.cameras import Camera
-import os
-
-import matplotlib.pyplot as plt
-import cv2
 
 
 def _build_benchmark_config(cfg: DictConfig, clip: DictConfig) -> BenchmarkConfig:
@@ -45,14 +45,7 @@ def _build_benchmark_config(cfg: DictConfig, clip: DictConfig) -> BenchmarkConfi
     clip_name = str(clip.name)
     video_dir = preprocessed_root / clip_name
 
-    # Get path configuration from eval config (with defaults)
-    images_subdir = "images"
-    graph_subdir = "graph"
-    if cfg.get("eval") is not None and cfg.eval.get("paths") is not None:
-        images_subdir = cfg.eval.paths.get("images_subdir", "images")
-        graph_subdir = cfg.eval.paths.get("graph_subdir", "graph")
-
-    graph_dir = output_root / clip_name / graph_subdir
+    graph_dir = output_root / clip_name / cfg.eval.paths.graph_subdir
 
     # Convert nested eval configs (OmegaConf) to plain dicts
     triplets_cfg = None
@@ -79,8 +72,8 @@ def _build_benchmark_config(cfg: DictConfig, clip: DictConfig) -> BenchmarkConfi
         results_dir=output_root / "benchmark",
         video_dir=video_dir,
         graph_dir=graph_dir,
-        images_subdir=images_subdir,
-        graph_subdir=graph_subdir,
+        images_subdir=cfg.eval.paths.images_subdir,
+        graph_subdir=cfg.eval.paths.graph_subdir,
         model_name="qwen",
         qwen_version=qwen_version,
         use_4bit_quantization=use_4bit,
@@ -88,17 +81,24 @@ def _build_benchmark_config(cfg: DictConfig, clip: DictConfig) -> BenchmarkConfi
     return bench_cfg
 
 
-def evaluate_triplets(clip: DictConfig, cfg: DictConfig):
+def evaluate_triplets(
+    clip: DictConfig,
+    cfg: DictConfig,
+    model: Qwen2_5_VLForConditionalGeneration,
+    processor: Qwen2_5_VLProcessor,
+):
     """Run triplet recognition evaluation for a single clip."""
+    if cfg.eval is None or cfg.eval.triplets is None:
+        return
     bench_cfg = _build_benchmark_config(cfg, clip)
     triplets_cfg = bench_cfg.triplets_config
     assert triplets_cfg is not None, "cfg.eval.triplets must be provided"
     if triplets_cfg is None:
         return
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"TRIPLETS EVALUATION: {clip.name}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     try:
         selector = TripletsFrameSelector(bench_cfg)
@@ -115,45 +115,72 @@ def evaluate_triplets(clip: DictConfig, cfg: DictConfig):
 
     selector.print_summary(samples)
 
-    evaluator = TripletsFrameEvaluator(bench_cfg)
+    evaluator = TripletsFrameEvaluator(bench_cfg, model=model, processor=processor)
     results = evaluator.run_ablation_study(
-        samples, ablations=bench_cfg.triplets_config["ablations"]  # type: ignore[index]
+        samples,
+        ablations=bench_cfg.triplets_config["ablations"],  # type: ignore[index]
     )
 
-    # Save to required output dir
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = Path(cfg.eval.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_file = out_dir / f"{clip.name}_triplet_ablation_{ts}.json"
-    evaluator.save_results(results, out_file)
+    # Convert to prediction dump analogous to temporal eval
+    preds_by_ablation: dict[str, list[dict]] = {}
+    for ablation, payload in results.get("conditions", {}).items():
+        ablation_results = payload.get("results", [])
+        preds_by_ablation[ablation] = [
+            {
+                "sample_id": r.get("sample_id"),
+                "video_id": r.get("video_id"),
+                "clip_start": r.get("clip_start"),
+                "end_frame": r.get("end_frame"),
+                "second_idx": r.get("second_idx"),
+                "predicted": r.get("predicted_triplets", []),
+                "raw_response": r.get("response"),
+            }
+            for r in ablation_results
+        ]
+
+    # Save per-clip predictions for compute_metrics stage
+    pred_out_dir = Path(cfg.eval.triplets.output_dir)
+    pred_out_dir.mkdir(parents=True, exist_ok=True)
+    pred_out_file = pred_out_dir / f"{clip.name}.json"
+    with pred_out_file.open("w") as f:
+        json.dump({"clip": clip.name, "ablations": preds_by_ablation}, f, indent=2)
 
 
-def evaluate_temporal(clip: DictConfig, cfg: DictConfig):
+def evaluate_temporal(
+    clip: DictConfig,
+    cfg: DictConfig,
+    model: Qwen2_5_VLForConditionalGeneration,
+    processor: Qwen2_5_VLProcessor,
+):
     """Run temporal action localization evaluation for a single clip."""
+    if cfg.eval is None or cfg.eval.temporal is None:
+        return
     bench_cfg = _build_benchmark_config(cfg, clip)
     temporal_cfg = bench_cfg.temporal_config
     assert temporal_cfg is not None, "cfg.eval.temporal must be provided"
     if temporal_cfg is None:
         return
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"TEMPORAL EVALUATION: {clip.name}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
-    # Check if clip has temporal annotations specified
-    if not hasattr(clip, "temporal_eval_file") or clip.temporal_eval_file is None:
-        print(f"No temporal_eval_file specified for clip {clip.name}")
-        print("Skipping temporal evaluation for this clip.")
-        print(
-            "To enable, add 'temporal_eval_file: path/to/annotations.json' to clip config"
-        )
-        return
+    # Resolve temporal annotations file
+    # Priority: clip.temporal_eval_file (override) -> eval.temporal.labels_root/template
+    temporal_anno_file: Path
+    if hasattr(clip, "temporal_eval_file") and clip.temporal_eval_file is not None:
+        temporal_anno_file = Path(clip.temporal_eval_file)
+    else:
+        # Build from Hydra config (no preprocessing required)
+        temporal_labels_root = Path(cfg.eval.temporal.get("labels_root", "data/temporal_labels"))
+        filename_template = cfg.eval.temporal.get("labels_filename_template", "{clip_name}_temporal.json")
+        temporal_anno_file = temporal_labels_root / filename_template.format(clip_name=str(clip.name))
 
-    # Load temporal annotations from JSON file specified in clip config
-    temporal_anno_file = Path(clip.temporal_eval_file)
+    # Load temporal annotations from resolved path
     if not temporal_anno_file.exists():
         print(f"ERROR: Temporal annotations not found: {temporal_anno_file}")
         print("Skipping temporal evaluation for this clip.")
+        print("Provide 'temporal_eval_file' in clip config or place labels under eval.temporal.labels_root.")
         return
 
     import json
@@ -181,7 +208,7 @@ def evaluate_temporal(clip: DictConfig, cfg: DictConfig):
     )
 
     # Run temporal evaluation
-    evaluator = TemporalFrameEvaluator(bench_cfg)
+    evaluator = TemporalFrameEvaluator(bench_cfg, model=model, processor=processor)
 
     # Check if evaluator was initialized successfully
     if evaluator.num_frames == 0:
@@ -193,12 +220,27 @@ def evaluate_temporal(clip: DictConfig, cfg: DictConfig):
         ablations=bench_cfg.temporal_config["ablations"],
     )
 
-    # Save results
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = Path(cfg.eval.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_file = out_dir / f"{clip.name}_temporal_{ts}.json"
-    evaluator.save_results(results, out_file)
+    # Convert to prediction dump analogous to spatial eval
+    preds_by_ablation: dict[str, list[dict]] = {}
+    for ablation, payload in results.get("ablations", {}).items():
+        ablation_results = payload.get("results", [])
+        preds_by_ablation[ablation] = [
+            {
+                "query_id": r.get("query_id"),
+                "query_type": r.get("query_type"),
+                "question": r.get("question"),
+                "predicted": r.get("predicted"),
+                "raw_response": r.get("raw_response"),
+            }
+            for r in ablation_results
+        ]
+
+    # Save per-clip predictions for compute_metrics stage
+    pred_out_dir = Path(cfg.eval.temporal.output_dir)
+    pred_out_dir.mkdir(parents=True, exist_ok=True)
+    pred_out_file = pred_out_dir / f"{clip.name}.json"
+    with pred_out_file.open("w") as f:
+        json.dump({"clip": clip.name, "ablations": preds_by_ablation}, f, indent=2)
 
 
 def get_timestep_from_frame(frame: str, image_dir: Path) -> int:
@@ -210,75 +252,14 @@ def get_timestep_from_frame(frame: str, image_dir: Path) -> int:
     return timestep
 
 
-def get_proj_matrix_from_timestep(
-    timestep: int, train_cameras: list, frame: str
-) -> torch.Tensor:
-    # Get the camera parameters for the timestep
-    camera_info = train_cameras[timestep]
-    assert isinstance(
-        camera_info, CameraInfo
-    ), "camera_info must be a CameraInfo object"
-
-    # Instantiate a Camera object from the camera info
-    image = camera_info.image
-    R = camera_info.R
-    T = camera_info.T
-    FovX = camera_info.FovX
-    FovY = camera_info.FovY
-    time = camera_info.time
-    mask = camera_info.mask
-    camera = Camera(
-        colmap_id=timestep,
-        R=R,
-        T=T,
-        FoVx=FovX,
-        FoVy=FovY,
-        image=image,
-        gt_alpha_mask=None,
-        image_name=f"{frame}",
-        uid=timestep,
-        data_device=torch.device("cuda"),
-        time=time,
-        mask=mask,
-    )
-
-    # Get projection matrix from camera object
-    # full_proj_transform includes the world to cam as well, seems to be correct
-    # projection_matrix = camera.projection_matrix
-    full_proj_matrix = camera.full_proj_transform
-    return full_proj_matrix, camera.image_width, camera.image_height
-
-
-def project_3d_to_2d(
-    positions: np.ndarray, proj_matrix: torch.Tensor, img_width: int, img_height: int
-) -> np.ndarray:
-    # Expecting positions to be (N, 3)
-    assert positions.shape[1] == 3, "Positions must be (N, 3)"
-
-    # Conver to homogeneous coordinates
-    ones = torch.ones(
-        positions.shape[0], 1, dtype=positions.dtype, device=positions.device
-    )
-    positions = torch.cat([positions, ones], dim=1)  # (N, 4)
-
-    # Apply full projection transform: world to image space
-    # Apparently full_proj_transform is transposed, seems to be correct
-    coords = (proj_matrix.T @ positions.T).T  # (N, 4)
-
-    # Perspective division to get NDC (Normalized Device Coordinates)
-    w = coords[:, 3]
-    ndc = coords[:, :3] / (w.unsqueeze(1) + 1e-7)  # (N, 3) [x, y, z] in [-1, 1]
-
-    # Convert NDC to pixel coordinates
-    # NDC: x, y in [-1, 1] → Pixel: u in [0, width], v in [0, height]
-    pixels_x = (ndc[:, 0] + 1.0) * 0.5 * img_width
-    pixels_y = (ndc[:, 1] + 1.0) * 0.5 * img_height
-
-    pixels = np.stack([pixels_x, pixels_y], axis=-1)  # (N, 2)
-    return pixels
-
-
-def evaluate_spatial(clip: DictConfig, cfg: DictConfig):
+def evaluate_spatial(
+    clip: DictConfig,
+    cfg: DictConfig,
+    model_spatial: Qwen2_5_VLForConditionalGeneration,
+    processor_spatial: Qwen2_5_VLProcessor,
+    model: Qwen2_5_VLForConditionalGeneration,
+    processor: Qwen2_5_VLProcessor,
+):
     """Compute text-to-vision attention over sampled scene points and log heatmaps to rerun.
 
     Expects graph extraction outputs to exist under output_root/<clip.name>/<graph_subdir>:
@@ -303,198 +284,249 @@ def evaluate_spatial(clip: DictConfig, cfg: DictConfig):
     if cfg.eval is None or cfg.eval.spatial is None:
         return
 
-    bench_cfg = _build_benchmark_config(cfg, clip)
-    spatial_cfg = bench_cfg.spatial_config
-    assert spatial_cfg is not None, "cfg.eval.spatial must be provided"
-    if spatial_cfg is None:
-        return
+    # splat data
+    graph_dir = Path(cfg.output_root) / clip.name / cfg.eval.paths.graph_subdir
+    splat_feats = np.load(graph_dir / "splat_spatial_grounding_feats.npy")  #  (T, N, D)
+    splat_indices = np.load(
+        graph_dir / "splat_spatial_grounding_indices.npy"
+    )  # c_id -> (N,)
+    positions = np.load(graph_dir / "positions.npy")  # (T, N, 3)
 
-    print(f"\n{'='*80}")
-    print(f"SPATIAL EVALUATION: {clip.name}")
-    print(f"{'='*80}")
+    # load gt data
+    gt_file = Path(cfg.preprocessed_root) / clip.name / cfg.eval.spatial.gt_filename
+    with gt_file.open("r") as f:
+        gt_data = json.load(f)
 
-    # Check if clip has spatial evaluation file specified
-    if not hasattr(clip, "spatial_eval_file") or clip.spatial_eval_file is None:
-        print(f"No spatial_eval_file specified for clip {clip.name}")
-        print("Skipping spatial evaluation for this clip.")
-        print(
-            "To enable, add 'spatial_eval_file: path/to/spatial_prompts.json' to clip config"
-        )
-        return
-
-    # Use configured graph_subdir or fall back to the one in spatial_cfg if specified
-    graph_subdir = spatial_cfg.get("graph_subdir", bench_cfg.graph_subdir)
-    graph_dir = bench_cfg.output_root / clip.name / graph_subdir
-
-    # Load required artifacts
-    splat_feats_path = graph_dir / "splat_spatial_grounding_feats.npy"
-    splat_indices_path = graph_dir / "splat_spatial_grounding_indices.npy"
-    positions_path = graph_dir / "positions.npy"
-    # Write overlays to a dedicated spatial file (non-destructive)
-    rerun_file = graph_dir / "visualization_spatial.rrd"
-
-    # Check that all required files exist before proceeding
-    missing_files = []
-    if not splat_feats_path.exists():
-        missing_files.append(str(splat_feats_path))
-    if not splat_indices_path.exists():
-        missing_files.append(str(splat_indices_path))
-    if not positions_path.exists():
-        missing_files.append(str(positions_path))
-
-    if missing_files:
-        print(f"ERROR: Missing required spatial grounding files:")
-        for f in missing_files:
-            print(f"  - {f}")
-        print("Skipping spatial evaluation due to missing data.")
-        print("Please run spatial grounding feature extraction first.")
-        return
-
-    splat_feats = np.load(splat_feats_path)  # (T, N, D)
-    splat_indices = np.load(splat_indices_path)  # (N,)
-    positions = np.load(positions_path)  # (M, 3), filtered gaussians
-
-    T, N, D = splat_feats.shape
-
-    # Get spatial eval data from file
-    spatial_eval_file = Path(clip.spatial_eval_file)
-    if not spatial_eval_file.exists():
-        print(f"ERROR: Spatial evaluation file not found: {spatial_eval_file}")
-        print("Skipping spatial evaluation for this clip.")
-        return
-
-    try:
-        with open(spatial_eval_file, "r") as f:
-            spatial_eval_data = json.load(f)
-    except json.JSONDecodeError as e:
-        print(f"ERROR: Invalid JSON in spatial evaluation file: {spatial_eval_file}")
-        print(f"JSON error: {e}")
-        print("Skipping spatial evaluation for this clip.")
-        return
-    except Exception as e:
-        print(f"ERROR: Could not load spatial evaluation file: {e}")
-        print("Skipping spatial evaluation for this clip.")
-        return
-
-    if (
-        "spatial_prompts" not in spatial_eval_data
-        or "spatial_prompts_frames" not in spatial_eval_data
-    ):
-        print(f"ERROR: Invalid format in spatial evaluation file: {spatial_eval_file}")
-        print("Expected keys: 'spatial_prompts' and 'spatial_prompts_frames'")
-        print("Skipping spatial evaluation for this clip.")
-        return
-
-    spatial_prompts = spatial_eval_data["spatial_prompts"]
-    spatial_prompts_frames = spatial_eval_data["spatial_prompts_frames"]
-
-    # Basic spatial eval setup
-    layers = list(map(int, spatial_cfg["layers"]))
-    cmap_name = str(spatial_cfg["colormap"])  # required
-
-    # Compute relevant dirs from cfg
-    colmap_root = os.path.join(cfg.preprocessed_root, clip.name)
-    image_dir = os.path.join(cfg.preprocessed_root, clip.name, bench_cfg.images_subdir)
-
-    # Check if image directory exists
-    if not Path(image_dir).exists():
-        print(f"ERROR: Images directory not found: {image_dir}")
-        print(
-            f"Expected structure: {cfg.preprocessed_root}/{clip.name}/{bench_cfg.images_subdir}/"
-        )
-        print("Skipping spatial evaluation due to missing data.")
-        return
-
-    # Load all camera parameters of the appropriate clip, will need some of them depending to project 3D to 2D
-    try:
-        scene_info = readColmapSceneInfo(colmap_root, images=None, eval=False)
-        train_cameras = scene_info.train_cameras
-        test_cameras = scene_info.test_cameras
-        assert len(test_cameras) == 0, "Test cameras should be empty"
-    except Exception as e:
-        print(f"ERROR: Could not load COLMAP scene info from {colmap_root}")
-        print(f"Error: {e}")
-        print("Skipping spatial evaluation due to missing data.")
-        return
-
-    # Load patched model with attentions enabled
-    use_4bit = bench_cfg.use_4bit_quantization
-    model, processor = get_patched_qwen_for_spatial_grounding(
-        use_bnb_4bit=use_4bit, use_bnb_8bit=False
+    # compute predictions
+    results_splat = splat_feat_queries(
+        model=model_spatial,
+        processor=processor_spatial,
+        splat_feats=splat_feats,
+        splat_indices=splat_indices,
+        positions=positions,
+        clip_gt=gt_data,
+        clip=clip,
+        cfg=cfg,
+    )
+    results_static_graph = static_graph_feat_queries(
+        model=model,
+        processor=processor,
+        graph_dir=graph_dir,
+        clip_gt=gt_data,
+        clip=clip,
+        cfg=cfg,
+    )
+    # SPLAT proposals + static graph refinement
+    results_splat_graph = splat_graph_feat_queries(
+        model_spatial=model_spatial,
+        processor_spatial=processor_spatial,
+        model=model,
+        processor=processor,
+        splat_feats=splat_feats,
+        splat_indices=splat_indices,
+        positions=positions,
+        graph_dir=graph_dir,
+        clip_gt=gt_data,
+        clip=clip,
+        cfg=cfg,
+    )
+    results_frame_attn = frame_attn_feat_queries(
+        model=model_spatial,
+        processor=processor_spatial,
+        preprocessed_root=Path(cfg.preprocessed_root),
+        images_subdir=cfg.eval.paths.images_subdir,
+        clip_gt=gt_data,
+        clip=clip,
+        cfg=cfg,
+    )
+    # 2D attention proposals + refinement via normal Qwen
+    results_frame_attn_refine = frame_attn_refine_feat_queries(
+        model_spatial=model_spatial,
+        processor_spatial=processor_spatial,
+        model=model,
+        processor=processor,
+        preprocessed_root=Path(cfg.preprocessed_root),
+        images_subdir=cfg.eval.paths.images_subdir,
+        clip_gt=gt_data,
+        clip=clip,
+        cfg=cfg,
+    )
+    # Direct Qwen prompting on frame to return a pixel
+    results_frame_direct = frame_direct_feat_queries(
+        model=model,
+        processor=processor,
+        preprocessed_root=Path(cfg.preprocessed_root),
+        images_subdir=cfg.eval.paths.images_subdir,
+        clip_gt=gt_data,
+        clip=clip,
+        cfg=cfg,
     )
 
-    for prompt, frame in zip(spatial_prompts, spatial_prompts_frames):
-        # TODO: experiment with this, might be better to choose more focused substrings
-        substring = prompt
+    # save predictions
+    all_results = {
+        "splat": results_splat,
+        "static_graph": results_static_graph,
+        "frame_attn": results_frame_attn,
+        "splat_graph": results_splat_graph,
+        "frame_attn_refine": results_frame_attn_refine,
+        "frame_direct": results_frame_direct,
+    }
+    out_dir = Path(cfg.eval.spatial.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    predictions_file = out_dir / f"{clip.name}.json"
+    with open(predictions_file, "w") as f:
+        json.dump(all_results, f, indent=4)
 
-        # Convert frame to timestep
-        timestep = get_timestep_from_frame(frame, image_dir=image_dir)
-        print(f"timestep: {timestep}")
-
-        proj_matrix, img_width, img_height = get_proj_matrix_from_timestep(
-            timestep, train_cameras, frame
+    # Optional: dump per-(query, layer) visualizations of top-k points on the frame
+    if cfg.eval.spatial.dump_visualizations:
+        dump_spatial_prediction_visualizations(
+            results_splat=results_splat,
+            clip_name=clip.name,
+            preprocessed_root=Path(cfg.preprocessed_root),
+            images_subdir=cfg.eval.paths.images_subdir,
+            gt_data=gt_data,
+            viz_dir=Path(cfg.eval.spatial.visualizations_dir),
+            method_name="splat",
+        )
+        # Also dump for static-graph baseline
+        dump_spatial_prediction_visualizations(
+            results_splat=results_static_graph,
+            clip_name=clip.name,
+            preprocessed_root=Path(cfg.preprocessed_root),
+            images_subdir=cfg.eval.paths.images_subdir,
+            gt_data=gt_data,
+            viz_dir=Path(cfg.eval.spatial.visualizations_dir),
+            method_name="static",
+        )
+        # And dump for frame-attention baseline
+        dump_spatial_prediction_visualizations(
+            results_splat=results_frame_attn,
+            clip_name=clip.name,
+            preprocessed_root=Path(cfg.preprocessed_root),
+            images_subdir=cfg.eval.paths.images_subdir,
+            gt_data=gt_data,
+            viz_dir=Path(cfg.eval.spatial.visualizations_dir),
+            method_name="frame_attn",
+        )
+        # And dump for splat+graph method
+        dump_spatial_prediction_visualizations(
+            results_splat=results_splat_graph,
+            clip_name=clip.name,
+            preprocessed_root=Path(cfg.preprocessed_root),
+            images_subdir=cfg.eval.paths.images_subdir,
+            gt_data=gt_data,
+            viz_dir=Path(cfg.eval.spatial.visualizations_dir),
+            method_name="splat_graph",
+        )
+        # And dump for frame_attn_refine method
+        dump_spatial_prediction_visualizations(
+            results_splat=results_frame_attn_refine,
+            clip_name=clip.name,
+            preprocessed_root=Path(cfg.preprocessed_root),
+            images_subdir=cfg.eval.paths.images_subdir,
+            gt_data=gt_data,
+            viz_dir=Path(cfg.eval.spatial.visualizations_dir),
+            method_name="frame_attn_refine",
+        )
+        # And dump for frame_direct method
+        dump_spatial_prediction_visualizations(
+            results_splat=results_frame_direct,
+            clip_name=clip.name,
+            preprocessed_root=Path(cfg.preprocessed_root),
+            images_subdir=cfg.eval.paths.images_subdir,
+            gt_data=gt_data,
+            viz_dir=Path(cfg.eval.spatial.visualizations_dir),
+            method_name="frame_direct",
         )
 
-        # Prepare vision features for the timestep
-        vision_features = torch.tensor(splat_feats[timestep], dtype=torch.float32)
+    # Initialize rerun sink for spatial visualization
+    init_and_save_rerun(graph_dir / "visualization_spatial.rrd")
 
-        # Compute attentions
-        attn_out = extract_text_to_vision_attention(
-            model=model,
-            processor=processor,
-            vision_features=vision_features,
-            layers=layers,
-            prompt=prompt,
-            substring=substring,
-        )
-
-        scores: torch.Tensor = attn_out["scores"]  # (L, Q, N)
-        tokens = attn_out["tokens"]
-        query_token_indices = attn_out["query_token_indices"]
-        # vision_token_indices = attn_out["vision_token_indices"]  # equals [0..N-1] in our setup
-
-        # Selected positions for the N sampled points
-        point_positions = positions[splat_indices]
-
-    # Init rerun sink to the existing file
-    init_and_save_rerun(rerun_file)
-
-    # Log a neutral base point cloud as context for overlay
-    log_basic_points(
-        entity_path="spatial_grounding/base_points",
-        positions=point_positions,
-        color=[180, 180, 180],
-        timestep=timestep,
+    # Single-call visualization
+    log_spatial_predictions(
+        base_path="splat",
+        clip_name=clip.name,
+        positions_through_time=positions,
+        results=results_splat,
+        cmap_name=cfg.eval.spatial.colormap,
     )
-
-    log_spatial_grounding_heatmaps(
-        base_path="spatial_grounding",
-        positions=point_positions,
-        layers=layers,
-        tokens=tokens,
-        query_token_indices=query_token_indices,
-        scores=scores.detach().cpu().numpy(),
-        cmap_name=cmap_name,
-        timestep=timestep,
+    # And log static graph results under a separate tree
+    log_spatial_predictions(
+        base_path="static_graph",
+        clip_name=clip.name,
+        positions_through_time=positions,
+        results=results_static_graph,
+        cmap_name=cfg.eval.spatial.colormap,
     )
-
-
-def evaluate_clip(clip: DictConfig, cfg: DictConfig):
-    """Run benchmark evaluations for a single clip using Hydra configs."""
-    if cfg.eval.triplets is not None:
-        evaluate_triplets(clip, cfg)
-
-    if cfg.eval.temporal is not None:
-        evaluate_temporal(clip, cfg)
-
-    if cfg.eval.spatial is not None:
-        evaluate_spatial(clip, cfg)
+    # And log splat+graph results
+    log_spatial_predictions(
+        base_path="splat_graph",
+        clip_name=clip.name,
+        positions_through_time=positions,
+        results=results_splat_graph,
+        cmap_name=cfg.eval.spatial.colormap,
+    )
+    # And log frame_attn_refine results
+    log_spatial_predictions(
+        base_path="frame_attn_refine",
+        clip_name=clip.name,
+        positions_through_time=positions,
+        results=results_frame_attn_refine,
+        cmap_name=cfg.eval.spatial.colormap,
+    )
+    # And log frame_direct results
+    log_spatial_predictions(
+        base_path="frame_direct",
+        clip_name=clip.name,
+        positions_through_time=positions,
+        results=results_frame_direct,
+        cmap_name=cfg.eval.spatial.colormap,
+    )
 
 
 @hydra.main(config_path="conf", config_name="config.yaml", version_base="1.3")
 def main(cfg: DictConfig):
+    # Deterministic Torch/CUDA setup
+    torch.manual_seed(42)
+    np.random.seed(42)
+    random.seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(42)
+    try:
+        torch.use_deterministic_algorithms(True)
+    except Exception:
+        pass
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
+        torch.backends.cuda.matmul.allow_tf32 = False
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")
+
+    model, processor = get_patched_qwen(
+        use_bnb_4bit=cfg.eval.use_bnb_4bit,
+        use_bnb_8bit=cfg.eval.use_bnb_8bit,
+    )
+    model_spatial, processor_spatial = get_patched_qwen_for_spatial_grounding(
+        use_bnb_4bit=cfg.eval.use_bnb_4bit,
+        use_bnb_8bit=cfg.eval.use_bnb_8bit,
+    )
+
     for clip in tqdm(cfg.clips, desc="Evaluating clips", unit="clip"):
-        evaluate_clip(clip, cfg)
+        evaluate_triplets(clip, cfg, model=model, processor=processor)
+        evaluate_temporal(clip, cfg, model=model, processor=processor)
+        evaluate_spatial(
+            clip=clip,
+            cfg=cfg,
+            model=model,
+            processor=processor,
+            model_spatial=model_spatial,
+            processor_spatial=processor_spatial,
+        )
+
+    del model_spatial
+    del processor_spatial
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ import mmcv
 import rerun as rr
 import random
 import hydra
+import os
 from omegaconf import DictConfig
 from tqdm import tqdm
 from typing import List, Optional, Tuple
@@ -222,7 +223,6 @@ def cluster_distances(
     positions_at_timestep: List[np.ndarray],
     cfg: DictConfig,
 ):
-    # ! UNTESTED, DOES NOT RUN ON CAMP MACHINE BECAUSE OF TOO LITTLE RAM
     dist_matrix = 0
     for norm_lf in norm_lf_at_timestep:
         d_lf = 1 - (norm_lf @ norm_lf.T)
@@ -723,11 +723,20 @@ def splat_spatial_grounding_feats(
             - indices: numpy array of shape (n_splat_points) into the whole splat
     """
     patch_feats = [deform_at_timestep(gaussians, t)[1] for t in timesteps]
-    indices = np.random.choice(
-        gaussians.get_xyz.shape[0],
-        cfg.graph_extraction.spatial_grounding.n_splat_points,
-        replace=False,
-    )
+    # indices = np.random.choice(
+    #     gaussians.get_xyz.shape[0],
+    #     cfg.graph_extraction.spatial_grounding.n_splat_points,
+    #     replace=False,
+    # )
+    # Select top-k most opaque gaussians (deterministic) instead of random sampling
+    k = int(cfg.graph_extraction.spatial_grounding.n_splat_points)
+    total = int(gaussians.get_xyz.shape[0])
+    k = min(k, total)
+    # get_opacity is (N,1) or (N,), pick as 1D numpy array
+    opac = gaussians.get_opacity.squeeze().detach().cpu().numpy()
+    order = np.argsort(opac)  # ascending
+    indices = order[-k:][::-1]  # top-k descending
+
     patch_feats = [i[indices] for i in patch_feats]
     decoded_patch_feats = [
         decode_qwen(torch.tensor(i, device="cuda", dtype=torch.float32), cfg, clip)
@@ -888,7 +897,6 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
         )  # instance latents through time (timesteps, n_filtered_gaussians, lang_dim)
 
         np.save(out / "opacities.npy", gaussians._opacity.detach().cpu().numpy())
-        np.save(out / "positions.npy", gaussians.get_xyz.detach().cpu().numpy())
         np.save(out / "colors.npy", gaussians.get_features.detach().cpu().numpy())
 
     cluster_feats_dict = {}
@@ -933,11 +941,8 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
     np.savez(
         out / "cluster_spatial_grounding_indices.npz", **cluster_indices
     )  # (cluster_id -> (n_feats,)) (ATTENTION: indices are into cluster gaussians, not the whole splat)
+    np.save(out / "positions.npy", pos_through_time) # (T, n_filtered_gaussians, 3)
     np.save(out / "clusters.npy", clusters)  # (n_filtered_gaussians,)
-    filtered_scene_dir = out / "filtered_scene"
-    filtered_scene_dir.mkdir(parents=True, exist_ok=True)
-    gaussians.save_ply(filtered_scene_dir / "point_cloud.ply")
-    gaussians.save_deformation(filtered_scene_dir)
 
     # Visualize to rerun
     rr.init("clusters")
@@ -972,6 +977,22 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
 @hydra.main(config_path="conf", config_name="config.yaml", version_base="1.3")
 def main(cfg: DictConfig):
     """Main graph extraction loop for all clips."""
+    # Deterministic Torch/CUDA setup
+    torch.manual_seed(42)
+    np.random.seed(42)
+    random.seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(42)
+    try:
+        torch.use_deterministic_algorithms(True)
+    except Exception:
+        pass
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
+        torch.backends.cuda.matmul.allow_tf32 = False
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")
+
     for clip in tqdm(cfg.clips, desc="Extracting graphs", unit="clip"):
         extract_graph(clip, cfg)
 

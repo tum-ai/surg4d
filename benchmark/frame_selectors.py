@@ -30,7 +30,9 @@ class MultiFrameSample:
     
     @property
     def sample_id(self) -> str:
-        return f"v{self.video_id:02d}_f{self.start_frame:05d}-{self.end_frame:05d}"
+        abs_start = int(self.clip_start + self.start_frame)
+        abs_end = int(self.clip_start + self.end_frame)
+        return f"v{self.video_id:02d}_c{int(self.clip_start):05d}_f{abs_start:05d}-{abs_end:05d}"
     
     @property
     def num_frames(self) -> int:
@@ -65,10 +67,12 @@ class TripletsFrameSelector:
         """
         video_id, clip_start, graph_path = self.available_graph
 
-        # Currently, the frame ids in the cholecseg8k dataset are relative to the clip start -> have to add and then divide by the framerate
-        FRAMERATE = self.config.triplets_config['FRAMERATE']
-        NUM_FRAMES = self.config.triplets_config['NUM_FRAMES']
+        # Frame indexing and mapping
+        FRAMERATE = self.config.triplets_config['FRAMERATE']  # 25 fps
+        NUM_FRAMES = self.config.triplets_config['NUM_FRAMES']  # 80
         TEMP_CONTEXT_FR_MULTIPLIER = self.config.triplets_config['TEMP_CONTEXT_FR_MULTIPLIER']
+        FRAME_STRIDE = int(self.config.triplets_config.get('frame_stride', 4))
+        ALIGN_TO_GRAPH = bool(self.config.triplets_config.get('align_to_graph', True))
         
         # Need the video id here to go with that into cholect50; does not correspond to the same frames, different fps!
         video_data = self.loader.load_video_annotations(video_id)
@@ -94,27 +98,48 @@ class TripletsFrameSelector:
         print(f"first 10 image_paths: {image_paths[:10]}")
 
         samples = []
-        for i in range(clip_start, clip_start + NUM_FRAMES):
-            if i % FRAMERATE == 0:
-                # Conversion from video framerate to triplet annotation framerate (cholecT50)
-                frame_triplet = i // FRAMERATE
-                triplets = self.loader.get_frame_triplets(video_data, frame_triplet)
-                print(f"triplets for frame {i}/{frame_triplet}: {triplets}")
-                end_frame = (i - clip_start) # Convert i from real video frame id to list index
-                start_frame = end_frame - TEMP_CONTEXT_FR_MULTIPLIER * FRAMERATE
-                if start_frame < 0:
-                    start_frame = 0
-                samples.append(MultiFrameSample(
-                    video_id=video_id,
-                    start_frame=start_frame,
-                    end_frame=end_frame,
-                    clip_start=clip_start,
-                    image_paths=image_paths,
-                    graph_path=graph_path,
-                    gt_triplets=triplets,
-                    # TODO: not sure about this
-                    gt_phase=triplets[0]['phase'] if triplets else None
-                ))
+        # Absolute frame range of this clip in the original video
+        clip_abs_start = clip_start
+        clip_abs_end = clip_start + NUM_FRAMES - 1
+
+        # CholecT50 annotations exist at every 25th frame. Compute the second indices
+        # that fall into this clip, then map each annotation to the nearest stride frame.
+        # Convert absolute frame range to second indices (floor/ceil bounds)
+        from math import floor, ceil
+        s_start = ceil(clip_abs_start / FRAMERATE)
+        s_end = floor(clip_abs_end / FRAMERATE)
+
+        for second_idx in range(s_start, s_end + 1):
+            annotation_abs_frame = second_idx * FRAMERATE
+            if not (clip_abs_start <= annotation_abs_frame <= clip_abs_end):
+                continue
+
+            # Fetch GT triplets for this annotated frame index in CholecT50
+            triplets = self.loader.get_frame_triplets(video_data, int(second_idx))
+            print(f"triplets for abs_frame {annotation_abs_frame} (sec {second_idx}): {triplets}")
+
+            # Map to clip-relative end_frame
+            end_rel = annotation_abs_frame - clip_abs_start  # 0..79
+            if ALIGN_TO_GRAPH and FRAME_STRIDE > 1:
+                # Snap to nearest stride-aligned frame (e.g., every 4th frame)
+                end_rel = int(round(end_rel / FRAME_STRIDE) * FRAME_STRIDE)
+                end_rel = max(0, min(NUM_FRAMES - 1, end_rel))
+
+            end_frame = end_rel
+            start_frame = end_frame - TEMP_CONTEXT_FR_MULTIPLIER * FRAMERATE
+            if start_frame < 0:
+                start_frame = 0
+
+            samples.append(MultiFrameSample(
+                video_id=video_id,
+                start_frame=start_frame,
+                end_frame=end_frame,
+                clip_start=clip_start,
+                image_paths=image_paths,
+                graph_path=graph_path,
+                gt_triplets=triplets,
+                gt_phase=triplets[0]['phase'] if triplets else None
+            ))
         
         return samples
     

@@ -3,6 +3,8 @@ import hydra
 from omegaconf import DictConfig
 import torch
 import numpy as np
+import os
+import random
 from tqdm import tqdm
 import shutil
 
@@ -119,6 +121,22 @@ def train_ae(
 
 @hydra.main(config_path="conf", config_name="config.yaml", version_base="1.3")
 def main(cfg: DictConfig):
+    # Deterministic Torch/CUDA setup
+    torch.manual_seed(42)
+    np.random.seed(42)
+    random.seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(42)
+    try:
+        torch.use_deterministic_algorithms(True)
+    except Exception:
+        pass
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
+        torch.backends.cuda.matmul.allow_tf32 = False
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")
+
     for clip in tqdm(cfg.clips, desc="Training autoencoders", unit="clip"):
         train_ae(clip, cfg)
 

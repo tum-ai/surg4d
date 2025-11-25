@@ -3,6 +3,7 @@ from hydra.core.global_hydra import GlobalHydra
 from pathlib import Path
 from omegaconf import OmegaConf
 import torch
+import os
 import gc
 import random
 import numpy as np
@@ -14,6 +15,11 @@ from train_autoencoders import train_ae
 from train_splats import train_splat
 from extract_graphs import extract_graph
 from evaluate_benchmark import evaluate_triplets, evaluate_temporal, evaluate_spatial
+from compute_metrics import (
+    compute_spatial_metrics,
+    compute_temporal_metrics,
+    compute_triplets_metrics,
+)
 
 
 import sys
@@ -51,6 +57,19 @@ def main():
     torch.manual_seed(42)
     np.random.seed(42)
     random.seed(42)
+    # CUDA seeds and deterministic flags for reproducibility
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(42)
+    try:
+        torch.use_deterministic_algorithms(True)
+    except Exception:
+        pass
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
+        torch.backends.cuda.matmul.allow_tf32 = False
+    # Recommend cublas deterministic workspace; harmless if no effect
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")
     # do hydra init manually here to avoid conflicts with vipe hydra
     config_dir = Path(__file__).parent / "conf"
     with hydra.initialize_config_dir(
@@ -94,9 +113,11 @@ def main():
                 evaluate_triplets(clip, cfg)
                 evaluate_temporal(clip, cfg)
 
-                model_spatial, processor_spatial = get_patched_qwen_for_spatial_grounding(
-                    use_bnb_4bit=cfg.feature_extraction.bnb_4bit,
-                    use_bnb_8bit=cfg.feature_extraction.bnb_8bit,
+                model_spatial, processor_spatial = (
+                    get_patched_qwen_for_spatial_grounding(
+                        use_bnb_4bit=cfg.feature_extraction.bnb_4bit,
+                        use_bnb_8bit=cfg.feature_extraction.bnb_8bit,
+                    )
                 )
                 evaluate_spatial(clip, cfg, model_spatial, processor_spatial)
                 del model_spatial
@@ -106,10 +127,10 @@ def main():
     else:
         if not cfg.skip_preprocessing:
             for clip in cfg.clips:
-                    process_clip(clip, cfg)
+                process_clip(clip, cfg)
 
         if not cfg.skip_feature_extraction:
-            get_patched = _get_qwen_loader(cfg) 
+            get_patched = _get_qwen_loader(cfg)
             model, processor = get_patched()
             for clip in cfg.clips:
                 extract_qwen_features(clip, cfg, model, processor)
@@ -149,6 +170,12 @@ def main():
             del processor_spatial
             gc.collect()
             torch.cuda.empty_cache()
+
+        if not cfg.skip_compute_metrics:
+            compute_spatial_metrics(cfg)
+            compute_temporal_metrics(cfg)
+            compute_triplets_metrics(cfg)
+
 
 if __name__ == "__main__":
     main()

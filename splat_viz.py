@@ -15,8 +15,8 @@ N_TIMESTEPS = 80
 out_path = Path('splat_viz')
 
 # ------------- input arguments ----------------------
-data_path = Path('data/preprocessed_testlang/video01_00080')
-output_path = Path('output/testlang/dl_False/video01_00080')
+data_path = Path('data/preprocessed/final_scenes_qwen3_False/video17_01803')
+output_path = Path('output/final_scenes_qwen3_False/video17_01803')
 frame = 78
 pc_exp_name = "pointcloud.ply"
 img_exp_name = "render_img.png"

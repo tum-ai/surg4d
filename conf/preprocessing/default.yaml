@@ -2,8 +2,12 @@ semantic_mask_subdir: semantic_masks
 instance_mask_subdir: instance_masks
 depth_subdir: depth
 
-# TODO think if it makes sense to crop black borders with current methodology
-# TODO we will use, the frames might end up tiny for some cholect50 clips!
+spatial_labels_root: data/spatial_labels
+spatial_labels_input_filename_template: "{clip_name}_spatial.json"
+spatial_labels_output_filename: "spatial_labels.json"
+dump_label_visualizations: true
+label_viz_subdir: label_viz
+
 frames_divisor: 28 # after removing black borders, center crop to multiple of this for qwen to work
 
 vipe_vda: true # use video depth anything

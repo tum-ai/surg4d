@@ -1,0 +1,57 @@
+graph_output_subdir: graph_newmetric
+
+load_stage: fine-lang
+iteration: -1
+
+# TODO we likely want to filter initially based on opacity * instance feature norm
+opacity_threshold: 0.03
+inst_feat_norm_threshold: 0.03
+
+custom_cluster_metric: true # ! does not run on camp due to too little RAM
+clustering_weights:
+  position: 1.0
+  instance: 0.6
+cluster_min_size: 150  # Larger values = fewer, larger clusters
+cluster_min_samples: 150  # Larger values = more conservative clustering
+cluster_metric: euclidean
+
+min_gaussians_per_cluster: 150 # TODO this is redundant with hdbscan min cluster size
+
+max_features_per_cluster: 40
+min_features_per_cluster: 4
+decode_batch_size: 1024
+
+n_timesteps: 20 # graph timesteps
+
+graph_edge_threshold: 0.05 # minimum bhattacharyya coefficient to create an edge between clusters
+
+store_verbose: true  # save verbose outputs (renders, palettes, raw gaussians, etc.)
+n_render_views: 1  # number of random camera views to render (only if store_verbose is true)
+
+random_seed: 1234
+
+# spatial grounding feature extraction
+spatial_grounding:
+  n_splat_points: 5000
+  n_cluster_points: 500
+
+# TODO rendering based cluster filtering etc. have to be integrated here
+
+language_feature_hiddendim: ${splat.language_feature_hiddendim}
+use_discrete_lang_f: ${splat.use_discrete_lang_f}
+config_path: ${splat.config_path}
+dynamic_language: ${splat.dynamic_language}
+latent_cat_feat_subdir: ${splat.latent_cat_feat_subdir}
+
+checkpoint_subdir: ${autoencoder.checkpoint_subdir}
+full_dim: ${autoencoder.full_dim}
+latent_dim: ${autoencoder.latent_dim}
+
+# Mask-based cluster filtering of clusters by comparing rendered cluster masks
+# against precomputed instance masks in the preprocessed clip directory.
+mask_filtering:
+  enabled: false           # disabled by default; enable to filter clusters by masks
+  metric: coverage         # one of: [coverage, iou]
+  threshold: 0.8           # minimum required score for the chosen metric
+  mask_subdir: instance_masks  # relative to {preprocessed_root}/{clip.name}
+  min_component_area: 50   # ignore tiny connected components in instance masks

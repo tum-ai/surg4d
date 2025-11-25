@@ -1,0 +1,5 @@
+pred_root: ${eval.output_dir}/triplets
+output_dir: ${compute_metrics.output_dir}/triplets
+aggregated_output_filename: ${compute_metrics.triplets.output_dir}/aggregated.json
+
+

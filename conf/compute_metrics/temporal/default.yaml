@@ -1,0 +1,27 @@
+pred_root: ${eval.output_dir}/temporal
+labels_root: data/temporal_labels
+labels_filename_template: "{clip_name}_temporal.json"
+output_dir: ${compute_metrics.output_dir}/temporal
+aggregated_output_filename: ${compute_metrics.temporal.output_dir}/aggregated.json
+
+# Metric configs (copied from eval.temporal for standalone compute)
+metrics:
+  action_onset:
+    type: "frame_error"
+    tolerance: 1
+  action_offset:
+    type: "frame_error"
+    tolerance: 1
+  action_duration:
+    type: "iou"
+    threshold: 0.5
+  multiple_event_ordering:
+    type: "composite"
+    order_weight: 0.5
+    iou_weight: 0.5
+    iou_threshold: 0.5
+  count_frequency:
+    type: "composite"
+    count_weight: 0.5
+    iou_weight: 0.5
+    iou_threshold: 0.5

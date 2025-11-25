@@ -2,6 +2,9 @@ from pathlib import Path
 import hydra
 from omegaconf import DictConfig
 import os
+import random
+import numpy as np
+import torch
 from tqdm import tqdm
 from argparse import ArgumentParser
 import time as time_module  # Rename to avoid collision with train.py's "from time import time"
@@ -291,6 +294,22 @@ def render_splat(clip: DictConfig, cfg: DictConfig, model_path: str, stage: str)
 @hydra.main(config_path="conf", config_name="config.yaml", version_base="1.3")
 def main(cfg: DictConfig):
     """Main training loop for all clips."""
+    # Deterministic Torch/CUDA setup
+    torch.manual_seed(42)
+    np.random.seed(42)
+    random.seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(42)
+    try:
+        torch.use_deterministic_algorithms(True)
+    except Exception:
+        pass
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
+        torch.backends.cuda.matmul.allow_tf32 = False
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")
+
     for clip in tqdm(cfg.clips, desc="Training splats", unit="clip"):
         train_splat(clip, cfg)
 

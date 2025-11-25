@@ -1,25 +1,30 @@
 defaults:
-  - clips: dynamic_2grasper
+  - clips: final_dataset
   - preprocessing: default
   - feature_extraction: qwen25
   - autoencoder: qwen25
   - splat: default
   - graph_extraction: default
   - eval: default
+  - compute_metrics: default
   - _self_
+  
 
-skip_preprocessing: false
-skip_feature_extraction: false
-skip_autoencoder: false
-skip_splat: false
+skip_preprocessing: true
+skip_feature_extraction: true
+skip_autoencoder: true
+skip_splat: true
 skip_graph_extraction: false
-skip_eval: true
+skip_eval: false
+skip_compute_metrics: false
 
 cholec80_root: data/cholec80
 cholecseg8k_root: data/cholecseg8k
 cholect50_root: data/cholect50
-preprocessed_root: data/scene_good_on_qwen2_5
-output_root: output/scene_good_on_qwen2_5
+preprocessed_root: data/preprocessed/final_scenes_qwen3_False
+output_root: output/final_scenes_qwen3_False
+
+whole_pipeline_clips_sequentially: true
 
 config_dumps:
   - ${output_root}/config.yaml

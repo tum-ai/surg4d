@@ -1,0 +1,6 @@
+ - name: video01_00240
+   video_id: 1
+   first_frame: 240
+   last_frame: 320
+   frame_stride: 1
+

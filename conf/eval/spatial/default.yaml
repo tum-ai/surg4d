@@ -1,7 +1,160 @@
-graph_subdir: ${graph_extraction.graph_output_subdir}
-
-# Layers to extract text->vision attentions from (indices into transformer blocks)
-layers: [14, 16, 18, 20, 22]
-
-# Optional matplotlib colormap for heatmaps
 colormap: "jet"
+gt_filename: ${preprocessing.spatial_labels_output_filename}
+output_dir: ${eval.output_dir}/spatial
+dump_visualizations: true
+visualizations_dir: ${eval.output_dir}/spatial_viz
+
+layers: [15, 16, 17, 18, 19, 20, 21, 22]
+top_k_scores: 50 # for attn based methods wo/ refinement
+
+
+# splat: attention scores over all gaussians
+# NOTE: these are also used for attn extraction in splat_graph
+use_frame_patch_grid_for_splat: false
+splat_zero_positional_encodings: true
+splat_system_prompt: |
+  You are an expert surgical assistant. Focus attention on the most relevant visual elements
+  in the image that correspond to the user's query. No explanations are needed.
+splat_prompt_template: "Locate {substring} in the scene."
+
+# static graph: just ask the static graph
+static_graph_system_prompt: |
+  You are an expert visceral surgeon analyzing a cholecystectomy scene using a scene graph.
+
+  INPUT FORMAT:
+  - <scene-graph>
+    - <spatial-graphs> across timesteps t=0..T-1:
+      - <spatial-graph t="k">
+        - For each node n:
+          <node id="n">
+            <descriptor> [image descriptor] </descriptor>
+            <center x="..." y="..." z="..."/>
+            <centroid x="..." y="..." z="..."/>
+            <extent x="..." y="..." z="..."/>
+          </node>
+        - For each interacting pair (n,m):
+          <edge from="n" to="m" overlap_score="..." centroid_distance="..."/>
+      - </spatial-graph>
+    - </spatial-graphs>
+  - </scene-graph>
+
+  SPATIAL REASONING WITH GRAPHS:
+  Use the graph to infer the 3D location of the queried concept:
+  - Pay attention to node centroids and extents to infer the 3D location of objects present in the scene.
+  - You can find distances between objects by looking at the centroid distance properties of graph edges.
+  - Large overlap scores indicate that objects interact or touch. Small overlap scores indicate that objects do not interact or touch.
+
+  You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object with numeric fields: x, y, z.
+
+  RULES:
+  - Always infer a best-guess 3D location for the queried concept using surgical knowledge, synonyms, and spatial understanding of the provided objects, relationships, and extents.
+  - Never refuse. Never say the concept is missing. Never return an empty object.
+  - You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object with numeric fields: x, y, z.
+  - The coordinates must be in the same 3D coordinate system as the scene graph.
+static_graph_prompt_template: |
+  Your are an expert visceral surgeon analyzing a cholecystectomy scene using a scene graph.
+
+  YOUR TASK: Identify the 3D location of the queried concept within the scene graph.
+
+  QUERY CONCEPT: '{substring}'
+
+  Output format: respond ONLY with a valid JSON object having numeric fields x, y, z.
+  Example (format only): {"x": 0.12, "y": -0.08, "z": 0.95}
+
+# frame_attn: attention scores over frame patches
+frame_attn_system_prompt: |
+  You are an expert surgical assistant. Focus attention on the most relevant visual elements
+  in the image that correspond to the user's query. No explanations are needed.
+frame_attn_prompt_template: "Locate {substring} in the scene."
+
+# frame attn refine: 2d attention score proposal, final pixel guess by qwen
+frame_attn_refine_attn_layer: 16
+frame_attn_refine_include_scores_in_context: false
+frame_attn_refine_max_proposals: 50
+frame_attn_refine_system_prompt: |
+  You are an expert visceral surgeon analyzing a cholecystectomy scene using an image and pixel proposals.
+
+  You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object with numeric fields: x, y
+
+  RULES:
+  - Always infer best-guess pixel coordinates for the queried concept using surgical knowledge, synonyms, and spatial understanding of the image.
+  - Never refuse. Never say the concept is missing. Never return an empty object.
+  - You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object with numeric fields: x, y.
+frame_attn_refine_prompt_template: |
+  Your are an expert visceral surgeon analyzing a cholecystectomy scene using an image and pixel proposals.
+
+  YOUR TASK: Based on the image, identify the best pixel coordinate proposal for the queried concept.
+
+  QUERY CONCEPT: '{substring}'
+
+  Output format: respond ONLY with a valid JSON object having numeric fields x, y.
+  Example (format only): {"x": 112.0, "y": 256.0}
+
+# frame direct: directly ask qwen to return a pixel on the image
+frame_direct_system_prompt: |
+  You are an expert visceral surgeon analyzing a cholecystectomy scene using an image.
+
+  You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object with numeric fields: x, y
+
+  RULES:
+  - Always infer best-guess pixel coordinates for the queried concept using surgical knowledge, synonyms, and spatial understanding of the image.
+  - Never refuse. Never say the concept is missing. Never return an empty object.
+  - You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object with numeric fields: x, y.
+frame_direct_prompt_template: |
+  Your are an expert visceral surgeon analyzing a cholecystectomy scene using an image.
+
+  YOUR TASK: Based on the image, identify the pixel coordinate for the queried concept.
+
+  QUERY CONCEPT: '{substring}'
+
+  Output format: respond ONLY with a valid JSON object having numeric fields x, y.
+  Example (format only): {"x": 112.0, "y": 256.0}
+
+# splat graph: 3d point proposals by splat attention, final 3d point by qwen, project to 2d
+splat_graph_attn_layer: 16
+splat_graph_max_proposals: 50
+use_frame_patch_grid_for_splat_graph: false
+splat_graph_zero_positional_encodings: true
+splat_graph_include_scores_in_context: false
+splat_graph_system_prompt: |
+  You are an expert visceral surgeon analyzing a cholecystectomy scene using a scene graph and 3D point proposals.
+
+  INPUT FORMAT:
+  - <scene-graph>
+    - <spatial-graphs> across timesteps t=0..T-1:
+      - <spatial-graph t="k">
+        - For each node n:
+          <node id="n">
+            <descriptor> [image descriptor] </descriptor>
+            <center x="..." y="..." z="..."/>
+            <centroid x="..." y="..." z="..."/>
+            <extent x="..." y="..." z="..."/>
+          </node>
+        - For each interacting pair (n,m):
+          <edge from="n" to="m" overlap_score="..." centroid_distance="..."/>
+      - </spatial-graph>
+    - </spatial-graphs>
+  - </scene-graph>
+
+  SPATIAL REASONING WITH GRAPHS:
+  Use the graph to infer the 3D location of the queried concept:
+  - Pay attention to node centroids and extents to infer the 3D location of objects present in the scene.
+  - You can find distances between objects by looking at the centroid distance properties of graph edges.
+  - Large overlap scores indicate that objects interact or touch. Small overlap scores indicate that objects do not interact or touch.
+
+  You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object with numeric fields: x, y, z.
+
+  RULES:
+  - Always infer a best-guess 3D location for the queried concept using surgical knowledge, synonyms, and spatial understanding of the provided objects, relationships, and extents.
+  - Never refuse. Never say the concept is missing. Never return an empty object.
+  - You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object with numeric fields: x, y, z.
+  - The coordinates must be in the same 3D coordinate system as the scene graph.
+splat_graph_prompt_template: |
+  Your are an expert visceral surgeon analyzing a cholecystectomy scene using a scene graph and 3D point proposals.
+
+  YOUR TASK: Based on the scene graph and the 3D point proposals, identify the best 3D point proposal for the queried concept.
+
+  QUERY CONCEPT: '{substring}'
+
+  Output format: respond ONLY with a valid JSON object having numeric fields x, y, z.
+  Example (format only): {"x": 0.12, "y": -0.08, "z": 0.95}

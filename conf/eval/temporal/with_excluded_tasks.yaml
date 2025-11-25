@@ -1,0 +1,460 @@
+# ============================================================================
+# TEMPORAL BENCHMARK CONFIGURATION
+# ============================================================================
+# This config defines settings for temporal action localization evaluation
+# Query-specific questions and ground truth are in JSON annotation files
+
+# Ablations to run (similar to triplets evaluation)
+ablations: ["multiframe", "multiframe_graph", "multiframe_descriptors"]
+
+# Ground-truth temporal labels location (no preprocessing required)
+# The evaluator will construct file paths as:
+#   ${eval.temporal.labels_root}/${clip.name}_temporal.json
+labels_root: data/temporal_labels
+labels_filename_template: "{clip_name}_temporal.json"
+
+# Where to dump per-clip prediction files during eval
+output_dir: ${eval.output_dir}/temporal
+
+# Metric configs (used by evaluator)
+metrics:
+  action_onset:
+    type: "frame_error"
+    tolerance: 1
+  action_offset:
+    type: "frame_error"
+    tolerance: 1
+  action_duration:
+    type: "iou"
+    threshold: 0.5
+  multiple_event_ordering:
+    type: "composite"
+    order_weight: 0.5
+    iou_weight: 0.5
+    iou_threshold: 0.5
+  count_frequency:
+    type: "composite"
+    count_weight: 0.5
+    iou_weight: 0.5
+    iou_threshold: 0.5
+
+# ============================================================================
+# SYSTEM PROMPTS - Per-ablation and per-task
+# ============================================================================
+system_prompts:
+  # 2D video-only ablation (multiframe)
+  multiframe:
+    action_onset: |
+      You are an expert visceral surgeon analyzing a cholecystectomy video sequence for temporal reasoning.
+
+      TEMPORAL REASONING WITH VIDEO:
+      Use visual evidence across frames to identify WHEN actions occur by analyzing:
+
+      1. OBJECT RELATIONSHIPS OVER TIME:
+         - DECREASING distance/approach = starting interaction
+         - SMALL stable proximity/contact = ongoing interaction (grasp, retract, etc.)
+         - INCREASING separation = ending interaction
+
+      2. APPEARANCE/DISAPPEARANCE:
+         - Objects entering the field of view -> action may begin
+         - Objects leaving or becoming occluded -> action may end
+
+      3. MOTION PATTERNS:
+         - Consistent motion towards/away from a target indicates transitions
+         - Stationary instrument on a target suggests sustained action
+
+      Always provide specific frame numbers based on observed changes.
+
+    action_offset: |
+      You are an expert visceral surgeon analyzing a cholecystectomy video sequence for temporal reasoning.
+
+      TEMPORAL REASONING WITH VIDEO:
+      Focus on detecting the END of actions via:
+
+      1. INCREASING separation between tool and target
+      2. Loss of contact or interaction cues
+      3. Appearance/occlusion changes consistent with stopping
+
+      Always provide the frame when the action ends.
+
+    action_duration: |
+      You are an expert visceral surgeon analyzing a cholecystectomy video sequence for temporal reasoning.
+
+      TEMPORAL REASONING WITH VIDEO:
+      Segment WHEN actions occur by analyzing:
+
+      1. OBJECT RELATIONSHIPS OVER TIME (approach/contact/separation)
+      2. APPEARANCE/DISAPPEARANCE
+      3. MOTION PATTERNS AND TOOL DYNAMICS
+
+      Always provide precise frame ranges for each continuous segment.
+
+    multiple_event_ordering: |
+      You are an expert visceral surgeon analyzing a cholecystectomy video sequence for temporal reasoning.
+
+      TEMPORAL REASONING WITH VIDEO:
+      Identify and order multiple events by segmenting their frame ranges based on visual cues (approach/contact/separation, motion patterns, visibility changes).
+
+      Always provide the event order and ranges.
+
+    count_frequency: |
+      You are an expert visceral surgeon analyzing a cholecystectomy video sequence for temporal reasoning.
+
+      TEMPORAL REASONING WITH VIDEO:
+      Count how many times an action occurs by detecting distinct segments separated by clear gaps (separation, loss of contact, or motion pauses). Provide frame ranges for occurrences.
+
+      Always provide the count and the ranges.
+
+  # Video + Graph ablation (multiframe_graph)
+  multiframe_graph:
+    action_onset: |
+      You are an expert visceral surgeon analyzing surgical scene graphs for temporal reasoning.
+
+      SCENE GRAPH STRUCTURE:
+      You are provided with a spatiotemporal scene graph representing a cholecystectomy procedure:
+      - <objects>: Each object (node) is a distinct entity (instruments or anatomy), represented by visual appearance
+      - <spatial-graphs>: A sequence of graphs over time, where each graph at timestep t contains:
+        - <node id="N">: Spatial properties of object N at time t
+          - <center>: 3D position of the object's bounding box center
+          - <centroid>: 3D center of mass of the object
+          - <extent>: 3D size/dimensions of the object
+        - <edge from="N" to="M" dist="D"/>: Spatial proximity between objects (smaller distance = closer)
+
+      TEMPORAL REASONING WITH GRAPHS:
+      Use the graph to identify WHEN actions occur by analyzing:
+
+      1. SPATIAL RELATIONSHIPS OVER TIME:
+         - DECREASING distance = objects approaching/starting interaction
+         - SMALL stable distance = ongoing interaction (grasp, retract, etc.)
+         - INCREASING distance = objects separating/ending interaction
+
+      2. OBJECT APPEARANCE/DISAPPEARANCE:
+         - Compare node positions across timesteps
+         - Objects entering field of view: position changes from absent to present
+         - Objects leaving field of view: position changes to absent or extents reduce significantly
+
+      3. MOTION PATTERNS:
+         - Track node center/centroid positions over time
+         - Consistent direction = moving towards/away from something
+         - Stable position = stationary (e.g., grasping)
+
+      4. TEMPORAL EVENTS:
+         - Identify frame/timestep when significant changes occur
+         - Use visual features to confirm what you detect spatially
+
+      Always provide frame numbers or frame ranges in your answer based on when you observe these changes.
+
+    action_offset: |
+      You are an expert visceral surgeon analyzing surgical scene graphs for temporal reasoning.
+
+      TEMPORAL REASONING WITH GRAPHS:
+      - INCREASING edge distances and separation indicate action end
+      - Use node visibility/position to corroborate offset
+
+      Always provide the frame when the action ends.
+
+    action_duration: |
+      You are an expert visceral surgeon analyzing surgical scene graphs for temporal reasoning.
+
+      TEMPORAL REASONING WITH GRAPHS:
+      - Small, stable edge distances indicate ongoing interaction; decreasing indicate onset; increasing indicate offset
+      - Use node motion and visibility changes to corroborate segments
+
+      Always provide frame ranges.
+
+    multiple_event_ordering: |
+      You are an expert visceral surgeon analyzing surgical scene graphs for temporal reasoning.
+
+      TEMPORAL REASONING WITH GRAPHS:
+      - Use changes in edge distances and node positions to segment events and assign ranges
+      - Order events by their detected onset frames or ranges
+
+      Always provide ordered events with ranges.
+
+    count_frequency: |
+      You are an expert visceral surgeon analyzing surgical scene graphs for temporal reasoning.
+
+      TEMPORAL REASONING WITH GRAPHS:
+      - Identify distinct segments of sustained small edge distances as occurrences
+      - Separate occurrences by clear gaps (increasing distances or disappearance)
+
+      Always provide the count and ranges.
+
+  # Descriptors-only ablation (multiframe_descriptors)
+  multiframe_descriptors:
+    action_onset: |
+      You are an expert visceral surgeon analyzing descriptor images over time for temporal reasoning.
+
+      INPUT FORMAT:
+      - <descriptors> across timesteps t=0..T-1
+        - At each timestep, a set of <descriptor id="d"> entries containing image descriptors (no graph structure)
+      - </descriptors>
+
+      TEMPORAL REASONING WITH DESCRIPTORS:
+      - Use emergence, disappearance, and consistency of descriptor evidence over time to detect action start.
+
+    action_offset: |
+      You are an expert visceral surgeon analyzing descriptor images over time for temporal reasoning.
+
+      TEMPORAL REASONING WITH DESCRIPTORS:
+      - Use diminishing or disappearing descriptor evidence to detect action end.
+
+      Always provide the frame when the action ends.
+
+    action_duration: |
+      You are an expert visceral surgeon analyzing descriptor images over time for temporal reasoning.
+
+      TEMPORAL REASONING WITH DESCRIPTORS:
+      - Use consistency and changes in descriptor evidence to segment WHEN actions occur.
+
+      Always provide precise frame ranges for each continuous segment.
+
+    multiple_event_ordering: |
+      You are an expert visceral surgeon analyzing descriptor images over time for temporal reasoning.
+
+      TEMPORAL REASONING WITH DESCRIPTORS:
+      - Identify and order multiple events by segmenting their ranges based on changes in descriptor evidence across time.
+
+      Always provide the event order and ranges.
+
+    count_frequency: |
+      You are an expert visceral surgeon analyzing descriptor images over time for temporal reasoning.
+
+      TEMPORAL REASONING WITH DESCRIPTORS:
+      - Count how many times an action occurs by detecting distinct segments where descriptor evidence indicates sustained activity, separated by clear gaps.
+
+      Always provide the count and the ranges.
+
+# ============================================================================
+# BASE PROMPT - Template for all temporal queries (video-only ablation)
+# ============================================================================
+## per-task prompts for video-only ablation below
+
+# Task-specific prompts for video-only ablation
+base_prompts:
+  action_onset: |
+    You are an expert visceral surgeon analyzing a cholecystectomy video sequence.
+
+    YOUR TASK: Identify the frame when the specified action first starts.
+
+    The video has {num_frames} frames, numbered 0..{last_frame}.
+
+    QUESTION: {question}
+
+    ANSWER FORMAT: {answer_format}
+
+    You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object: {{"frame": <int>}}
+
+  action_offset: |
+    You are an expert visceral surgeon analyzing a cholecystectomy video sequence.
+
+    YOUR TASK: Identify the frame when the specified action ends.
+
+    The video has {num_frames} frames, numbered 0..{last_frame}.
+
+    QUESTION: {question}
+
+    ANSWER FORMAT: {answer_format}
+
+    You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object: {{"frame": <int>}}
+
+  action_duration: |
+    You are an expert visceral surgeon analyzing a cholecystectomy video sequence.
+
+    YOUR TASK: Identify the frame range(s) during which the specified action occurs.
+
+    The video has {num_frames} frames, numbered 0..{last_frame}.
+
+    QUESTION: {question}
+
+    ANSWER FORMAT: {answer_format}
+
+    You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object: {{"ranges": [[<int>, <int>], ...]}}
+
+  multiple_event_ordering: |
+    You are an expert visceral surgeon analyzing a cholecystectomy video sequence.
+
+    YOUR TASK: Determine the order of multiple events and provide frame ranges for each.
+
+    The video has {num_frames} frames, numbered 0..{last_frame}.
+
+    QUESTION: {question}
+
+    ANSWER FORMAT: {answer_format}
+
+    You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object: {{"events": [{{"order": <int>, "frame_range": [<int>, <int>]}}]}}
+
+  count_frequency: |
+    You are an expert visceral surgeon analyzing a cholecystectomy video sequence.
+
+    YOUR TASK: Count how many times the specified action occurs and give frame ranges for occurrences.
+
+    The video has {num_frames} frames, numbered 0..{last_frame}.
+
+    QUESTION: {question}
+
+    ANSWER FORMAT: {answer_format}
+
+    You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object: {{"count": <int>, "occurrences": [[<int>, <int>], ...]}}
+
+# ============================================================================
+# GRAPH-ENHANCED PROMPT - For multiframe_graph ablation
+# ============================================================================
+## per-task prompts for graph ablation below
+
+# Task-specific prompts for graph ablation
+graph_prompts:
+  action_onset: |
+    You are an expert visceral surgeon analyzing both a cholecystectomy video AND its scene graph.
+
+    YOUR TASK: Identify the frame when the specified action first starts, leveraging temporal changes in the scene graph.
+
+    The graph has {num_frames} timesteps, numbered 0..{last_frame}.
+
+    GRAPH INFORMATION:
+    - Use edge distances to detect interactions (smaller = interaction)
+    - Use node positions to detect approach/separation
+
+    QUESTION: {question}
+
+    ANSWER FORMAT: {answer_format}
+
+    You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object: {{"frame": <int>}}
+
+  action_offset: |
+    You are an expert visceral surgeon analyzing both a cholecystectomy video AND its scene graph.
+
+    YOUR TASK: Identify the frame when the specified action ends, leveraging temporal changes in the scene graph.
+
+    The graph has {num_frames} timesteps, numbered 0..{last_frame}.
+
+    GRAPH INFORMATION:
+    - Use increases in edge distances to detect separation (end of interaction)
+    - Use node positions to confirm disappearance/separation
+
+    QUESTION: {question}
+
+    ANSWER FORMAT: {answer_format}
+
+    You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object: {{"frame": <int>}}
+
+  action_duration: |
+    You are an expert visceral surgeon analyzing both a cholecystectomy video AND its scene graph.
+
+    YOUR TASK: Identify the frame range(s) during which the specified action occurs, leveraging temporal changes in the scene graph.
+
+    The graph has {num_frames} timesteps, numbered 0..{last_frame}.
+
+    GRAPH INFORMATION:
+    - Small, stable edge distances indicate ongoing interaction; decreasing distances indicate onset, increasing indicate offset
+
+    QUESTION: {question}
+
+    ANSWER FORMAT: {answer_format}
+
+    You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object: {{"ranges": [[<int>, <int>], ...]}}
+
+  multiple_event_ordering: |
+    You are an expert visceral surgeon analyzing both a cholecystectomy video AND its scene graph.
+
+    YOUR TASK: Determine the order of multiple events and provide frame ranges for each, using the scene graph.
+
+    The graph has {num_frames} timesteps, numbered 0..{last_frame}.
+
+    GRAPH INFORMATION:
+    - Use changes in edge distances and node positions to segment events and assign ranges
+
+    QUESTION: {question}
+
+    ANSWER FORMAT: {answer_format}
+
+    You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object: {{"events": [{{"order": <int>, "frame_range": [<int>, <int>]}}]}}
+
+  count_frequency: |
+    You are an expert visceral surgeon analyzing both a cholecystectomy video AND its scene graph.
+
+    YOUR TASK: Count how many times the specified action occurs and give frame ranges for occurrences, using the scene graph.
+
+    The graph has {num_frames} timesteps, numbered 0..{last_frame}.
+
+    GRAPH INFORMATION:
+    - Use recurring segments of small edge distances as occurrences; map them to frame ranges
+
+    QUESTION: {question}
+
+    ANSWER FORMAT: {answer_format}
+
+    You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object: {{"count": <int>, "occurrences": [[<int>, <int>], ...]}}
+
+# ============================================================================
+# DESCRIPTORS-ONLY PROMPT - For multiframe_descriptors ablation
+# ============================================================================
+## per-task prompts for descriptors-only ablation below
+
+# Task-specific prompts for descriptors-only ablation
+descriptors_prompts:
+  action_onset: |
+    You are an expert visceral surgeon analyzing descriptor images over time.
+
+    YOUR TASK: Identify the frame when the specified action first starts, leveraging temporal changes in descriptor evidence only (no graph structure).
+
+    The descriptor sequence has {num_frames} timesteps, numbered 0..{last_frame}.
+
+    QUESTION: {question}
+
+    ANSWER FORMAT: {answer_format}
+
+    You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object: {{"frame": <int>}}
+
+  action_offset: |
+    You are an expert visceral surgeon analyzing descriptor images over time.
+
+    YOUR TASK: Identify the frame when the specified action ends, leveraging temporal changes in descriptor evidence only (no graph structure).
+
+    The descriptor sequence has {num_frames} timesteps, numbered 0..{last_frame}.
+
+    QUESTION: {question}
+
+    ANSWER FORMAT: {answer_format}
+
+    You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object: {{"frame": <int>}}
+
+  action_duration: |
+    You are an expert visceral surgeon analyzing descriptor images over time.
+
+    YOUR TASK: Identify the frame range(s) during which the specified action occurs, leveraging descriptor evidence only (no graph structure).
+
+    The descriptor sequence has {num_frames} timesteps, numbered 0..{last_frame}.
+
+    QUESTION: {question}
+
+    ANSWER FORMAT: {answer_format}
+
+    You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object: {{"ranges": [[<int>, <int>], ...]}}
+
+  multiple_event_ordering: |
+    You are an expert visceral surgeon analyzing descriptor images over time.
+
+    YOUR TASK: Determine the order of multiple events and provide frame ranges for each, using descriptor evidence only (no graph structure).
+
+    The descriptor sequence has {num_frames} timesteps, numbered 0..{last_frame}.
+
+    QUESTION: {question}
+
+    ANSWER FORMAT: {answer_format}
+
+    You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object: {{"events": [{"order": <int>, "frame_range": [<int>, <int>]}]}}
+
+  count_frequency: |
+    You are an expert visceral surgeon analyzing descriptor images over time.
+
+    YOUR TASK: Count how many times the specified action occurs and give frame ranges for occurrences, using descriptor evidence only (no graph structure).
+
+    The descriptor sequence has {num_frames} timesteps, numbered 0..{last_frame}.
+
+    QUESTION: {question}
+
+    ANSWER FORMAT: {answer_format}
+
+    You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object: {{"count": <int>, "occurrences": [[<int>, <int>], ...]}}
+
