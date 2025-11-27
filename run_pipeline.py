@@ -60,16 +60,6 @@ def main():
     # CUDA seeds and deterministic flags for reproducibility
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(42)
-    try:
-        torch.use_deterministic_algorithms(True)
-    except Exception:
-        pass
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    if hasattr(torch.backends, "cuda") and hasattr(torch.backends.cuda, "matmul"):
-        torch.backends.cuda.matmul.allow_tf32 = False
-    # Recommend cublas deterministic workspace; harmless if no effect
-    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")
     # do hydra init manually here to avoid conflicts with vipe hydra
     config_dir = Path(__file__).parent / "conf"
     with hydra.initialize_config_dir(
