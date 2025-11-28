@@ -659,9 +659,6 @@ def prompt_with_static_graph(
         },
     ]
 
-    with open("qwen_messages.json", "w") as fp:
-        json.dump(messages, fp)
-
     return generate_with_vision_features_qwen3(
         messages=messages,
         vision_features=[torch.Tensor(f) for f in node_feats_list],
@@ -742,9 +739,6 @@ def prompt_with_dynamic_graph(
             ],
         },
     ]
-
-    with open("qwen_messages.json", "w") as fp:
-        json.dump(messages, fp)
 
     feature_list: List[torch.Tensor] = []
     for n in range(len(node_feats_list)):

@@ -71,17 +71,24 @@ def forward(
     if inputs_embeds is None:
         inputs_embeds = self.get_input_embeddings()(input_ids)
 
-    # Track whether custom vision features are being used and capture mask safely
-    image_mask = None
-    using_custom_vision_features = False
+    # Pull custom features from kwargs (and persist as fallback across decoding steps)
+    custom_patch_features = kwargs.pop("custom_patch_features", None)
+    if custom_patch_features is not None:
+        setattr(self, "_custom_patch_features", custom_patch_features)
+    elif hasattr(self, "_custom_patch_features"):
+        custom_patch_features = getattr(self, "_custom_patch_features")
+
+    def _stack_features(features):
+        if isinstance(features, (list, tuple)):
+            return torch.cat(features, dim=0)
+        return features
 
     if pixel_values is not None:
-        if "custom_patch_features" in kwargs:
-            image_embeds = kwargs["custom_patch_features"]
-            using_custom_vision_features = True
+        if custom_patch_features is not None:
+            image_embeds = custom_patch_features
         else:
             image_embeds = self.get_image_features(pixel_values, image_grid_thw)
-        image_embeds = torch.cat(image_embeds, dim=0).to(
+        image_embeds = _stack_features(image_embeds).to(
             inputs_embeds.device, inputs_embeds.dtype
         )
         image_mask, _ = self.get_placeholder_mask(
@@ -170,29 +177,10 @@ def forward(
                 # Overwrite t/h/w indices for the selected token positions
                 position_ids[:, b, tok_idx[:n]] = assign
 
-    # Always zero out positional encodings for any custom vision tokens
-    # When using custom patch features, relative patch geometry should not affect prompts
-    if using_custom_vision_features and (position_ids is not None):
-        # If we have the image_mask from placeholder computation, derive token indices
-        if image_mask is not None:
-            token_mask = image_mask.any(dim=-1)  # (batch, seq)
-            if token_mask.ndim == 2:
-                for b in range(token_mask.shape[0]):
-                    tok_idx_b = torch.nonzero(token_mask[b], as_tuple=False).squeeze(-1)
-                    if tok_idx_b.numel() > 0:
-                        position_ids[:, b, tok_idx_b] = 0
-        # Also support explicit token indices if provided
-        if custom_tok_idx is not None:
-            if isinstance(custom_tok_idx, (list, tuple)) and len(custom_tok_idx) > 0 and isinstance(custom_tok_idx[0], (list, tuple)):
-                token_indices_per_batch = custom_tok_idx
-            else:
-                token_indices_per_batch = [custom_tok_idx]
-            batch_size = position_ids.shape[1]
-            for b in range(min(batch_size, len(token_indices_per_batch))):
-                tok_idx = token_indices_per_batch[b]
-                if tok_idx is None or len(tok_idx) == 0:
-                    continue
-                position_ids[:, b, tok_idx] = 0
+    # NOTE: We no longer zero out positional encodings for custom vision tokens.
+    # Zeroing all vision token positions made multiple images indistinguishable
+    # (all appeared at position 0). Instead, we keep the computed sequential
+    # positions so the model can differentiate between separate descriptor images.
 
     outputs = self.language_model(
         input_ids=None,
@@ -626,15 +614,12 @@ def prompt_with_graph_at_timestep(
         }
     )
 
-    # TODO: adapt question and system_prompt
     messages = [
         {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": "<scene-graph>\n"},
                 *graph_content,
-                {"type": "text", "text": "</scene-graph>\n"},
                 {"type": "text", "text": "<prompt>"},
                 {"type": "text", "text": question},
                 {"type": "text", "text": "</prompt>\n"},
@@ -642,9 +627,6 @@ def prompt_with_graph_at_timestep(
             ],
         },
     ]
-
-    with open("qwen_messages.json", "w") as fp:
-        json.dump(messages, fp)
 
     return generate_with_vision_features(
         messages=messages,
@@ -775,9 +757,6 @@ def prompt_with_static_graph(
         },
     ]
 
-    with open("qwen_messages.json", "w") as fp:
-        json.dump(messages, fp)
-
     return generate_with_vision_features(
         messages=messages,
         vision_features=[torch.Tensor(f) for f in node_feats],
@@ -891,15 +870,11 @@ def prompt_with_dynamic_graph(
         },
     ]
 
-    with open("qwen_messages.json", "w") as fp:
-        json.dump(messages, fp)
-
     feature_list = []
     for n in range(len(node_feats)):
         for t in range(node_feats[n].shape[0]):
             feature_list.append(torch.Tensor(node_feats[n][t]))
 
-    # TODO include l2 distances on edges as well
     return generate_with_vision_features(
         messages=messages,
         vision_features=feature_list,
@@ -914,10 +889,6 @@ def prompt_with_descriptors_at_timestep(
     question: str,
     node_feats: np.lib.npyio.NpzFile,
     timestep_idx: int,
-    adjacency_matrices: np.ndarray,
-    node_centers: np.ndarray,
-    node_centroids: np.ndarray,
-    node_extents: np.ndarray,
     model: Qwen2_5_VLForConditionalGeneration,
     processor: Qwen2_5_VLProcessor,
     system_prompt: str = None,
@@ -929,9 +900,6 @@ def prompt_with_descriptors_at_timestep(
     node_feats: np.lib.npyio.NpzFile - npz file containing node features through time
     timestep_idx: int - index of the timestep to use for the node features
     """
-    # keep signature parity; inputs other than node_feats/timestep are unused here
-    _ = adjacency_matrices, node_centers, node_centroids, node_extents
-
     # node feat indices correspond to cluster ids
     node_feat_indices = sorted(list(node_feats.keys()), key=lambda x: int(x))
     node_feats_list = [node_feats[idx] for idx in node_feat_indices]
@@ -955,9 +923,7 @@ def prompt_with_descriptors_at_timestep(
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": "<descriptors>\n"},
                 *descriptor_content,
-                {"type": "text", "text": "</descriptors>\n"},
                 {"type": "text", "text": "<prompt>"},
                 {"type": "text", "text": question},
                 {"type": "text", "text": "</prompt>\n"},
@@ -965,9 +931,6 @@ def prompt_with_descriptors_at_timestep(
             ],
         },
     ]
-
-    with open("qwen_messages.json", "w") as fp:
-        json.dump(messages, fp)
 
     return generate_with_vision_features(
         messages=messages,
@@ -1034,9 +997,6 @@ def prompt_with_dynamic_descriptors(
             ],
         },
     ]
-
-    with open("qwen_messages.json", "w") as fp:
-        json.dump(messages, fp)
 
     # Keep the same feature ordering pattern as prompt_with_dynamic_graph
     feature_list = []
