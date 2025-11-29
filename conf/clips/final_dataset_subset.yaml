@@ -4,26 +4,26 @@
   last_frame: 320
   frame_stride: 1
 
-- name: video12_19500
-  video_id: 12
-  first_frame: 19500
-  last_frame: 19580
-  frame_stride: 1
+# - name: video12_19500
+#   video_id: 12
+#   first_frame: 19500
+#   last_frame: 19580
+#   frame_stride: 1
 
-- name: video17_01803
-  video_id: 17
-  first_frame: 1803
-  last_frame: 1883
-  frame_stride: 1
+# - name: video17_01803
+#   video_id: 17
+#   first_frame: 1803
+#   last_frame: 1883
+#   frame_stride: 1
 
-- name: video18_00979
-  video_id: 18
-  first_frame: 979
-  last_frame: 1059
-  frame_stride: 1
+# - name: video18_00979
+#   video_id: 18
+#   first_frame: 979
+#   last_frame: 1059
+#   frame_stride: 1
 
-- name: video20_03260
-  video_id: 20
-  first_frame: 3260
-  last_frame: 3340
-  frame_stride: 1
+# - name: video20_03260
+#   video_id: 20
+#   first_frame: 3260
+#   last_frame: 3340
+#   frame_stride: 1

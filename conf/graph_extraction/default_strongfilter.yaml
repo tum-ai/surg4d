@@ -1,4 +1,4 @@
-graph_output_subdir: graph_spectral
+graph_output_subdir: graph_strongfilter
 
 # gaussian model params
 language_feature_hiddendim: ${splat.language_feature_hiddendim}
@@ -19,7 +19,7 @@ latent_dim: ${autoencoder.latent_dim}
 relevance_threshold: 0.45
 
 # clustering
-cluster_method: spectral # one of: [spectral, hdbscan]
+cluster_method: hdbscan # one of: [spectral, hdbscan]
 
 # hdbscan clustering
 # "custom metric" does cos dist on lang part and l2 on pos part
@@ -42,7 +42,7 @@ vanilla_metric_hdbscan_args:
 # spectral clustering
 spectral_clustering:
   knn_graph_k: 5
-  spectral_embedding_dim: 5
+  spectral_embedding_dim: 8
   hdbscan_args:
     metric: euclidean
     min_cluster_size: 150
