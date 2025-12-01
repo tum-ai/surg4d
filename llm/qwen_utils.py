@@ -547,8 +547,7 @@ def generate_with_vision_features_agentic(
     qwen_version: str = "qwen25",
     max_tokens: int = 5012,
     max_iterations: int = 10,
-    verbose: bool = False,
-) -> Tuple[str, List[Dict[str, Any]]]:
+) -> Dict[str, Any]:
     """Generate with vision features in an agentic loop, executing tools until done.
 
     Args:
@@ -564,11 +563,17 @@ def generate_with_vision_features_agentic(
         qwen_version: Either "qwen25" or "qwen3"
         max_tokens: Maximum tokens per generation
         max_iterations: Maximum number of tool-calling iterations
-        verbose: If True, print intermediate steps
 
     Returns:
-        Tuple of (final_answer, tool_call_history)
-        tool_call_history is a list of dicts with keys: tool_name, arguments, result
+        Dict with keys:
+            - "final_answer" (str): The extracted final answer from the model's last response.
+            - "message_history" (List[Dict]): Complete conversation history. Each message has:
+                - "role": "system" | "user" | "assistant"
+                - "content": List of {"type": "text"|"image", "text": str} dicts
+            - "tool_calls" (List[Dict]): All tool calls made. Each entry has:
+                - "tool_name" (str): Name of the tool called
+                - "arguments" (dict): Arguments passed to the tool
+                - "result" (Any): Result returned by the tool (or error message string)
     """
     # Extract tool specs for the model
     tool_specs = [spec for _, spec in tools.values()]
@@ -593,9 +598,6 @@ def generate_with_vision_features_agentic(
         deepstack_features = None
 
     for iteration in range(max_iterations):
-        if verbose:
-            print(f"\n--- Iteration {iteration + 1} ---")
-
         # Generate response with tools
         inputs = model_inputs(
             current_messages,
@@ -631,18 +633,21 @@ def generate_with_vision_features_agentic(
             clean_up_tokenization_spaces=False,
         )[0]
 
-        if verbose:
-            print(f"Model response:\n{response}")
-
         # Parse tool calls
         tool_calls = _parse_tool_calls(response)
 
         if not tool_calls:
             # No tool calls - we have the final answer
+            # Add final assistant response to message history
+            current_messages.append(
+                {"role": "assistant", "content": [{"type": "text", "text": response}]}
+            )
             final_answer = _extract_final_answer(response)
-            if verbose:
-                print(f"\nFinal answer: {final_answer}")
-            return final_answer, tool_call_history
+            return {
+                "final_answer": final_answer,
+                "message_history": current_messages,
+                "tool_calls": tool_call_history,
+            }
 
         # Add assistant message with the response
         current_messages.append(
@@ -654,9 +659,6 @@ def generate_with_vision_features_agentic(
         for tool_call in tool_calls:
             tool_name = tool_call.get("name")
             arguments = tool_call.get("arguments", {})
-
-            if verbose:
-                print(f"Calling tool: {tool_name} with args: {arguments}")
 
             if tool_name not in tools:
                 result = f"Error: Unknown tool '{tool_name}'"
@@ -675,9 +677,6 @@ def generate_with_vision_features_agentic(
             tool_call_history.append(tool_call_record)
             tool_results.append(tool_call_record)
 
-            if verbose:
-                print(f"Tool result: {result}")
-
         # Add tool results as a user message (Qwen expects tool results this way)
         tool_result_content = []
         for record in tool_results:
@@ -695,13 +694,13 @@ def generate_with_vision_features_agentic(
 
         current_messages.append({"role": "user", "content": tool_result_content})
 
-    # Max iterations reached
-    if verbose:
-        print(f"\nMax iterations ({max_iterations}) reached")
-
-    # Try to extract any answer from the last response
+    # Max iterations reached - try to extract any answer from the last response
     final_answer = _extract_final_answer(response)
-    return final_answer, tool_call_history
+    return {
+        "final_answer": final_answer,
+        "message_history": current_messages,
+        "tool_calls": tool_call_history,
+    }
 
 
 def prompt_with_graph_at_timestep(
@@ -844,9 +843,11 @@ def prompt_with_static_graph(
     node_centers: np.ndarray,
     node_centroids: np.ndarray,
     node_extents: np.ndarray,
-    model: Qwen2_5_VLForConditionalGeneration,
-    processor: Qwen2_5_VLProcessor,
+    model: Union[Qwen2_5_VLForConditionalGeneration, Qwen3VLForConditionalGeneration],
+    processor: Union[Qwen2_5_VLProcessor, Qwen3VLProcessor],
+    qwen_version: str = "qwen25",
     system_prompt: str = None,
+    tools: Dict[str, Tuple[Callable, Dict[str, Any]]] = {},
 ):
     """
     node_feats: np.lib.npyio.NpzFile - npz file containing node features for each timestep
@@ -956,14 +957,25 @@ def prompt_with_static_graph(
         },
     ]
 
-    return generate_with_vision_features(
-        messages=messages,
-        vision_features=[torch.Tensor(f) for f in node_feats],
-        model=model,
-        processor=processor,
-        # TODO: increase this?
-        max_tokens=5012,
-    )
+    if tools:
+        return generate_with_vision_features_agentic(
+            messages=messages,
+            vision_features=[torch.Tensor(f) for f in node_feats],
+            model=model,
+            processor=processor,
+            tools=tools,
+            qwen_version=qwen_version,
+            max_tokens=5012,
+        )
+    else:
+        return generate_with_vision_features(
+            messages=messages,
+            vision_features=[torch.Tensor(f) for f in node_feats],
+            model=model,
+            processor=processor,
+            qwen_version=qwen_version,
+            max_tokens=5012,
+        )
 
 
 def prompt_with_dynamic_graph(
@@ -973,9 +985,11 @@ def prompt_with_dynamic_graph(
     node_centers: np.ndarray,
     node_centroids: np.ndarray,
     node_extents: np.ndarray,
-    model: Qwen2_5_VLForConditionalGeneration,
-    processor: Qwen2_5_VLProcessor,
-    system_prompt: str,
+    model: Union[Qwen2_5_VLForConditionalGeneration, Qwen3VLForConditionalGeneration],
+    processor: Union[Qwen2_5_VLProcessor, Qwen3VLProcessor],
+    qwen_version: str = "qwen25",
+    system_prompt: str = None,
+    tools: Dict[str, Tuple[Callable, Dict[str, Any]]] = {},
 ):
     assert (
         len(adjacency_matrices)
@@ -1076,23 +1090,36 @@ def prompt_with_dynamic_graph(
         for t in range(node_feats[n].shape[0]):
             feature_list.append(torch.Tensor(node_feats[n][t]))
 
-    return generate_with_vision_features(
-        messages=messages,
-        vision_features=feature_list,
-        model=model,
-        processor=processor,
-        # TODO: increase this?
-        max_tokens=5012,
-    )
+    if tools:
+        return generate_with_vision_features_agentic(
+            messages=messages,
+            vision_features=feature_list,
+            model=model,
+            processor=processor,
+            tools=tools,
+            qwen_version=qwen_version,
+            max_tokens=5012,
+        )
+    else:
+        return generate_with_vision_features(
+            messages=messages,
+            vision_features=feature_list,
+            model=model,
+            processor=processor,
+            qwen_version=qwen_version,
+            max_tokens=5012,
+        )
 
 
 def prompt_with_descriptors_at_timestep(
     question: str,
     node_feats: np.lib.npyio.NpzFile,
     timestep_idx: int,
-    model: Qwen2_5_VLForConditionalGeneration,
-    processor: Qwen2_5_VLProcessor,
+    model: Union[Qwen2_5_VLForConditionalGeneration, Qwen3VLForConditionalGeneration],
+    processor: Union[Qwen2_5_VLProcessor, Qwen3VLProcessor],
+    qwen_version: str = "qwen25",
     system_prompt: str = None,
+    tools: Dict[str, Tuple[Callable, Dict[str, Any]]] = {},
 ):
     """
     Ablation of prompt_with_graph_at_timestep: only pass cluster descriptor images
@@ -1135,13 +1162,25 @@ def prompt_with_descriptors_at_timestep(
         },
     ]
 
-    return generate_with_vision_features(
-        messages=messages,
-        vision_features=[torch.Tensor(f) for f in node_feats_t],
-        model=model,
-        processor=processor,
-        max_tokens=5012,
-    )
+    if tools:
+        return generate_with_vision_features_agentic(
+            messages=messages,
+            vision_features=[torch.Tensor(f) for f in node_feats_t],
+            model=model,
+            processor=processor,
+            tools=tools,
+            qwen_version=qwen_version,
+            max_tokens=5012,
+        )
+    else:
+        return generate_with_vision_features(
+            messages=messages,
+            vision_features=[torch.Tensor(f) for f in node_feats_t],
+            model=model,
+            processor=processor,
+            qwen_version=qwen_version,
+            max_tokens=5012,
+        )
 
 
 def prompt_with_dynamic_descriptors(
@@ -1151,9 +1190,11 @@ def prompt_with_dynamic_descriptors(
     node_centers: np.ndarray,
     node_centroids: np.ndarray,
     node_extents: np.ndarray,
-    model: Qwen2_5_VLForConditionalGeneration,
-    processor: Qwen2_5_VLProcessor,
-    system_prompt: str,
+    model: Union[Qwen2_5_VLForConditionalGeneration, Qwen3VLForConditionalGeneration],
+    processor: Union[Qwen2_5_VLProcessor, Qwen3VLProcessor],
+    qwen_version: str = "qwen25",
+    system_prompt: str = None,
+    tools: Dict[str, Tuple[Callable, Dict[str, Any]]] = {},
 ):
     """
     Ablation of prompt_with_dynamic_graph: pass only descriptor images separated by
@@ -1207,13 +1248,25 @@ def prompt_with_dynamic_descriptors(
         for t in range(node_feats_list[n].shape[0]):
             feature_list.append(torch.Tensor(node_feats_list[n][t]))
 
-    return generate_with_vision_features(
-        messages=messages,
-        vision_features=feature_list,
-        model=model,
-        processor=processor,
-        max_tokens=5012,
-    )
+    if tools:
+        return generate_with_vision_features_agentic(
+            messages=messages,
+            vision_features=feature_list,
+            model=model,
+            processor=processor,
+            tools=tools,
+            qwen_version=qwen_version,
+            max_tokens=5012,
+        )
+    else:
+        return generate_with_vision_features(
+            messages=messages,
+            vision_features=feature_list,
+            model=model,
+            processor=processor,
+            qwen_version=qwen_version,
+            max_tokens=5012,
+        )
 
 
 def crop_patch_features(patch_feat: torch.Tensor, cw, ch, cx1, cx2, cy1, cy2):
