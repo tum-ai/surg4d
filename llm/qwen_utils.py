@@ -4,7 +4,7 @@ import json
 import re
 import numpy as np
 from PIL import Image
-from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLProcessor, Qwen3VLProcessor
+from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLProcessor, Qwen3VLForConditionalGeneration, Qwen3VLProcessor
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 from typing import Dict, List, Optional, Union, Any, Callable, Tuple
 from functools import lru_cache
@@ -339,7 +339,8 @@ def ask_qwen_about_image_features(
 def model_inputs(
     messages: List[Dict[str, Any]],
     vision_features: List[torch.Tensor],
-    processor: Qwen2_5_VLProcessor,
+    processor: Union[Qwen2_5_VLProcessor, Qwen3VLProcessor],
+    qwen_version: str = "qwen25",
     tools: List[Dict[str, Any]] = [],
 ):
     # make sure number of messages and vision feature sets match
@@ -360,8 +361,7 @@ def model_inputs(
     )
 
     # create mock images so the processor precomputes grid; features are passed as-is
-    # TODO: this hardcodes qwen25 - should be parameterized if using qwen3
-    effective_patch_size = QWEN_CONSTANTS["qwen25"]["effective_patch_size"]
+    effective_patch_size = QWEN_CONSTANTS[qwen_version]["effective_patch_size"]
     mock_images: List[Image.Image] = []
     for i in range(len(vision_features)):
         n = int(vision_features[i].shape[0])
@@ -384,26 +384,90 @@ def model_inputs(
 def generate_with_vision_features(
     messages: List[Dict[str, Any]],
     vision_features: List[torch.Tensor],
-    model: Qwen2_5_VLForConditionalGeneration,
-    processor: Qwen2_5_VLProcessor,
+    model: Union[Qwen2_5_VLForConditionalGeneration, Qwen3VLForConditionalGeneration],
+    processor: Union[Qwen2_5_VLProcessor, Qwen3VLProcessor],
+    qwen_version: str = "qwen25",
     max_tokens: int = 128,
 ):
-    # preprocess and generate
-    inputs = model_inputs(messages, vision_features, processor).to(model.device)
+    """Generate text from vision features.
 
-    # Set custom features on model for decoding steps (generate() only passes kwargs on first call)
-    # We set this explicitly here and clean up after, avoiding hidden state in forward()
-    model.model._custom_patch_features = vision_features
-    try:
-        generated_ids = model.generate(
-            **inputs,
-            max_new_tokens=max_tokens,
-            custom_patch_features=vision_features,
-        )
-    finally:
-        # Always clean up to prevent state leakage
-        if hasattr(model.model, "_custom_patch_features"):
-            delattr(model.model, "_custom_patch_features")
+    Args:
+        messages: Chat messages with image placeholders
+        vision_features: List of vision feature tensors.
+            For qwen25: each tensor is (N, hidden_dim)
+            For qwen3: each tensor is (N, hidden_dim * 4) containing [main | d0 | d1 | d2]
+        model: Qwen model (patched version)
+        processor: Qwen processor
+        qwen_version: Either "qwen25" or "qwen3"
+        max_tokens: Maximum tokens to generate
+
+    Returns:
+        Generated text response
+    """
+    # For Qwen3, we need to split concatenated features into main + deepstack
+    if qwen_version == "qwen3":
+        # Stored features are concatenated along feature dim: (N, 4096*4) = [main | ds0 | ds1 | ds2]
+        # We split them back via qwen3_cat_to_deepstack to get:
+        #   - main: (N, 4096)
+        #   - deepstack_list: [ds0, ds1, ds2] each (N, 4096)
+        #
+        # The forward expects:
+        #   - custom_patch_features: list of main tensors (one per image), concatenated internally
+        #   - custom_deepstack_features: list of 3 tensors, each containing ALL visual tokens
+        #     from ALL images concatenated (this is what get_image_features returns when
+        #     processing multiple images at once)
+        #
+        # So for multiple images we must concatenate deepstack per layer ourselves.
+        # For single image, torch.cat([single_tensor], dim=0) is a no-op.
+
+        main_features = []
+        all_deepstack = [[] for _ in range(QWEN_CONSTANTS["qwen3"]["num_deepstack_layers"])]
+
+        for feat in vision_features:
+            main, deepstack_list = qwen3_cat_to_deepstack(feat)
+            main_features.append(main)
+            for i, ds in enumerate(deepstack_list):
+                all_deepstack[i].append(ds)
+
+        # Concatenate deepstack features across all images per layer
+        deepstack_features = [torch.cat(ds_list, dim=0) for ds_list in all_deepstack]
+
+        # preprocess and generate
+        inputs = model_inputs(messages, main_features, processor, qwen_version=qwen_version).to(model.device)
+
+        # Set custom features on model for decoding steps
+        model.model._custom_patch_features = main_features
+        model.model._custom_deepstack_features = deepstack_features
+        try:
+            generated_ids = model.generate(
+                **inputs,
+                max_new_tokens=max_tokens,
+                custom_patch_features=main_features,
+                custom_deepstack_features=deepstack_features,
+            )
+        finally:
+            # Always clean up to prevent state leakage
+            if hasattr(model.model, "_custom_patch_features"):
+                delattr(model.model, "_custom_patch_features")
+            if hasattr(model.model, "_custom_deepstack_features"):
+                delattr(model.model, "_custom_deepstack_features")
+    else:
+        # Qwen2.5 path
+        inputs = model_inputs(messages, vision_features, processor, qwen_version=qwen_version).to(model.device)
+
+        # Set custom features on model for decoding steps (generate() only passes kwargs on first call)
+        # We set this explicitly here and clean up after, avoiding hidden state in forward()
+        model.model._custom_patch_features = vision_features
+        try:
+            generated_ids = model.generate(
+                **inputs,
+                max_new_tokens=max_tokens,
+                custom_patch_features=vision_features,
+            )
+        finally:
+            # Always clean up to prevent state leakage
+            if hasattr(model.model, "_custom_patch_features"):
+                delattr(model.model, "_custom_patch_features")
 
     # remove prefix tokens (model input) and decode
     generated_ids_trimmed = [
