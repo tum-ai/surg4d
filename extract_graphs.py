@@ -708,15 +708,15 @@ def timestep_graph(positions, clusters, cfg: DictConfig):
     means = np.stack([positions[clusters == i].mean(0) for i in range(n_nodes)])
     covs = np.stack([np.cov(positions[clusters == i].T) for i in range(n_nodes)])
 
-    distances = np.empty((n_nodes, n_nodes))
+    bhattacharyya_coeffs = np.empty((n_nodes, n_nodes))
     for i in range(n_nodes):
         for j in range(n_nodes):
-            distances[i, j] = bhattacharyya_coefficient(
+            bhattacharyya_coeffs[i, j] = bhattacharyya_coefficient(
                 means[i], covs[i], means[j], covs[j]
             )
 
-    A = np.where(distances >= cfg.graph_extraction.graph_edge_threshold, distances, 0)
-    return A
+    A = np.where(bhattacharyya_coeffs >= cfg.graph_extraction.graph_edge_threshold, bhattacharyya_coeffs, 0)
+    return A, bhattacharyya_coeffs
 
 
 def splat_spatial_grounding_feats(
@@ -884,12 +884,12 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
     ) = properties_through_time(pos_through_time, clusters)
 
     # Graph
-    graphs = np.stack(
-        [
-            timestep_graph(pos_through_time[i], clusters, cfg)
-            for i in range(len(timesteps))
-        ]
-    )
+    graph_results = [
+        timestep_graph(pos_through_time[i], clusters, cfg)
+        for i in range(len(timesteps))
+    ]
+    graphs = np.stack([g[0] for g in graph_results])
+    bhattacharyya_coeffs = np.stack([g[1] for g in graph_results])
 
     # Save outputs
     model_path = Path(cfg.output_root) / clip.name
@@ -936,6 +936,9 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
     np.save(
         out / "graph.npy", graphs
     )  # adjacency matrices through time - weights are bhattacharyya coefficients (timesteps, n_clusters, n_clusters)
+    np.save(
+        out / "bhattacharyya_coeffs.npy", bhattacharyya_coeffs
+    )  # dense bhattacharyya coefficients through time (timesteps, n_clusters, n_clusters)
 
     # save stuff for spatial grounding
     splat_feats, splat_indices = splat_spatial_grounding_feats(

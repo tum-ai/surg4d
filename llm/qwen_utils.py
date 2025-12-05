@@ -19,6 +19,7 @@ from .patched_qwen import (
     PatchedQwen2_5_VLForConditionalGeneration,
     PatchedQwen3VLForConditionalGeneration,
 )
+from .tools import IMAGE_PLACEHOLDER
 
 # Qwen vision encoder constants by version
 # Note: Both Qwen2.5 and Qwen3 use smart_resize() which resizes (not crops/pads)
@@ -352,14 +353,13 @@ def ask_qwen_about_image(
 
 
 @lru_cache(maxsize=1000)
-def closest_factor_pair(n) -> tuple[int, int]:
+def closest_factor_pair(n: int) -> tuple[int, int]:
+    """Find width, height factors for n tokens."""
     root = int(math.isqrt(n))
     for a in range(root, 0, -1):
         if n % a == 0:
             return a, n // a
-    raise Exception(
-        "the given feature patches don't correspond to a nice rectangular size in pixels"
-    )
+    return 1, n
 
 
 # This function takes in the **patch features** of an image and a prompt
@@ -392,6 +392,7 @@ def model_inputs(
     qwen_version: str = "qwen25",
     tools: List[Dict[str, Any]] = [],
 ):
+    """Prepare model inputs from messages and vision features."""
     # make sure number of messages and vision feature sets match
     n_msg_images = sum(
         1
@@ -418,27 +419,18 @@ def model_inputs(
     for feat in vision_features:
         n = int(feat.shape[0])
         w, h = closest_factor_pair(n)
-        assert w * h == n, f"Feature count {n} doesn't factor into rectangle"
         img_w = w * effective_patch_size
         img_h = h * effective_patch_size
         mock_img = Image.new("RGB", (img_w, img_h), color="red")
         mock_images.append(mock_img)
 
-    # we need to temporarily override min and max pixel counts
-    # to make sure the processor does not resize mock images
-    # internally via smart_resize
-    orig_min_pixels = processor.image_processor.min_pixels
-    orig_max_pixels = processor.image_processor.max_pixels
-    processor.image_processor.min_pixels = 1
-    processor.image_processor.max_pixels = 10**12
     inputs = processor(
         text=text,
         images=mock_images,
         padding=True,
         return_tensors="pt",
+        do_resize=False,
     )
-    processor.image_processor.min_pixels = orig_min_pixels
-    processor.image_processor.max_pixels = orig_max_pixels
 
     return inputs
 
@@ -538,13 +530,95 @@ def _extract_final_answer(response: str) -> str:
     return cleaned.strip()
 
 
+def build_tool_response_message(
+    tool_results: List[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], List[torch.Tensor]]:
+    """Build a user message containing tool responses with interleaved text and images.
+
+    Takes a list of tool result records and constructs a message in the format expected
+    by Qwen's chat template. Each tool result is wrapped in <tool_response> tags.
+    Vision features are inserted at positions marked by IMAGE_PLACEHOLDER in the text.
+
+    Args:
+        tool_results: List of tool result records, each containing:
+            - "tool_name" (str): Name of the tool that was called
+            - "arguments" (dict): Arguments passed to the tool
+            - "result" (dict): Tool return value with:
+                - "text" (str): Text content, may contain IMAGE_PLACEHOLDER markers
+                - "vision_features" (List[torch.Tensor], optional): Feature tensors to insert
+                  at IMAGE_PLACEHOLDER positions. Each tensor is (N, hidden_dim * 4) in
+                  concatenated format [main | d0 | d1 | d2].
+
+    Returns:
+        Tuple of (message, vision_features) where:
+            - message: Dict with "role": "user" and "content" list containing interleaved
+              {"type": "text", "text": ...} and {"type": "image", "image": None} entries
+            - vision_features: List of all vision feature tensors from all tools,
+              in the order they appear in the message (matching image placeholder order)
+
+    Example:
+        Tool returns: {"text": '{"node": "<image/>"}', "vision_features": [tensor]}
+
+        Generated content list:
+        [
+            {"type": "text", "text": '<tool_response>\\n{"name": "my_tool", "content": "{\\"node\\": \\"'},
+            {"type": "image", "image": None},
+            {"type": "text", "text": '\\"}"}\\n</tool_response>'},
+        ]
+
+    Raises:
+        AssertionError: If number of IMAGE_PLACEHOLDER markers doesn't match
+            number of vision_features for any tool.
+    """
+    content = []
+    all_vision_features = []
+
+    for record in tool_results:
+        result = record["result"]
+        text_content = result.get("text", "")
+        tool_response_text = (
+            f"<tool_response>\n"
+            f'{{"name": "{record["tool_name"]}", "content": {json.dumps(text_content)}}}\n'
+            f"</tool_response>"
+        )
+
+        if "vision_features" in result:
+            tool_features = result["vision_features"]
+            if not isinstance(tool_features, list):
+                tool_features = [tool_features]
+
+            # Split text by IMAGE_PLACEHOLDER and interleave with image placeholders
+            parts = tool_response_text.split(IMAGE_PLACEHOLDER)
+            n_markers = len(parts) - 1
+            assert n_markers == len(tool_features), (
+                f"Tool {record['tool_name']} returned {len(tool_features)} vision_features "
+                f"but text contains {n_markers} IMAGE_PLACEHOLDER markers"
+            )
+
+            # Build interleaved content: text, image, text, image, ..., text
+            # Empty text parts (from markers at start/end) are skipped
+            for i, part in enumerate(parts):
+                if part:
+                    content.append({"type": "text", "text": part})
+                if i < len(tool_features):
+                    content.append({"type": "image", "image": None})
+
+            all_vision_features.extend(tool_features)
+        else:
+            # No vision features - just add the text
+            content.append({"type": "text", "text": tool_response_text})
+
+    message = {"role": "user", "content": content}
+    return message, all_vision_features
+
+
 def generate_with_vision_features_agentic(
     messages: List[Dict[str, Any]],
     vision_features: List[torch.Tensor],
     model: Union[Qwen2_5_VLForConditionalGeneration, Qwen3VLForConditionalGeneration],
     processor: Union[Qwen2_5_VLProcessor, Qwen3VLProcessor],
     tools: Dict[str, Tuple[Callable, Dict[str, Any]]],
-    qwen_version: str = "qwen25",
+    qwen_version: str = "qwen3",
     max_tokens: int = 5012,
     max_iterations: int = 10,
 ) -> Dict[str, Any]:
@@ -560,6 +634,12 @@ def generate_with_vision_features_agentic(
         tools: Dict mapping tool_name -> (callable, json_spec)
                json_spec should be in OpenAI function calling format:
                {"type": "function", "function": {"name": ..., "description": ..., "parameters": ...}}
+               Tools must return a dict with:
+                   - "text" (str): Text content of the result (required). Use IMAGE_PLACEHOLDER
+                     markers to indicate where vision features should be inserted.
+                   - "vision_features" (List[torch.Tensor], optional): List of feature tensors,
+                     each (N, hidden_dim * 4) in concatenated format [main | d0 | d1 | d2].
+                     Must have exactly as many tensors as IMAGE_PLACEHOLDER markers in text.
         qwen_version: Either "qwen25" or "qwen3"
         max_tokens: Maximum tokens per generation
         max_iterations: Maximum number of tool-calling iterations
@@ -575,6 +655,10 @@ def generate_with_vision_features_agentic(
                 - "arguments" (dict): Arguments passed to the tool
                 - "result" (Any): Result returned by the tool (or error message string)
     """
+    assert qwen_version == "qwen3", (
+        "qwen3 is the only supported version for agentic mode"
+    )
+
     # Extract tool specs for the model
     tool_specs = [spec for _, spec in tools.values()]
 
@@ -586,42 +670,32 @@ def generate_with_vision_features_agentic(
 
     tool_call_history = []
 
-    # Prepare features based on qwen version
-    if qwen_version == "qwen3":
-        main_features, deepstack_features = qwen3_format_multiple_deepstack_features(
-            vision_features
-        )
-        features_for_inputs = main_features
-    else:
-        features_for_inputs = vision_features
-        main_features = None
-        deepstack_features = None
+    # Track all vision features (initial + those added by tools)
+    # Keep in concatenated format, convert to deepstack before each generation
+    all_vision_features = list(vision_features)
 
     for iteration in range(max_iterations):
+        # Convert accumulated features to deepstack format for this iteration
+        main_features, deepstack_features = qwen3_format_multiple_deepstack_features(
+            all_vision_features
+        )
+
         # Generate response with tools
         inputs = model_inputs(
             current_messages,
-            features_for_inputs,
+            main_features,
             processor,
             qwen_version=qwen_version,
             tools=tool_specs,
         ).to(model.device)
 
-        if qwen_version == "qwen3":
-            generated_ids = model.generate(
-                **inputs,
-                max_new_tokens=max_tokens,
-                do_sample=False,
-                custom_patch_features=main_features,
-                custom_deepstack_features=deepstack_features,
-            )
-        else:
-            generated_ids = model.generate(
-                **inputs,
-                max_new_tokens=max_tokens,
-                do_sample=False,
-                custom_patch_features=vision_features,
-            )
+        generated_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_tokens,
+            do_sample=False,
+            custom_patch_features=main_features,
+            custom_deepstack_features=deepstack_features,
+        )
 
         generated_ids_trimmed = [
             out_ids[len(in_ids) :]
@@ -661,13 +735,13 @@ def generate_with_vision_features_agentic(
             arguments = tool_call.get("arguments", {})
 
             if tool_name not in tools:
-                result = f"Error: Unknown tool '{tool_name}'"
+                result = {"text": f"Error: Unknown tool '{tool_name}'"}
             else:
                 callable_fn, _ = tools[tool_name]
                 try:
                     result = callable_fn(**arguments)
                 except Exception as e:
-                    result = f"Error executing tool: {str(e)}"
+                    result = {"text": f"Error executing tool: {str(e)}"}
 
             tool_call_record = {
                 "tool_name": tool_name,
@@ -677,22 +751,10 @@ def generate_with_vision_features_agentic(
             tool_call_history.append(tool_call_record)
             tool_results.append(tool_call_record)
 
-        # Add tool results as a user message (Qwen expects tool results this way)
-        tool_result_content = []
-        for record in tool_results:
-            result_str = (
-                json.dumps(record["result"])
-                if not isinstance(record["result"], str)
-                else record["result"]
-            )
-            tool_result_content.append(
-                {
-                    "type": "text",
-                    "text": f'<tool_response>\n{{"name": "{record["tool_name"]}", "content": {json.dumps(result_str)}}}\n</tool_response>',
-                }
-            )
-
-        current_messages.append({"role": "user", "content": tool_result_content})
+        # Build tool response message and collect vision features
+        tool_response_message, new_features = build_tool_response_message(tool_results)
+        current_messages.append(tool_response_message)
+        all_vision_features.extend(new_features)
 
     # Max iterations reached - try to extract any answer from the last response
     final_answer = _extract_final_answer(response)
@@ -833,6 +895,124 @@ def prompt_with_graph_at_timestep(
             qwen_version=qwen_version,
             max_tokens=5012,
         )
+
+
+def prompt_graph_agent(
+    question: str,
+    node_feats: np.lib.npyio.NpzFile,
+    initial_timestep_idx: int,
+    node_centers: np.ndarray,
+    node_centroids: np.ndarray,
+    node_extents: np.ndarray,
+    model: Union[Qwen2_5_VLForConditionalGeneration, Qwen3VLForConditionalGeneration],
+    processor: Union[Qwen2_5_VLProcessor, Qwen3VLProcessor],
+    tools: Dict[str, Tuple[Callable, Dict[str, Any]]],
+    qwen_version: str = "qwen3",
+    system_prompt: str = None,
+):
+    """
+    node_feats: np.lib.npyio.NpzFile - npz file containing node features for each timestep
+    timestep_idx: int - index of the timestep to use for the node features
+    adjacency_matrices: np.ndarray - adjacency matrices through time - weights are bhattacharyya coefficients (timesteps, n_clusters, n_clusters)
+    node_centers: np.ndarray - cluster centers through time (timesteps, n_clusters, 3)
+    node_centroids: np.ndarray - cluster centroids through time (timesteps, n_clusters, 3)
+    node_extents: np.ndarray - cluster extents through time (timesteps, n_clusters, 3)
+    model: Qwen2_5_VLForConditionalGeneration - model to use
+    processor: Qwen2_5_VLProcessor - processor to use
+    system_prompt: str - system prompt to use
+    tools: Dict[str, Tuple[Callable, Dict[str, Any]]] - tools to use
+    """
+    assert qwen_version == "qwen3", "qwen3 is required for graph agentic prompting"
+    assert tools is not None and len(tools) > 0, (
+        "tools are required for graph agentic prompting"
+    )
+    assert len(node_centers) == len(node_centroids) == len(node_extents), (
+        "timestep mismatch"
+    )
+
+    # node feat indices correspond to cluster ids
+    node_feat_indices = sorted(list(node_feats.keys()), key=lambda x: int(x))
+    node_feats = [node_feats[idx] for idx in node_feat_indices]
+    node_feats = [i[initial_timestep_idx] for i in node_feats]
+    centroids = node_centroids[initial_timestep_idx]
+    extents = node_extents[initial_timestep_idx]
+    centers = node_centers[initial_timestep_idx]
+
+    graph_content = []
+    graph_content.append(
+        {
+            "type": "text",
+            "text": f'<graph-nodes t="{initial_timestep_idx}">\n',
+        }
+    )
+    for n in range(centroids.shape[0]):
+        graph_content.extend(
+            [
+                {
+                    "type": "text",
+                    "text": f'<node id="{n}">\n',
+                },
+                {
+                    "type": "text",
+                    "text": "<lowres-visual-descriptor>",
+                },
+                {
+                    "type": "image",
+                    "image": None,
+                },
+                {
+                    "type": "text",
+                    "text": "</lowres-visual-descriptor>\n",
+                },
+                {
+                    "type": "text",
+                    "text": f'<centroid x="{centroids[n][0]:.2f}" y="{centroids[n][1]:.2f}" z="{centroids[n][2]:.2f}"/>\n',
+                },
+                {
+                    "type": "text",
+                    "text": f'<bbox-center x="{centers[n][0]:.2f}" y="{centers[n][1]:.2f}" z="{centers[n][2]:.2f}"/>\n',
+                },
+                {
+                    "type": "text",
+                    "text": f'<bbox-extent x="{extents[n][0]:.2f}" y="{extents[n][1]:.2f}" z="{extents[n][2]:.2f}"/>\n',
+                },
+                {
+                    "type": "text",
+                    "text": "</node>\n",
+                },
+            ]
+        )
+    graph_content.append(
+        {
+            "type": "text",
+            "text": "</graph-nodes>\n",
+        }
+    )
+
+    messages = [
+        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+        {
+            "role": "user",
+            "content": [
+                *graph_content,
+                {"type": "text", "text": "<user-prompt>"},
+                {"type": "text", "text": question},
+                {"type": "text", "text": "</user-prompt>\n"},
+                {"type": "text", "text": "\nYour response:\n"},
+            ],
+        },
+    ]
+
+    return generate_with_vision_features_agentic(
+        messages=messages,
+        vision_features=[torch.Tensor(f) for f in node_feats],
+        model=model,
+        processor=processor,
+        tools=tools,
+        qwen_version=qwen_version,
+        max_tokens=5012,
+        max_iterations=50,
+    )
 
 
 def prompt_with_static_graph(
