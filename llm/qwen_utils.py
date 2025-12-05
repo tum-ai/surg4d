@@ -909,6 +909,7 @@ def prompt_graph_agent(
     tools: Dict[str, Tuple[Callable, Dict[str, Any]]],
     qwen_version: str = "qwen3",
     system_prompt: str = None,
+    max_iterations: int = 20,
 ):
     """
     node_feats: np.lib.npyio.NpzFile - npz file containing node features for each timestep
@@ -1011,7 +1012,7 @@ def prompt_graph_agent(
         tools=tools,
         qwen_version=qwen_version,
         max_tokens=5012,
-        max_iterations=50,
+        max_iterations=max_iterations,
     )
 
 

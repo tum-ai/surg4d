@@ -19,7 +19,7 @@ from typing import List, Dict, Optional, Any
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from benchmark.benchmark_config import BenchmarkConfig, normalize_for_matching
 from benchmark.cholect50_utils import CholecT50Loader
-from qwen_vl import (
+from llm.qwen_utils import (
     get_patched_qwen,
     prompt_with_graph_at_timestep,
     prompt_with_dynamic_graph,

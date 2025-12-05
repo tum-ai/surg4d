@@ -3,12 +3,24 @@ from omegaconf import DictConfig
 import torch
 import numpy as np
 from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLProcessor
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 import cv2
 import re
 import os
 
-import qwen_vl
+from benchmark.graph_utils import get_coord_transformations
+from llm.qwen_utils import (
+    get_patched_qwen,
+    model_inputs,
+    QWEN_CONSTANTS,
+    get_patch_hw,
+    prompt_with_graph_at_timestep,
+    prompt_graph_agent,
+    ask_qwen_about_image,
+    qwen3_format_multiple_deepstack_features,
+)
+from llm.tools import GraphTools
+from autoencoder.model_qwen import QwenAutoencoder
 from scene.dataset_readers import CameraInfo, readColmapSceneInfo
 from scene.cameras import Camera
 from PIL import Image
@@ -16,9 +28,12 @@ from qwen_vl_utils import process_vision_info
 
 
 def get_patched_qwen_for_spatial_grounding(
-    use_bnb_4bit: bool = False, use_bnb_8bit: bool = False
+    qwen_version: str = "qwen25",
+    use_bnb_4bit: bool = False,
+    use_bnb_8bit: bool = False,
 ):
-    model, processor = qwen_vl.get_patched_qwen(
+    model, processor = get_patched_qwen(
+        qwen_version=qwen_version,
         use_bnb_4bit=use_bnb_4bit,
         use_bnb_8bit=use_bnb_8bit,
         attn_implementation="eager",
@@ -33,23 +48,27 @@ def get_patched_qwen_for_spatial_grounding(
 
 
 def extract_text_to_vision_attention(
-    model: Qwen2_5_VLForConditionalGeneration,
-    processor: Qwen2_5_VLProcessor,
+    model,
+    processor,
     vision_features,
     layers: List[int],
     prompt: str,
     substring: str,
     system_prompt: str,
+    qwen_version: str = "qwen25",
 ):
     """Extract attention scores from substring query tokens to vision tokens across layers.
 
     Args:
-        model (Qwen2_5_VLForConditionalGeneration): Qwen2.5-VL model
-        processor (Qwen2_5_VLProcessor): Qwen2.5-VL processor
-        vision_features (_type_): _description_
+        model: Qwen VL model (Qwen2.5 or Qwen3)
+        processor: Qwen VL processor
+        vision_features: Vision feature tensor.
+            For qwen25: shape (N, hidden_dim)
+            For qwen3: shape (N, hidden_dim * 4) containing [main | d0 | d1 | d2]
         layers (List[int]): List of layers to extract attention scores from
         prompt (str): Prompt to use for the query
         substring (str): Substring to extract attention scores from
+        qwen_version (str): Either "qwen25" or "qwen3"
 
     Returns:
         Dict[str, Any]:
@@ -72,10 +91,21 @@ def extract_text_to_vision_attention(
         },
     ]
 
-    # Prepare inputs using a mock image sized to match the number of patch features
-    inputs = qwen_vl.model_inputs(messages, [vision_features], processor).to(
-        model.device
-    )
+    # Handle Qwen3 concatenated features: split into main + deepstack
+    if qwen_version == "qwen3":
+        main_features, deepstack_features = qwen3_format_multiple_deepstack_features(
+            [vision_features]
+        )
+        # Prepare inputs using main features for correct token count
+        inputs = model_inputs(
+            messages, main_features, processor, qwen_version=qwen_version
+        ).to(model.device)
+    else:
+        main_features = [vision_features]
+        deepstack_features = None
+        inputs = model_inputs(
+            messages, main_features, processor, qwen_version=qwen_version
+        ).to(model.device)
 
     # Identify vision token positions via <|image_pad|> before forward (needed for custom pos ids)
     input_ids = inputs.input_ids[0]
@@ -92,24 +122,10 @@ def extract_text_to_vision_attention(
         model_kwargs = dict(
             output_attentions=True,
             return_dict=True,
-            custom_patch_features=[vision_features],
+            custom_patch_features=main_features,
         )
-
-        # Debug: print applied positional ids for a small window around the middle
-        if bool(int(os.getenv("DEBUG_VISION_POS_ENC", "0"))):
-            count = max(1, int(os.getenv("DEBUG_VISION_POS_ENC_COUNT", "5")))
-            n = len(vision_token_indices)
-            if n > 0:
-                mid = n // 2
-                half = max(0, (count - 1) // 2)
-                start = max(0, mid - half)
-                end = min(n, start + count)
-                # ensure we have exactly up to `count` indices if possible
-                if end - start < count:
-                    start = max(0, end - count)
-                debug_abs_tok_idx = vision_token_indices[start:end]
-                model_kwargs["debug_print_vision_positional_encodings"] = True
-                model_kwargs["debug_positional_token_indices"] = debug_abs_tok_idx
+        if qwen_version == "qwen3" and deepstack_features is not None:
+            model_kwargs["custom_deepstack_features"] = deepstack_features
         outputs = model(
             **inputs,
             **model_kwargs,
@@ -381,6 +397,8 @@ def splat_predict_query_list(
     train_cameras,
     prompt_template: str,
     system_prompt: str,
+    point_n2o: Callable[[np.ndarray], np.ndarray],
+    qwen_version: str = "qwen25",
 ):
     outputs = []
     frame_idx = int(frame_number)
@@ -411,6 +429,7 @@ def splat_predict_query_list(
             prompt=prompt,
             substring=substring,
             system_prompt=system_prompt,
+            qwen_version=qwen_version,
         )
         attn_scores = attn_out["scores"]
 
@@ -425,8 +444,10 @@ def splat_predict_query_list(
             # Directly index positions by attention-ranked indices
             top_positions = pos_t[top_indices]
 
+            # Convert back to original coordinates for projection
+            top_positions_original = point_n2o(top_positions)
             top_pixels = project_3d_to_2d(
-                top_positions, proj_matrix, img_width, img_height
+                top_positions_original, proj_matrix, img_width, img_height
             )
 
             out_item["predictions"][layer] = {
@@ -454,13 +475,17 @@ def splat_feat_queries(
     )
     train_cameras = scene_info.train_cameras
 
+    # Compute coordinate transformations and normalize positions
+    point_o2n, point_n2o, _, _ = get_coord_transformations(positions)
+    positions_normalized = point_o2n(positions)
+
     results = {}
     splat_system_prompt = cfg.eval.spatial.splat_system_prompt
 
     for timestep, timestep_queries in clip_gt.items():
         t = int(timestep)
         ts_feats = splat_feats[t]
-        pos_t = positions[t][splat_indices]
+        pos_t = positions_normalized[t][splat_indices]
 
         results[timestep] = {"objects": [], "actions": []}
 
@@ -482,6 +507,8 @@ def splat_feat_queries(
             train_cameras=train_cameras,
             prompt_template=prompt_template,
             system_prompt=splat_system_prompt,
+            point_n2o=point_n2o,
+            qwen_version=cfg.eval.qwen_version,
         )
 
         results[timestep]["actions"] = splat_predict_query_list(
@@ -497,6 +524,8 @@ def splat_feat_queries(
             train_cameras=train_cameras,
             prompt_template=prompt_template,
             system_prompt=splat_system_prompt,
+            point_n2o=point_n2o,
+            qwen_version=cfg.eval.qwen_version,
         )
 
     return results
@@ -586,6 +615,8 @@ def static_graph_predict_query_list(
     train_cameras,
     system_prompt: str,
     prompt_template: str,
+    point_n2o: Callable[[np.ndarray], np.ndarray],
+    qwen_version: str = "qwen25",
 ):
     """Predict a single 3D point per query via Qwen prompted with a static graph.
 
@@ -605,7 +636,7 @@ def static_graph_predict_query_list(
         question = _format_only_substring(prompt_template, substring)
 
         # Call Qwen with the graph at this specific timestep
-        response = qwen_vl.prompt_with_graph_at_timestep(
+        response = prompt_with_graph_at_timestep(
             question=question,
             node_feats=node_feats_npz,
             timestep_idx=int(timestep_idx),
@@ -615,6 +646,7 @@ def static_graph_predict_query_list(
             node_extents=node_extents,
             model=model,
             processor=processor,
+            qwen_version=qwen_version,
             system_prompt=system_prompt,
         )
 
@@ -629,9 +661,10 @@ def static_graph_predict_query_list(
             outputs.append(out_item)
             continue
 
-        # Project to pixel coords
+        # Project to pixel coords - convert normalized point back to original coords first
         pos_arr = np.array(point3d, dtype=np.float32).reshape(1, 3)
-        pixels = project_3d_to_2d(pos_arr, proj_matrix, img_width, img_height)
+        pos_arr_original = point_n2o(pos_arr)
+        pixels = project_3d_to_2d(pos_arr_original, proj_matrix, img_width, img_height)
 
         out_item = {"query": substring, "predictions": {}, "raw_response": response}
         # Single mock layer key for static baseline
@@ -666,12 +699,20 @@ def static_graph_feat_queries(
     centers_path = graph_dir / "c_centers.npy"
     centroids_path = graph_dir / "c_centroids.npy"
     extents_path = graph_dir / "c_extents.npy"
+    positions_path = graph_dir / "positions.npy"
 
     node_feats_npz = np.load(node_feats_npz_path)
     adjacency_matrices = np.load(adjacency_path)
     node_centers = np.load(centers_path)
     node_centroids = np.load(centroids_path)
     node_extents = np.load(extents_path)
+    positions = np.load(positions_path)
+
+    # Compute coordinate transformations and normalize graph data
+    point_o2n, point_n2o, _, distance_o2n = get_coord_transformations(positions)
+    node_centers = point_o2n(node_centers)
+    node_centroids = point_o2n(node_centroids)
+    node_extents = distance_o2n(node_extents)
 
     # Cameras for projection
     scene_info = readColmapSceneInfo(
@@ -703,6 +744,8 @@ def static_graph_feat_queries(
             train_cameras=train_cameras,
             system_prompt=system_prompt,
             prompt_template=prompt_template,
+            point_n2o=point_n2o,
+            qwen_version=cfg.eval.qwen_version,
         )
 
         results[timestep]["actions"] = static_graph_predict_query_list(
@@ -719,6 +762,8 @@ def static_graph_feat_queries(
             train_cameras=train_cameras,
             system_prompt=system_prompt,
             prompt_template=prompt_template,
+            point_n2o=point_n2o,
+            qwen_version=cfg.eval.qwen_version,
         )
 
     return results
@@ -746,8 +791,10 @@ def splat_graph_predict_query_list(
     static_graph_system_prompt: str,
     prompt_template_attn: str,
     prompt_template_graph: str,
+    point_n2o: Callable[[np.ndarray], np.ndarray],
     max_proposals: int | None = None,
     include_scores_in_context: bool = False,
+    qwen_version: str = "qwen25",
 ):
     """Use SPLAT attention to propose 3D points, then refine via static-graph prompting.
 
@@ -777,6 +824,7 @@ def splat_graph_predict_query_list(
                 prompt=prompt_attn,
                 substring=substring,
                 system_prompt=system_prompt_splat_attn,
+                qwen_version=qwen_version,
             )
             attn_scores = attn_out["scores"]  # [1, Q, V]
 
@@ -822,7 +870,7 @@ def splat_graph_predict_query_list(
             ]
         question = question + "\n\n" + "\n".join(lines)
 
-        response = qwen_vl.prompt_with_graph_at_timestep(
+        response = prompt_with_graph_at_timestep(
             question=question,
             node_feats=node_feats_npz,
             timestep_idx=int(timestep_idx),
@@ -832,6 +880,7 @@ def splat_graph_predict_query_list(
             node_extents=node_extents,
             model=model,
             processor=processor,
+            qwen_version=qwen_version,
             system_prompt=static_graph_system_prompt,
         )
 
@@ -846,8 +895,10 @@ def splat_graph_predict_query_list(
             outputs.append(out_item)
             continue
 
+        # Project to pixel coords - convert normalized point back to original coords first
         pos_arr = np.array(point3d, dtype=np.float32).reshape(1, 3)
-        pixels = project_3d_to_2d(pos_arr, proj_matrix, img_width, img_height)
+        pos_arr_original = point_n2o(pos_arr)
+        pixels = project_3d_to_2d(pos_arr_original, proj_matrix, img_width, img_height)
 
         out_item = {"query": substring, "predictions": {}, "raw_response": response}
         out_item["predictions"]["0"] = {
@@ -889,6 +940,13 @@ def splat_graph_feat_queries(
     node_centroids = np.load(centroids_path)
     node_extents = np.load(extents_path)
 
+    # Compute coordinate transformations and normalize positions and graph data
+    point_o2n, point_n2o, _, distance_o2n = get_coord_transformations(positions)
+    positions_normalized = point_o2n(positions)
+    node_centers = point_o2n(node_centers)
+    node_centroids = point_o2n(node_centroids)
+    node_extents = distance_o2n(node_extents)
+
     # Cameras for projection
     scene_info = readColmapSceneInfo(
         Path(cfg.preprocessed_root) / clip.name, images=None, eval=False
@@ -907,7 +965,7 @@ def splat_graph_feat_queries(
     for timestep, timestep_queries in clip_gt.items():
         t = int(timestep)
         ts_feats = splat_feats[t]
-        pos_t = positions[t][splat_indices]
+        pos_t = positions_normalized[t][splat_indices]
         frame_number = int(timestep_queries["frame_number"])  # local idx
 
         results[timestep] = {"objects": [], "actions": []}
@@ -933,8 +991,10 @@ def splat_graph_feat_queries(
             static_graph_system_prompt=static_graph_system_prompt,
             prompt_template_attn=prompt_template_attn,
             prompt_template_graph=prompt_template_graph,
+            point_n2o=point_n2o,
             max_proposals=max_props,
             include_scores_in_context=include_scores,
+            qwen_version=cfg.eval.qwen_version,
         )
 
         results[timestep]["actions"] = splat_graph_predict_query_list(
@@ -958,26 +1018,265 @@ def splat_graph_feat_queries(
             static_graph_system_prompt=static_graph_system_prompt,
             prompt_template_attn=prompt_template_attn,
             prompt_template_graph=prompt_template_graph,
+            point_n2o=point_n2o,
             max_proposals=max_props,
             include_scores_in_context=include_scores,
+            qwen_version=cfg.eval.qwen_version,
+        )
+
+    return results
+
+
+def _sanitize_tool_calls(tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Remove non-JSON-serializable objects (tensors) from tool call results."""
+    sanitized = []
+    for tc in tool_calls:
+        clean_tc = {
+            "tool_name": tc.get("tool_name"),
+            "arguments": tc.get("arguments"),
+        }
+        # Only keep the text part of results, drop vision_features (tensors)
+        result = tc.get("result", {})
+        if isinstance(result, dict):
+            clean_tc["result"] = {"text": result.get("text", "")}
+        else:
+            clean_tc["result"] = str(result)
+        sanitized.append(clean_tc)
+    return sanitized
+
+
+def graph_agent_predict_query_list(
+    queries_list,
+    *,
+    model,
+    processor,
+    node_feats_npz,
+    node_centers: np.ndarray,
+    node_centroids: np.ndarray,
+    node_extents: np.ndarray,
+    tools: Dict[str, Any],
+    timestep_idx: int,
+    frame_number: int,
+    train_cameras,
+    system_prompt: str,
+    prompt_template: str,
+    point_n2o: Callable[[np.ndarray], np.ndarray],
+    max_iterations: int = 10,
+):
+    """Use prompt_graph_agent with tools to predict a 3D point per query.
+
+    Returns items with a single mock layer key "0" like static_graph baseline.
+    """
+    outputs = []
+
+    # Precompute projection for this frame
+    frame_name = f"frame_{int(frame_number):06d}.jpg"
+    proj_matrix, img_width, img_height = get_proj_matrix_from_timestep(
+        int(frame_number), train_cameras, frame_name
+    )
+
+    for query in queries_list:
+        substring = query["query"]
+        question = _format_only_substring(prompt_template, substring)
+
+        # Call Qwen agent with the graph at this specific timestep
+        agent_result = prompt_graph_agent(
+            question=question,
+            node_feats=node_feats_npz,
+            initial_timestep_idx=int(timestep_idx),
+            node_centers=node_centers,
+            node_centroids=node_centroids,
+            node_extents=node_extents,
+            model=model,
+            processor=processor,
+            tools=tools,
+            qwen_version="qwen3",  # Required for agentic mode
+            system_prompt=system_prompt,
+            max_iterations=max_iterations,
+        )
+
+        response = agent_result["final_answer"]
+
+        point3d = _parse_point_from_json(response)
+        sanitized_tool_calls = _sanitize_tool_calls(agent_result.get("tool_calls", []))
+        if point3d is None:
+            # 3D failure: fall back to 2D corner pixel (0,0), omit 3D position to avoid skew
+            out_item = {
+                "query": substring,
+                "predictions": {},
+                "raw_response": response,
+                "tool_calls": sanitized_tool_calls,
+            }
+            out_item["predictions"]["0"] = {
+                "pixel_coords": [[0.0, 0.0]],
+                "positions": [],
+            }
+            outputs.append(out_item)
+            continue
+
+        # Project to pixel coords - convert normalized point back to original coords first
+        pos_arr = np.array(point3d, dtype=np.float32).reshape(1, 3)
+        pos_arr_original = point_n2o(pos_arr)
+        pixels = project_3d_to_2d(pos_arr_original, proj_matrix, img_width, img_height)
+
+        out_item = {
+            "query": substring,
+            "predictions": {},
+            "raw_response": response,
+            "tool_calls": sanitized_tool_calls,
+        }
+        # Single mock layer key for graph agent baseline
+        out_item["predictions"]["0"] = {
+            "pixel_coords": pixels.tolist(),
+            "positions": pos_arr.tolist(),
+        }
+        outputs.append(out_item)
+
+    return outputs
+
+
+def graph_agent_feat_queries(
+    *,
+    model,
+    processor,
+    graph_dir: Path | str,
+    clip_gt: Dict[str, Any],
+    clip: DictConfig,
+    cfg: DictConfig,
+):
+    """Run graph agent with tools across all queries for a clip.
+
+    Uses prompt_graph_agent which requires qwen3 for agentic tool use.
+    Loads static graph artifacts and additional data needed for tools.
+    """
+    graph_dir = Path(graph_dir)
+
+    # Required static graph artifacts
+    node_feats_npz_path = graph_dir / "c_qwen_feats.npz"
+    centers_path = graph_dir / "c_centers.npy"
+    centroids_path = graph_dir / "c_centroids.npy"
+    extents_path = graph_dir / "c_extents.npy"
+    positions_path = graph_dir / "positions.npy"
+    clusters_path = graph_dir / "clusters.npy"
+    patch_latents_path = graph_dir / "patch_latents_through_time.npy"
+    adjacency_path = graph_dir / "graph.npy"
+    bhattacharyya_path = graph_dir / "bhattacharyya_coeffs.npy"
+
+    node_feats_npz = np.load(node_feats_npz_path)
+    node_centers = np.load(centers_path)
+    node_centroids = np.load(centroids_path)
+    node_extents = np.load(extents_path)
+    positions = np.load(positions_path)
+    clusters = np.load(clusters_path)
+    patch_latents_through_time = np.load(patch_latents_path)
+    adjacency = np.load(adjacency_path)
+    bhattacharyya_coeffs = np.load(bhattacharyya_path)
+
+    # Compute coordinate transformations (GraphTools will handle normalization internally)
+    point_o2n, point_n2o, _, distance_o2n = get_coord_transformations(positions)
+    node_centers_norm = point_o2n(node_centers)
+    node_centroids_norm = point_o2n(node_centroids)
+    node_extents_norm = distance_o2n(node_extents)
+
+    # Load autoencoder for inspect_highres_node_at_time tool
+    clip_dir = Path(cfg.preprocessed_root) / clip.name
+    autoencoder_path = clip_dir / cfg.eval.spatial.graph_agent_autoencoder_checkpoint_subdir / "best_ckpt.pth"
+    autoencoder = QwenAutoencoder(
+        input_dim=cfg.eval.spatial.graph_agent_autoencoder_full_dim,
+        latent_dim=cfg.eval.spatial.graph_agent_autoencoder_latent_dim,
+    ).to(model.device)
+    autoencoder.load_state_dict(
+        torch.load(autoencoder_path, map_location=model.device)
+    )
+    autoencoder.eval()
+
+    # Create GraphTools instance for tool management
+    graph_tools = GraphTools(
+        positions=positions,
+        clusters=clusters,
+        centroids=node_centroids,
+        centers=node_centers,
+        extents=node_extents,
+        adjacency=adjacency,
+        bhattacharyya_coeffs=bhattacharyya_coeffs,
+        qwen_feats=node_feats_npz,
+        patch_latents_through_time=patch_latents_through_time,
+        autoencoder=autoencoder,
+    )
+
+    # Get the specific tools needed for graph agent (configurable via hydra)
+    tool_names = list(cfg.eval.spatial.graph_agent_tools)
+    tools = graph_tools.get_tools_by_name(tool_names)
+
+    # Cameras for projection
+    scene_info = readColmapSceneInfo(
+        Path(cfg.preprocessed_root) / clip.name, images=None, eval=False
+    )
+    train_cameras = scene_info.train_cameras
+
+    system_prompt = cfg.eval.spatial.graph_agent_system_prompt
+    prompt_template = cfg.eval.spatial.graph_agent_prompt_template
+    max_iterations = cfg.eval.spatial.graph_agent_max_iterations
+
+    results: Dict[str, Any] = {}
+    for timestep, timestep_queries in clip_gt.items():
+        t = int(timestep)
+        frame_number = int(timestep_queries["frame_number"])  # local idx
+
+        results[timestep] = {"objects": [], "actions": []}
+
+        results[timestep]["objects"] = graph_agent_predict_query_list(
+            timestep_queries.get("objects", []),
+            model=model,
+            processor=processor,
+            node_feats_npz=node_feats_npz,
+            node_centers=node_centers_norm,
+            node_centroids=node_centroids_norm,
+            node_extents=node_extents_norm,
+            tools=tools,
+            timestep_idx=t,
+            frame_number=frame_number,
+            train_cameras=train_cameras,
+            system_prompt=system_prompt,
+            prompt_template=prompt_template,
+            point_n2o=point_n2o,
+            max_iterations=max_iterations,
+        )
+
+        results[timestep]["actions"] = graph_agent_predict_query_list(
+            timestep_queries.get("actions", []),
+            model=model,
+            processor=processor,
+            node_feats_npz=node_feats_npz,
+            node_centers=node_centers_norm,
+            node_centroids=node_centroids_norm,
+            node_extents=node_extents_norm,
+            tools=tools,
+            timestep_idx=t,
+            frame_number=frame_number,
+            train_cameras=train_cameras,
+            system_prompt=system_prompt,
+            prompt_template=prompt_template,
+            point_n2o=point_n2o,
+            max_iterations=max_iterations,
         )
 
     return results
 
 
 def _patch_indices_to_pixel_centers(
-    patch_indices: np.ndarray, img_h: int, img_w: int
+    patch_indices: np.ndarray, img_h: int, img_w: int, qwen_version: str = "qwen25"
 ) -> np.ndarray:
     """Map flat patch indices (row-major) to pixel centers in the original image.
 
     Returns array of shape (N, 2) with (x, y) in pixel coordinates.
     """
-    EFFECTIVE_PATCH_SIZE = qwen_vl.EFFECTIVE_PATCH_SIZE
-    ph, pw = qwen_vl.get_patch_hw(img_h, img_w)
+    effective_patch_size = QWEN_CONSTANTS[qwen_version]["effective_patch_size"]
+    ph, pw = get_patch_hw(img_h, img_w, qwen_version)
     cols = patch_indices % pw
     rows = patch_indices // pw
-    xs = (cols + 0.5) * EFFECTIVE_PATCH_SIZE
-    ys = (rows + 0.5) * EFFECTIVE_PATCH_SIZE
+    xs = (cols + 0.5) * effective_patch_size
+    ys = (rows + 0.5) * effective_patch_size
     xs = np.clip(xs, 0, img_w - 1)
     ys = np.clip(ys, 0, img_h - 1)
     return np.stack([xs, ys], axis=-1)
@@ -993,6 +1292,7 @@ def frame_attn_predict_query_list(
     layers: List[int],
     prompt_template: str,
     system_prompt: str,
+    qwen_version: str = "qwen25",
 ):
     outputs = []
     for query in queries_list:
@@ -1019,7 +1319,7 @@ def frame_attn_predict_query_list(
 
             # Map patch indices to pixel centers
             pixels = _patch_indices_to_pixel_centers(
-                top_indices, image.height, image.width
+                top_indices, image.height, image.width, qwen_version=qwen_version
             )
 
             out_item["predictions"][layer] = {
@@ -1045,6 +1345,7 @@ def frame_attn_refine_predict_query_list(
     prompt_template_refine: str,
     system_prompt_refine: str,
     include_scores_in_context: bool = False,
+    qwen_version: str = "qwen25",
 ):
     outputs = []
     for query in queries_list:
@@ -1067,7 +1368,7 @@ def frame_attn_refine_predict_query_list(
 
         # Map patch indices to pixel centers
         pixels = _patch_indices_to_pixel_centers(
-            top_indices_np, image.height, image.width
+            top_indices_np, image.height, image.width, qwen_version=qwen_version
         )
 
         # Prepare refine prompt with proposals
@@ -1089,7 +1390,7 @@ def frame_attn_refine_predict_query_list(
             question = question + "\n\n" + "\n".join(lines)
 
         # Ask normal Qwen with the image
-        response = qwen_vl.ask_qwen_about_image(
+        response = ask_qwen_about_image(
             image=image,
             prompt=question,
             model=model,
@@ -1158,6 +1459,7 @@ def frame_attn_refine_feat_queries(
             prompt_template_refine=prompt_template_refine,
             system_prompt_refine=system_prompt_refine,
             include_scores_in_context=include_scores,
+            qwen_version=cfg.eval.qwen_version,
         )
 
         results[timestep]["actions"] = frame_attn_refine_predict_query_list(
@@ -1174,6 +1476,7 @@ def frame_attn_refine_feat_queries(
             prompt_template_refine=prompt_template_refine,
             system_prompt_refine=system_prompt_refine,
             include_scores_in_context=include_scores,
+            qwen_version=cfg.eval.qwen_version,
         )
 
     return results
@@ -1217,6 +1520,7 @@ def frame_attn_feat_queries(
             max_proposals=cfg.eval.spatial.frame_attn_refine_max_proposals,
             prompt_template=prompt_template,
             system_prompt=system_prompt,
+            qwen_version=cfg.eval.qwen_version,
         )
 
         results[timestep]["actions"] = frame_attn_predict_query_list(
@@ -1228,6 +1532,7 @@ def frame_attn_feat_queries(
             max_proposals=cfg.eval.spatial.frame_attn_refine_max_proposals,
             prompt_template=prompt_template,
             system_prompt=system_prompt,
+            qwen_version=cfg.eval.qwen_version,
         )
 
     return results
@@ -1247,7 +1552,7 @@ def frame_direct_predict_query_list(
         substring = query["query"]
         question = _format_only_substring(prompt_template, substring)
 
-        response = qwen_vl.ask_qwen_about_image(
+        response = ask_qwen_about_image(
             image=image,
             prompt=question,
             model=model,

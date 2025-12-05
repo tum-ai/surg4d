@@ -19,7 +19,7 @@ from typing import List, Dict, Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from benchmark.benchmark_config import BenchmarkConfig
-from qwen_vl import prompt_with_dynamic_graph, prompt_with_dynamic_descriptors
+from llm.qwen_utils import prompt_with_dynamic_graph, prompt_with_dynamic_descriptors
 from qwen_vl_utils import process_vision_info
 
 #TODO: change "field of view" query focus for video01_16345 (does not make sense for graph)

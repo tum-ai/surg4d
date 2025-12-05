@@ -8,7 +8,7 @@ import hydra
 import numpy as np
 import torch
 from transformers import Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLProcessor
-from llm.qwen_vl import get_patched_qwen
+from llm.qwen_utils import get_patched_qwen
 
 from benchmark.benchmark_config import BenchmarkConfig
 from benchmark.frame_selectors import TripletsFrameSelector
@@ -23,6 +23,7 @@ from benchmark.spatial import (
     splat_graph_feat_queries,
     frame_attn_refine_feat_queries,
     frame_direct_feat_queries,
+    graph_agent_feat_queries,
 )
 from rerun_utils import (
     init_and_save_rerun,
@@ -292,80 +293,97 @@ def evaluate_spatial(
     with gt_file.open("r") as f:
         gt_data = json.load(f)
 
-    # compute predictions
-    results_splat = splat_feat_queries(
-        model=model_spatial,
-        processor=processor_spatial,
-        splat_feats=splat_feats,
-        splat_indices=splat_indices,
-        positions=positions,
-        clip_gt=gt_data,
-        clip=clip,
-        cfg=cfg,
-    )
-    results_static_graph = static_graph_feat_queries(
-        model=model,
-        processor=processor,
-        graph_dir=graph_dir,
-        clip_gt=gt_data,
-        clip=clip,
-        cfg=cfg,
-    )
-    # SPLAT proposals + static graph refinement
-    results_splat_graph = splat_graph_feat_queries(
-        model_spatial=model_spatial,
-        processor_spatial=processor_spatial,
-        model=model,
-        processor=processor,
-        splat_feats=splat_feats,
-        splat_indices=splat_indices,
-        positions=positions,
-        graph_dir=graph_dir,
-        clip_gt=gt_data,
-        clip=clip,
-        cfg=cfg,
-    )
-    results_frame_attn = frame_attn_feat_queries(
-        model=model_spatial,
-        processor=processor_spatial,
-        preprocessed_root=Path(cfg.preprocessed_root),
-        images_subdir=cfg.eval.paths.images_subdir,
-        clip_gt=gt_data,
-        clip=clip,
-        cfg=cfg,
-    )
-    # 2D attention proposals + refinement via normal Qwen
-    results_frame_attn_refine = frame_attn_refine_feat_queries(
-        model_spatial=model_spatial,
-        processor_spatial=processor_spatial,
-        model=model,
-        processor=processor,
-        preprocessed_root=Path(cfg.preprocessed_root),
-        images_subdir=cfg.eval.paths.images_subdir,
-        clip_gt=gt_data,
-        clip=clip,
-        cfg=cfg,
-    )
-    # Direct Qwen prompting on frame to return a pixel
-    results_frame_direct = frame_direct_feat_queries(
-        model=model,
-        processor=processor,
-        preprocessed_root=Path(cfg.preprocessed_root),
-        images_subdir=cfg.eval.paths.images_subdir,
-        clip_gt=gt_data,
-        clip=clip,
-        cfg=cfg,
-    )
+    # which methods to run
+    methods_to_run = set(cfg.eval.spatial.methods)
 
-    # save predictions
-    all_results = {
-        "splat": results_splat,
-        "static_graph": results_static_graph,
-        "frame_attn": results_frame_attn,
-        "splat_graph": results_splat_graph,
-        "frame_attn_refine": results_frame_attn_refine,
-        "frame_direct": results_frame_direct,
-    }
+    # compute predictions
+    all_results = {}
+
+    if "splat" in methods_to_run:
+        all_results["splat"] = splat_feat_queries(
+            model=model_spatial,
+            processor=processor_spatial,
+            splat_feats=splat_feats,
+            splat_indices=splat_indices,
+            positions=positions,
+            clip_gt=gt_data,
+            clip=clip,
+            cfg=cfg,
+        )
+
+    if "static_graph" in methods_to_run:
+        all_results["static_graph"] = static_graph_feat_queries(
+            model=model,
+            processor=processor,
+            graph_dir=graph_dir,
+            clip_gt=gt_data,
+            clip=clip,
+            cfg=cfg,
+        )
+
+    if "splat_graph" in methods_to_run:
+        # SPLAT proposals + static graph refinement
+        all_results["splat_graph"] = splat_graph_feat_queries(
+            model_spatial=model_spatial,
+            processor_spatial=processor_spatial,
+            model=model,
+            processor=processor,
+            splat_feats=splat_feats,
+            splat_indices=splat_indices,
+            positions=positions,
+            graph_dir=graph_dir,
+            clip_gt=gt_data,
+            clip=clip,
+            cfg=cfg,
+        )
+
+    if "frame_attn" in methods_to_run:
+        all_results["frame_attn"] = frame_attn_feat_queries(
+            model=model_spatial,
+            processor=processor_spatial,
+            preprocessed_root=Path(cfg.preprocessed_root),
+            images_subdir=cfg.eval.paths.images_subdir,
+            clip_gt=gt_data,
+            clip=clip,
+            cfg=cfg,
+        )
+
+    if "frame_attn_refine" in methods_to_run:
+        # 2D attention proposals + refinement via normal Qwen
+        all_results["frame_attn_refine"] = frame_attn_refine_feat_queries(
+            model_spatial=model_spatial,
+            processor_spatial=processor_spatial,
+            model=model,
+            processor=processor,
+            preprocessed_root=Path(cfg.preprocessed_root),
+            images_subdir=cfg.eval.paths.images_subdir,
+            clip_gt=gt_data,
+            clip=clip,
+            cfg=cfg,
+        )
+
+    if "frame_direct" in methods_to_run:
+        # Direct Qwen prompting on frame to return a pixel
+        all_results["frame_direct"] = frame_direct_feat_queries(
+            model=model,
+            processor=processor,
+            preprocessed_root=Path(cfg.preprocessed_root),
+            images_subdir=cfg.eval.paths.images_subdir,
+            clip_gt=gt_data,
+            clip=clip,
+            cfg=cfg,
+        )
+
+    if "graph_agent" in methods_to_run:
+        # Graph agent with tools (requires qwen3)
+        all_results["graph_agent"] = graph_agent_feat_queries(
+            model=model,
+            processor=processor,
+            graph_dir=graph_dir,
+            clip_gt=gt_data,
+            clip=clip,
+            cfg=cfg,
+        )
     out_dir = Path(cfg.eval.spatial.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     predictions_file = out_dir / f"{clip.name}.json"
@@ -374,109 +392,39 @@ def evaluate_spatial(
 
     # Optional: dump per-(query, layer) visualizations of top-k points on the frame
     if cfg.eval.spatial.dump_visualizations:
-        dump_spatial_prediction_visualizations(
-            results_splat=results_splat,
-            clip_name=clip.name,
-            preprocessed_root=Path(cfg.preprocessed_root),
-            images_subdir=cfg.eval.paths.images_subdir,
-            gt_data=gt_data,
-            viz_dir=Path(cfg.eval.spatial.visualizations_dir),
-            method_name="splat",
-        )
-        # Also dump for static-graph baseline
-        dump_spatial_prediction_visualizations(
-            results_splat=results_static_graph,
-            clip_name=clip.name,
-            preprocessed_root=Path(cfg.preprocessed_root),
-            images_subdir=cfg.eval.paths.images_subdir,
-            gt_data=gt_data,
-            viz_dir=Path(cfg.eval.spatial.visualizations_dir),
-            method_name="static",
-        )
-        # And dump for frame-attention baseline
-        dump_spatial_prediction_visualizations(
-            results_splat=results_frame_attn,
-            clip_name=clip.name,
-            preprocessed_root=Path(cfg.preprocessed_root),
-            images_subdir=cfg.eval.paths.images_subdir,
-            gt_data=gt_data,
-            viz_dir=Path(cfg.eval.spatial.visualizations_dir),
-            method_name="frame_attn",
-        )
-        # And dump for splat+graph method
-        dump_spatial_prediction_visualizations(
-            results_splat=results_splat_graph,
-            clip_name=clip.name,
-            preprocessed_root=Path(cfg.preprocessed_root),
-            images_subdir=cfg.eval.paths.images_subdir,
-            gt_data=gt_data,
-            viz_dir=Path(cfg.eval.spatial.visualizations_dir),
-            method_name="splat_graph",
-        )
-        # And dump for frame_attn_refine method
-        dump_spatial_prediction_visualizations(
-            results_splat=results_frame_attn_refine,
-            clip_name=clip.name,
-            preprocessed_root=Path(cfg.preprocessed_root),
-            images_subdir=cfg.eval.paths.images_subdir,
-            gt_data=gt_data,
-            viz_dir=Path(cfg.eval.spatial.visualizations_dir),
-            method_name="frame_attn_refine",
-        )
-        # And dump for frame_direct method
-        dump_spatial_prediction_visualizations(
-            results_splat=results_frame_direct,
-            clip_name=clip.name,
-            preprocessed_root=Path(cfg.preprocessed_root),
-            images_subdir=cfg.eval.paths.images_subdir,
-            gt_data=gt_data,
-            viz_dir=Path(cfg.eval.spatial.visualizations_dir),
-            method_name="frame_direct",
-        )
+        viz_method_names = {
+            "splat": "splat",
+            "static_graph": "static",
+            "frame_attn": "frame_attn",
+            "splat_graph": "splat_graph",
+            "frame_attn_refine": "frame_attn_refine",
+            "frame_direct": "frame_direct",
+            "graph_agent": "graph_agent",
+        }
+        for method_key, viz_name in viz_method_names.items():
+            if method_key in all_results:
+                dump_spatial_prediction_visualizations(
+                    results_splat=all_results[method_key],
+                    clip_name=clip.name,
+                    preprocessed_root=Path(cfg.preprocessed_root),
+                    images_subdir=cfg.eval.paths.images_subdir,
+                    gt_data=gt_data,
+                    viz_dir=Path(cfg.eval.spatial.visualizations_dir),
+                    method_name=viz_name,
+                )
 
     # Initialize rerun sink for spatial visualization
     init_and_save_rerun(graph_dir / "visualization_spatial.rrd")
 
-    # Single-call visualization
-    log_spatial_predictions(
-        base_path="splat",
-        clip_name=clip.name,
-        positions_through_time=positions,
-        results=results_splat,
-        cmap_name=cfg.eval.spatial.colormap,
-    )
-    # And log static graph results under a separate tree
-    log_spatial_predictions(
-        base_path="static_graph",
-        clip_name=clip.name,
-        positions_through_time=positions,
-        results=results_static_graph,
-        cmap_name=cfg.eval.spatial.colormap,
-    )
-    # And log splat+graph results
-    log_spatial_predictions(
-        base_path="splat_graph",
-        clip_name=clip.name,
-        positions_through_time=positions,
-        results=results_splat_graph,
-        cmap_name=cfg.eval.spatial.colormap,
-    )
-    # And log frame_attn_refine results
-    log_spatial_predictions(
-        base_path="frame_attn_refine",
-        clip_name=clip.name,
-        positions_through_time=positions,
-        results=results_frame_attn_refine,
-        cmap_name=cfg.eval.spatial.colormap,
-    )
-    # And log frame_direct results
-    log_spatial_predictions(
-        base_path="frame_direct",
-        clip_name=clip.name,
-        positions_through_time=positions,
-        results=results_frame_direct,
-        cmap_name=cfg.eval.spatial.colormap,
-    )
+    # Log results for each method that was run
+    for method_key in all_results:
+        log_spatial_predictions(
+            base_path=method_key,
+            clip_name=clip.name,
+            positions_through_time=positions,
+            results=all_results[method_key],
+            cmap_name=cfg.eval.spatial.colormap,
+        )
 
 
 @hydra.main(config_path="conf", config_name="config.yaml", version_base="1.3")
@@ -489,10 +437,12 @@ def main(cfg: DictConfig):
         torch.cuda.manual_seed_all(42)
 
     model, processor = get_patched_qwen(
+        qwen_version=cfg.eval.qwen_version,
         use_bnb_4bit=cfg.eval.use_bnb_4bit,
         use_bnb_8bit=cfg.eval.use_bnb_8bit,
     )
     model_spatial, processor_spatial = get_patched_qwen_for_spatial_grounding(
+        qwen_version=cfg.eval.qwen_version,
         use_bnb_4bit=cfg.eval.use_bnb_4bit,
         use_bnb_8bit=cfg.eval.use_bnb_8bit,
     )

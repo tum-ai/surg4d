@@ -19,7 +19,7 @@ from compute_metrics import (
     compute_temporal_metrics,
     compute_triplets_metrics,
 )
-from llm.qwen_vl import get_patched_qwen
+from llm.qwen_utils import get_patched_qwen
 
 
 import sys
@@ -55,6 +55,7 @@ def main():
 
             if not cfg.skip_feature_extraction:
                 model, processor = get_patched_qwen(
+                    qwen_version=cfg.feature_extraction.qwen_version,
                     use_bnb_4bit=cfg.feature_extraction.bnb_4bit,
                     use_bnb_8bit=cfg.feature_extraction.bnb_8bit,
                 )
@@ -80,6 +81,7 @@ def main():
 
                 model_spatial, processor_spatial = (
                     get_patched_qwen_for_spatial_grounding(
+                        qwen_version=cfg.eval.qwen_version,
                         use_bnb_4bit=cfg.feature_extraction.bnb_4bit,
                         use_bnb_8bit=cfg.feature_extraction.bnb_8bit,
                     )
@@ -96,6 +98,7 @@ def main():
 
         if not cfg.skip_feature_extraction:
             model, processor = get_patched_qwen(
+                qwen_version=cfg.feature_extraction.qwen_version,
                 use_bnb_4bit=cfg.feature_extraction.bnb_4bit,
                 use_bnb_8bit=cfg.feature_extraction.bnb_8bit,
             )
@@ -128,6 +131,7 @@ def main():
 
             # spatial eval
             model_spatial, processor_spatial = get_patched_qwen_for_spatial_grounding(
+                qwen_version=cfg.eval.qwen_version,
                 use_bnb_4bit=cfg.feature_extraction.bnb_4bit,
                 use_bnb_8bit=cfg.feature_extraction.bnb_8bit,
             )

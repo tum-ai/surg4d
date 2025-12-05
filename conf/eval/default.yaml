@@ -9,6 +9,9 @@ triplets: null
 temporal: null
 # spatial: null
 
+# Qwen version for evaluation (should match feature_extraction.qwen_version)
+qwen_version: ${feature_extraction.qwen_version}
+
 # Quantization settings for the evaluation model (used across all eval stages)
 use_bnb_4bit: false
 use_bnb_8bit: false
