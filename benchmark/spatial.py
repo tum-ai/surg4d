@@ -1,3 +1,4 @@
+import gc
 from pathlib import Path
 from omegaconf import DictConfig
 import torch
@@ -528,6 +529,11 @@ def splat_feat_queries(
             qwen_version=cfg.eval.qwen_version,
         )
 
+        # Clear VRAM after each timestep to prevent OOM
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     return results
 
 
@@ -841,6 +847,11 @@ def static_graph_feat_queries(
             qwen_version=cfg.eval.qwen_version,
         )
 
+        # Clear VRAM after each timestep to prevent OOM
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     return results
 
 
@@ -1099,6 +1110,11 @@ def splat_graph_feat_queries(
             qwen_version=cfg.eval.qwen_version,
         )
 
+        # Clear VRAM after each timestep to prevent OOM
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     return results
 
 
@@ -1137,6 +1153,7 @@ def graph_agent_predict_query_list(
     prompt_template: str,
     point_n2o: Callable[[np.ndarray], np.ndarray],
     max_iterations: int = 10,
+    tool_call_limits: Optional[Dict[str, Optional[int]]] = None,
 ):
     """Use prompt_graph_agent with tools to predict a 3D point per query.
 
@@ -1168,6 +1185,7 @@ def graph_agent_predict_query_list(
             qwen_version="qwen3",  # Required for agentic mode
             system_prompt=system_prompt,
             max_iterations=max_iterations,
+            tool_call_limits=tool_call_limits,
         )
 
         response = agent_result["final_answer"]
@@ -1282,9 +1300,22 @@ def graph_agent_feat_queries(
         autoencoder=autoencoder,
     )
 
-    # Get the specific tools needed for graph agent (configurable via hydra)
-    tool_names = list(cfg.eval.spatial.graph_agent_tools)
+    # Parse graph_agent_tools config (objects with name and max_calls)
+    tool_names = []
+    tool_call_limits = {}
+    for tool_entry in cfg.eval.spatial.graph_agent_tools:
+        tool_name = tool_entry.name
+        tool_names.append(tool_name)
+        max_calls = getattr(tool_entry, "max_calls", None)
+        if max_calls is not None:
+            tool_call_limits[tool_name] = max_calls
+    
+    # Get the specific tools needed for graph agent
     tools = graph_tools.get_tools_by_name(tool_names)
+    
+    # Convert to None if no limits specified
+    if len(tool_call_limits) == 0:
+        tool_call_limits = None
 
     # Cameras for projection
     scene_info = readColmapSceneInfo(
@@ -1319,6 +1350,7 @@ def graph_agent_feat_queries(
             prompt_template=prompt_template,
             point_n2o=point_n2o,
             max_iterations=max_iterations,
+            tool_call_limits=tool_call_limits,
         )
 
         results[timestep]["actions"] = graph_agent_predict_query_list(
@@ -1337,7 +1369,19 @@ def graph_agent_feat_queries(
             prompt_template=prompt_template,
             point_n2o=point_n2o,
             max_iterations=max_iterations,
+            tool_call_limits=tool_call_limits,
         )
+
+        # Clear VRAM after each timestep to prevent OOM
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    # Clean up autoencoder before returning
+    del autoencoder
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     return results
 
@@ -1571,6 +1615,11 @@ def frame_attn_refine_feat_queries(
             qwen_version=cfg.eval.qwen_version,
         )
 
+        # Clear VRAM after each timestep to prevent OOM
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     return results
 
 
@@ -1626,6 +1675,11 @@ def frame_attn_feat_queries(
             system_prompt=system_prompt,
             qwen_version=cfg.eval.qwen_version,
         )
+
+        # Clear VRAM after each timestep to prevent OOM
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     return results
 
@@ -1716,6 +1770,11 @@ def frame_direct_feat_queries(
             system_prompt=system_prompt,
             qwen_version=cfg.eval.qwen_version,
         )
+
+        # Clear VRAM after each timestep to prevent OOM
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     return results
 

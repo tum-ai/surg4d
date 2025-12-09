@@ -299,6 +299,12 @@ def evaluate_spatial(
     # compute predictions
     all_results = {}
 
+    def _clear_vram():
+        """Clear VRAM cache after each method to prevent OOM."""
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     if "splat" in methods_to_run:
         all_results["splat"] = splat_feat_queries(
             model=model_spatial,
@@ -310,6 +316,7 @@ def evaluate_spatial(
             clip=clip,
             cfg=cfg,
         )
+        _clear_vram()
 
     if "static_graph" in methods_to_run:
         all_results["static_graph"] = static_graph_feat_queries(
@@ -320,6 +327,7 @@ def evaluate_spatial(
             clip=clip,
             cfg=cfg,
         )
+        _clear_vram()
 
     if "splat_graph" in methods_to_run:
         # SPLAT proposals + static graph refinement
@@ -336,6 +344,7 @@ def evaluate_spatial(
             clip=clip,
             cfg=cfg,
         )
+        _clear_vram()
 
     if "frame_attn" in methods_to_run:
         all_results["frame_attn"] = frame_attn_feat_queries(
@@ -347,6 +356,7 @@ def evaluate_spatial(
             clip=clip,
             cfg=cfg,
         )
+        _clear_vram()
 
     if "frame_attn_refine" in methods_to_run:
         # 2D attention proposals + refinement via normal Qwen
@@ -361,6 +371,7 @@ def evaluate_spatial(
             clip=clip,
             cfg=cfg,
         )
+        _clear_vram()
 
     if "frame_direct" in methods_to_run:
         # Direct Qwen prompting on frame to return a pixel
@@ -373,6 +384,7 @@ def evaluate_spatial(
             clip=clip,
             cfg=cfg,
         )
+        _clear_vram()
 
     if "graph_agent" in methods_to_run:
         # Graph agent with tools (requires qwen3)
@@ -384,6 +396,7 @@ def evaluate_spatial(
             clip=clip,
             cfg=cfg,
         )
+        _clear_vram()
     out_dir = Path(cfg.eval.spatial.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     predictions_file = out_dir / f"{clip.name}.json"

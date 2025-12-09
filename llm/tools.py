@@ -293,7 +293,7 @@ spec_inspect_highres_node_at_time = {
     "type": "function",
     "function": {
         "name": "inspect_highres_node_at_time",
-        "description": "Returns a detailed pseudo-image containing visual features of ALL gaussians belonging to a node at a given timestep. Use this to get a more complete visual understanding of a node than the summary descriptor provides.",
+        "description": "Returns a detailed pseudo-image containing visual features of ALL gaussians belonging to a node at a given timestep. Use this to get a more complete visual understanding of a node than the summary descriptor provides. DO NOT CALL THIS TOOL MORE THAN 5 TIMES! The results are long and can cause issues with your context window.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -333,6 +333,8 @@ def inspect_highres_node_at_time(
         vision_features contains a single tensor of shape (n_gaussians, full_dim * 4)
         in concatenated format [main | d0 | d1 | d2] as output by the autoencoder.
     """
+    MAX_GAUSSIANS_PER_CLUSTER = 2000
+
     n_timesteps = patch_latents_through_time.shape[0]
     n_nodes = int(clusters.max()) + 1
 
@@ -359,6 +361,10 @@ def inspect_highres_node_at_time(
     if latents.shape[0] == 0:
         return {"text": json.dumps({"error": f"node_id={node_id} has no gaussians"})}
 
+    # Limit to at most 2k gaussians per cluster
+    if latents.shape[0] > MAX_GAUSSIANS_PER_CLUSTER:
+        latents = latents[:MAX_GAUSSIANS_PER_CLUSTER]
+
     # Decode latents to full Qwen features (already in concatenated format)
     vision_features = decode_latents(latents, autoencoder)
 
@@ -367,7 +373,7 @@ def inspect_highres_node_at_time(
             {
                 "node_id": int(node_id),
                 "timestep": int(timestep),
-                "n_gaussians": int(vision_features.shape[0]),
+                "n_gaussians": min(MAX_GAUSSIANS_PER_CLUSTER, latents.shape[0]),
                 "detailed_view": IMAGE_PLACEHOLDER,
             }
         ),
@@ -470,7 +476,7 @@ spec_inspect_scene_at_time = {
     "type": "function",
     "function": {
         "name": "inspect_scene_at_time",
-        "description": "Returns the complete scene state at a given timestep: all nodes with their lowres visual descriptors and geometric properties (centroid, bbox-center, bbox-extents). Use this to get a full snapshot of the scene at any point in time.",
+        "description": "Returns the complete scene state at a given timestep: all nodes with their lowres visual descriptors and geometric properties (centroid, bbox-center, bbox-extents). Use this to get a full snapshot of the scene at any point in time. DO NOT CALL THIS TOOL MORE THAN 3 TIMES! The results are long and can cause issues with your context window.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -553,40 +559,35 @@ def inspect_scene_at_time(
     }
 
 
-spec_sample_spatial_grid_at_time = {
+spec_voxelize_scene = {
     "type": "function",
     "function": {
-        "name": "sample_spatial_grid_at_time",
-        "description": "Samples the scene at regular 3D spatial locations (voxels) and returns visual descriptors for each location containing scene content. The scene is divided into a grid_size x grid_size x grid_size voxel grid. Only voxels containing scene content are returned. Enables localization of scene content at full scene resolution, and more fine-grained localization through querying a subregion via bbox.",
+        "name": "voxelize_scene",
+        "description": "Voxelizes the scene at a given timestep and returns visual descriptors for each voxel containing scene content. The specified bounding box (or full scene if no bbox is provided) is divided into 5x5x5 voxels. Use this to inspect the scene detached from its graph representation.",
         "parameters": {
             "type": "object",
             "properties": {
                 "timestep": {
                     "type": "integer",
-                    "description": "The timestep at which to sample the scene",
-                },
-                "grid_size": {
-                    "type": "integer",
-                    "description": "Number of voxels per dimension (e.g., grid_size=3 creates a 3x3x3=27 voxel grid). Larger values give finer spatial detail. Maximum value is 5 (125 voxels total).",
+                    "description": "The timestep at which to voxelize the scene",
                 },
                 "bbox": {
                     "type": "array",
-                    "description": "Optional bounding box [x_center, y_center, z_center, x_size, y_size, z_size] defining the region to sample. If null/omitted, samples the entire scene.",
+                    "description": "Optional bounding box [x_center, y_center, z_center, x_size, y_size, z_size] defining the region to voxelize. If null/omitted, voxelizes the entire scene.",
                     "items": {"type": "number"},
                 },
             },
-            "required": ["timestep", "grid_size"],
+            "required": ["timestep"],
         },
     },
 }
 
 
-def sample_spatial_grid_at_time(
+def voxelize_scene(
     positions: np.ndarray,
     patch_latents_through_time: np.ndarray,
     autoencoder: QwenAutoencoder,
     timestep: int,
-    grid_size: int,
     bbox: List[float] = None,
 ) -> Dict[str, Any]:
     """Sample the scene at regular 3D spatial locations with visual descriptors per location.
@@ -617,6 +618,7 @@ def sample_spatial_grid_at_time(
         Only non-empty voxels are included in the output.
     """
     MAX_GAUSSIANS_PER_VOXEL = 64
+    GRID_SIZE = 5
 
     n_timesteps = positions.shape[0]
 
@@ -625,13 +627,6 @@ def sample_spatial_grid_at_time(
         return {
             "text": json.dumps(
                 {"error": f"timestep={timestep} out of range [0, {n_timesteps})"}
-            )
-        }
-
-    if grid_size <= 0 or grid_size > 5:
-        return {
-            "text": json.dumps(
-                {"error": f"grid_size must be in range [1, 5], got {grid_size}"}
             )
         }
 
@@ -657,7 +652,7 @@ def sample_spatial_grid_at_time(
         bbox_size = np.array(bbox[3:])
 
     # Compute voxel size from grid size
-    voxel_size = bbox_size / grid_size
+    voxel_size = bbox_size / GRID_SIZE
 
     # Compute grid origin (bottom-left-back corner)
     grid_min = bbox_center - bbox_size / 2
@@ -670,9 +665,9 @@ def sample_spatial_grid_at_time(
     voxels_data = []
     vision_features = []
 
-    for i in range(grid_size):
-        for j in range(grid_size):
-            for k in range(grid_size):
+    for i in range(GRID_SIZE):
+        for j in range(GRID_SIZE):
+            for k in range(GRID_SIZE):
                 voxel_idx = (i, j, k)
                 # Find gaussians in this voxel
                 gaussian_indices = np.where(np.all(gaussian_voxel_indices == voxel_idx, axis=1))[0]
@@ -711,7 +706,6 @@ def sample_spatial_grid_at_time(
     # Build response
     response_data = {
         "timestep": int(timestep),
-        "grid_size": int(grid_size),
         "query_bbox": [float(x) for x in bbox_center] + [float(x) for x in bbox_size]
         if bbox is not None
         else None,
@@ -834,14 +828,14 @@ class GraphTools:
                 ),
                 spec_inspect_scene_at_time,
             ),
-            "sample_spatial_grid_at_time": (
+            "voxelize_scene": (
                 partial(
-                    sample_spatial_grid_at_time,
+                    voxelize_scene,
                     positions=self.point_o2n(self.positions),
                     patch_latents_through_time=self.patch_latents_through_time,
                     autoencoder=self.autoencoder,
                 ),
-                spec_sample_spatial_grid_at_time,
+                spec_voxelize_scene,
             ),
         }
 

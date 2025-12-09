@@ -613,6 +613,95 @@ def build_tool_response_message(
     return message, all_vision_features
 
 
+def _filter_tensors_for_debug(obj: Any) -> Any:
+    """Recursively filter out tensors and numpy arrays from objects for debugging."""
+    if isinstance(obj, (torch.Tensor, np.ndarray, np.generic)):
+        return None  # Skip tensors/arrays
+    elif isinstance(obj, dict):
+        filtered = {}
+        for k, v in obj.items():
+            filtered_val = _filter_tensors_for_debug(v)
+            if filtered_val is not None:
+                filtered[k] = filtered_val
+        return filtered if filtered else None
+    elif isinstance(obj, (list, tuple)):
+        filtered = [_filter_tensors_for_debug(item) for item in obj]
+        filtered = [item for item in filtered if item is not None]
+        return filtered if filtered else None
+    else:
+        return obj
+
+
+def _format_message_trace_for_debug(
+    current_messages: List[Dict[str, Any]],
+    tool_call_history: List[Dict[str, Any]],
+    iteration: int,
+) -> str:
+    """Format message trace and tool calls for debugging output."""
+    lines = []
+    lines.append("=" * 80)
+    lines.append(f"EXCEPTION DURING AGENT GENERATION - Message Trace (iteration {iteration})")
+    lines.append("=" * 80)
+    lines.append("\n--- MESSAGE HISTORY ---\n")
+    
+    for i, msg in enumerate(current_messages):
+        role = msg.get("role", "unknown")
+        content = msg.get("content", [])
+        lines.append(f"\n[{i}] Role: {role}")
+        
+        if isinstance(content, list):
+            for j, item in enumerate(content):
+                item_type = item.get("type", "unknown")
+                if item_type == "text":
+                    text = item.get("text", "")
+                    # Truncate very long text
+                    if len(text) > 500:
+                        text = text[:500] + "... [truncated]"
+                    lines.append(f"  Content[{j}]: text = {repr(text)}")
+                elif item_type == "image":
+                    lines.append(f"  Content[{j}]: image (vision feature)")
+                else:
+                    lines.append(f"  Content[{j}]: {item_type} = {str(item)[:200]}")
+        else:
+            lines.append(f"  Content: {str(content)[:500]}")
+    
+    lines.append("\n--- TOOL CALL HISTORY ---\n")
+    for i, tool_call in enumerate(tool_call_history):
+        tool_name = tool_call.get("tool_name", "unknown")
+        arguments = tool_call.get("arguments", {})
+        result = tool_call.get("result", {})
+        
+        lines.append(f"\n[{i}] Tool: {tool_name}")
+        
+        # Filter out tensors before serializing
+        filtered_args = _filter_tensors_for_debug(arguments)
+        if filtered_args:
+            try:
+                args_str = json.dumps(filtered_args, indent=2)
+                if len(args_str) > 1000:
+                    args_str = args_str[:1000] + "... [truncated]"
+                lines.append(f"  Arguments: {args_str}")
+            except Exception:
+                lines.append("  Arguments: <error serializing arguments>")
+        else:
+            lines.append("  Arguments: (filtered - contained only tensors/arrays)")
+        
+        filtered_result = _filter_tensors_for_debug(result)
+        if filtered_result:
+            try:
+                result_str = json.dumps(filtered_result, indent=2)
+                if len(result_str) > 1000:
+                    result_str = result_str[:1000] + "... [truncated]"
+                lines.append(f"  Result: {result_str}")
+            except Exception:
+                lines.append("  Result: <error serializing result>")
+        else:
+            lines.append("  Result: (filtered - contained only tensors/arrays)")
+    
+    lines.append("\n" + "=" * 80)
+    return "\n".join(lines)
+
+
 def generate_with_vision_features_agentic(
     messages: List[Dict[str, Any]],
     vision_features: List[torch.Tensor],
@@ -622,6 +711,7 @@ def generate_with_vision_features_agentic(
     qwen_version: str = "qwen3",
     max_tokens: int = 5012,
     max_iterations: int = 10,
+    tool_call_limits: Optional[Dict[str, Optional[int]]] = None,
 ) -> Dict[str, Any]:
     """Generate with vision features in an agentic loop, executing tools until done.
 
@@ -644,6 +734,8 @@ def generate_with_vision_features_agentic(
         qwen_version: Either "qwen25" or "qwen3"
         max_tokens: Maximum tokens per generation
         max_iterations: Maximum number of tool-calling iterations
+        tool_call_limits: Optional dict mapping tool_name -> max_calls (int or None for infinite).
+            If None, all tools have infinite calls. If a tool is not in the dict, it defaults to infinite.
 
     Returns:
         Dict with keys:
@@ -671,6 +763,21 @@ def generate_with_vision_features_agentic(
 
     tool_call_history = []
 
+    # Initialize tool call limits tracking
+    # Track remaining calls (None means infinite, int means remaining count)
+    remaining_calls: Dict[str, Optional[int]] = {}
+    if tool_call_limits is not None:
+        for tool_name in tools.keys():
+            if tool_name in tool_call_limits:
+                limit = tool_call_limits[tool_name]
+                remaining_calls[tool_name] = limit  # None for infinite, int for limit
+            else:
+                remaining_calls[tool_name] = None  # Default to infinite
+    else:
+        # No limits specified - all tools have infinite calls
+        for tool_name in tools.keys():
+            remaining_calls[tool_name] = None
+
     # Track all vision features (initial + those added by tools)
     # Keep in concatenated format, convert to deepstack before each generation
     all_vision_features = list(vision_features)
@@ -690,13 +797,22 @@ def generate_with_vision_features_agentic(
             tools=tool_specs,
         ).to(model.device)
 
-        generated_ids = model.generate(
-            **inputs,
-            max_new_tokens=max_tokens,
-            do_sample=False,
-            custom_patch_features=main_features,
-            custom_deepstack_features=deepstack_features,
-        )
+        try:
+            generated_ids = model.generate(
+                **inputs,
+                max_new_tokens=max_tokens,
+                do_sample=False,
+                custom_patch_features=main_features,
+                custom_deepstack_features=deepstack_features,
+            )
+        except Exception:
+            # Print message trace for any exception during generation
+            trace_output = _format_message_trace_for_debug(
+                current_messages, tool_call_history, iteration
+            )
+            print("\n" + trace_output + "\n", flush=True)
+            # Re-raise the exception
+            raise
 
         generated_ids_trimmed = [
             out_ids[len(in_ids) :]
@@ -736,13 +852,54 @@ def generate_with_vision_features_agentic(
             arguments = tool_call.get("arguments", {})
 
             if tool_name not in tools:
-                result = {"text": f"Error: Unknown tool '{tool_name}'"}
+                result = {"text": json.dumps({"error": f"Unknown tool '{tool_name}'"})}
             else:
-                callable_fn, _ = tools[tool_name]
-                try:
-                    result = callable_fn(**arguments)
-                except Exception as e:
-                    result = {"text": f"Error executing tool: {str(e)}"}
+                # Check remaining calls before executing
+                remaining = remaining_calls.get(tool_name, None)
+                
+                if remaining is not None and remaining <= 0:
+                    # No calls left
+                    result = {
+                        "text": json.dumps(
+                            {
+                                "error": f"No tool calls remaining for '{tool_name}'. Call limit exceeded.",
+                                "tool_name": tool_name,
+                                "remaining_calls": 0,
+                            }
+                        )
+                    }
+                else:
+                    # Execute the tool
+                    callable_fn, _ = tools[tool_name]
+                    try:
+                        result = callable_fn(**arguments)
+                        
+                        # Decrement remaining calls if not infinite
+                        if remaining is not None:
+                            remaining_calls[tool_name] = remaining - 1
+                            remaining_after = remaining - 1
+                        else:
+                            remaining_after = None
+                        
+                        # Add remaining calls info to the result
+                        result_data = json.loads(result["text"])
+                        result_data["remaining_calls"] = (
+                            remaining_after if remaining_after is not None else "infinite"
+                        )
+                        result["text"] = json.dumps(result_data)
+                    except Exception as e:
+                        result = {"text": json.dumps({"error": f"Error executing tool: {str(e)}"})}
+                        # Still decrement on error to prevent infinite retries
+                        if remaining is not None:
+                            remaining_calls[tool_name] = max(0, remaining - 1)
+                            remaining_after_error = remaining_calls[tool_name]
+                        else:
+                            remaining_after_error = None
+                        result_data = json.loads(result["text"])
+                        result_data["remaining_calls"] = (
+                            remaining_after_error if remaining_after_error is not None else "infinite"
+                        )
+                        result["text"] = json.dumps(result_data)
 
             tool_call_record = {
                 "tool_name": tool_name,
@@ -872,7 +1029,6 @@ def prompt_with_graph_at_timestep(
                 {"type": "text", "text": "<prompt>"},
                 {"type": "text", "text": question},
                 {"type": "text", "text": "</prompt>\n"},
-                {"type": "text", "text": "\nYour response:\n"},
             ],
         },
     ]
@@ -911,6 +1067,7 @@ def prompt_graph_agent(
     qwen_version: str = "qwen3",
     system_prompt: str = None,
     max_iterations: int = 20,
+    tool_call_limits: Optional[Dict[str, Optional[int]]] = None,
 ):
     """
     node_feats: np.lib.npyio.NpzFile - npz file containing node features for each timestep
@@ -1000,7 +1157,6 @@ def prompt_graph_agent(
                 {"type": "text", "text": "<user-prompt>"},
                 {"type": "text", "text": question},
                 {"type": "text", "text": "</user-prompt>\n"},
-                {"type": "text", "text": "\nYour response:\n"},
             ],
         },
     ]
@@ -1014,6 +1170,7 @@ def prompt_graph_agent(
         qwen_version=qwen_version,
         max_tokens=5012,
         max_iterations=max_iterations,
+        tool_call_limits=tool_call_limits,
     )
 
 
@@ -1134,7 +1291,6 @@ def prompt_with_static_graph(
                 {"type": "text", "text": "<prompt>"},
                 {"type": "text", "text": question},
                 {"type": "text", "text": "</prompt>\n"},
-                {"type": "text", "text": "\nYour response:\n"},
             ],
         },
     ]
@@ -1262,7 +1418,6 @@ def prompt_with_dynamic_graph(
                 {"type": "text", "text": "<prompt>"},
                 {"type": "text", "text": question},
                 {"type": "text", "text": "</prompt>\n"},
-                {"type": "text", "text": "\nYour response:\n"},
             ],
         },
     ]
@@ -1339,7 +1494,6 @@ def prompt_with_descriptors_at_timestep(
                 {"type": "text", "text": "<prompt>"},
                 {"type": "text", "text": question},
                 {"type": "text", "text": "</prompt>\n"},
-                {"type": "text", "text": "\nYour response:\n"},
             ],
         },
     ]
@@ -1419,7 +1573,6 @@ def prompt_with_dynamic_descriptors(
                 {"type": "text", "text": "<prompt>"},
                 {"type": "text", "text": question},
                 {"type": "text", "text": "</prompt>\n"},
-                {"type": "text", "text": "\nYour response:\n"},
             ],
         },
     ]

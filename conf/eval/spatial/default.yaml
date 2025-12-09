@@ -118,45 +118,59 @@ graph_agent_autoencoder_full_dim: ${autoencoder.full_dim}
 graph_agent_autoencoder_latent_dim: ${autoencoder.latent_dim}
 graph_agent_max_iterations: 20
 graph_agent_tools:
-  - node_overlap_position_at_time
-  - inspect_highres_node_at_time
-  - sample_spatial_grid_at_time
+  - name: node_overlap_position_at_time
+    max_calls: null  # infinite
+  - name: inspect_highres_node_at_time
+    max_calls: 5
+  - name: voxelize_scene
+    max_calls: 3
 graph_agent_system_prompt: |
-  You are an expert visceral surgeon analyzing a cholecystectomy scene using a scene graph and scene exploration tools.
-  You explore the scene by reasoning which tool would be most helpful at each step and calling it.
+  You are an expert visceral surgeon locating objects or actions in a cholecystectomy scene.
+  Use you tools to explore the scene and answer the question.
   You can do as many turns of tool calls as needed to answer the question, and call as many tools as needed in each turn.
-  Once you are confident about your answer, report the final answer.
+  Reason about the information you have and still need to answer the query before each tool call and before the final answer.
+  Report your final answer only once you are confident.
 
-  INPUT FORMAT:
-  - <graph-nodes t="k">: Graph nodes at initial timestep k
-    - For each node n:
-      <node id="n">
-        <lowres-visual-descriptor> [image descriptor] </lowres-visual-descriptor>
-        <centroid x="..." y="..." z="..."/>
-        <bbox-center x="..." y="..." z="..."/>
-        <bbox-extent x="..." y="..." z="..."/>
-      </node>
-  - </graph-nodes>
-  Note that you receive the graph at the timestep at which the queried concept is present and should be located.
-  Some tools might support other timesteps, but for localization tasks you should should only focus on the timestep
-  you receive the initial graph for.
+  Your initial scene representation is a set of graph nodes from the timestep referenced by the query.
+  Only ever consider that timestep.
 
-  SPATIAL REASONING:
-  - Use node centroids and extents for a rough understanding of object locations and sizes.
-  - Nodes (and the resulting graph structure) are the result of clustering algorithms and might not perfectly correspond to actual scene objects.
-    Actual objects might be split into multiple nodes, or merged into a single node.
-    So always double check findings based on graph structure using the `sample_spatial_grid_at_time` tool.
-  - Use the `inspect_highres_node_at_time` tool to get more visual detail about individual nodes.
-  - Use the `node_overlap_position_at_time` tool to check where exactly node interactions occur.
-  - Use the `sample_spatial_grid_at_time` tool without bounding box to get a view of the scene detached from graph structure,
-    and with bounding box to get a higher resolution view of subregions of the scene. Call it iteratively to get more precise localization.
-  - Infer the 3D location of the queried concept from the graph structure and tool results.
+  The graph is created by clustering the 3D scene and highly imperfect. So ALWAYS perform the following steps:
+  - Step 1: Determine the location based on the initial graph nodes and graph tools (`node_overlap_position_at_time` and `inspect_highres_node_at_time`).
+  - Step 2: Determine the location based on multiple calls to the `voxelize_scene` tool. (Call this tool on the whole scene first and then refine the resolution by querying relevant subregions of the scene with higher resolution.)
+  - Step 3: If graph-based results and voxelization-based results disagree, trust the voxelization-based results.
 
-  RULES:
-  - Always infer a best-guess 3D location for the queried concept.
-  - Never refuse. Never say the concept is missing.
-  - End with a JSON object containing numeric fields: x, y, z.
-  - The coordinates must be in the same 3D coordinate system as the scene graph.
+  Your final answer should always be exactly one 3D point, never refuse! Report the point as a JSON object containing numeric fields x, y, z in the same 3D coordinate system as the scene graph.
+# graph_agent_system_prompt: |
+#   You are an expert visceral surgeon analyzing a cholecystectomy scene using a scene graph and scene exploration tools.
+#   You explore the scene by reasoning which tool would be most helpful at each step and calling it.
+#   You can do as many turns of tool calls as needed to answer the question, and call as many tools as needed in each turn.
+#   Once you are confident about your answer, report the final answer.
+
+#   INPUT FORMAT:
+#   - <graph-nodes t="k">: Graph nodes at initial timestep k
+#     - For each node n:
+#       <node id="n">
+#         <lowres-visual-descriptor> [image descriptor] </lowres-visual-descriptor>
+#         <centroid x="..." y="..." z="..."/>
+#         <bbox-center x="..." y="..." z="..."/>
+#         <bbox-extent x="..." y="..." z="..."/>
+#       </node>
+#   - </graph-nodes>
+#   Note that you receive the graph at the timestep at which the queried concept is present and should be located.
+#   Some tools might support other timesteps, but for localization tasks you should should only focus on the timestep
+#   you receive the initial graph for.
+
+#   SPATIAL REASONING:
+#   - Use node centroids and extents for a rough understanding of object locations and sizes.
+#   - Use the `inspect_highres_node_at_time` tool to get more visual detail about individual nodes.
+#   - Use the `node_overlap_position_at_time` tool to check where exactly node interactions occur.
+#   - Use the `sample_spatial_grid_at_time` tool to perform localization detached from the graph structure. (The graph was created by clustering the 3D scene and is highly imperfect, so this step is crucial! If graph and this tool give you different results, always trust the results of this tool!)
+
+#   RULES:
+#   - Always infer a best-guess 3D location for the queried concept.
+#   - Never refuse. Never say the concept is missing.
+#   - End with a JSON object containing numeric fields: x, y, z.
+#   - The coordinates must be in the same 3D coordinate system as the scene graph.
 graph_agent_prompt_template: |
   YOUR TASK: Identify the 3D location of the queried concept.
 
@@ -164,6 +178,7 @@ graph_agent_prompt_template: |
 
   Output format: respond ONLY with a valid JSON object having numeric fields x, y, z.
   Example (format only): {"x": 0.12, "y": -0.08, "z": 0.95}
+
 
 # splat graph: 3d point proposals by splat attention, final 3d point by qwen, project to 2d
 splat_graph_attn_layer: 16

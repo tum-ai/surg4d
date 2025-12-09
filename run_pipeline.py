@@ -76,8 +76,14 @@ def main():
 
             # TODO pass model and processor from outside
             if not cfg.skip_eval:
-                evaluate_triplets(clip, cfg)
-                evaluate_temporal(clip, cfg)
+                # Load models for triplets and temporal eval
+                model, processor = get_patched_qwen(
+                    qwen_version=cfg.eval.qwen_version,
+                    use_bnb_4bit=cfg.eval.get("use_bnb_4bit", False),
+                    use_bnb_8bit=cfg.eval.get("use_bnb_8bit", False),
+                )
+                evaluate_triplets(clip, cfg, model=model, processor=processor)
+                evaluate_temporal(clip, cfg, model=model, processor=processor)
 
                 model_spatial, processor_spatial = (
                     get_patched_qwen_for_spatial_grounding(
@@ -86,7 +92,16 @@ def main():
                         use_bnb_8bit=cfg.feature_extraction.bnb_8bit,
                     )
                 )
-                evaluate_spatial(clip, cfg, model_spatial, processor_spatial)
+                evaluate_spatial(
+                    clip=clip,
+                    cfg=cfg,
+                    model_spatial=model_spatial,
+                    processor_spatial=processor_spatial,
+                    model=model,
+                    processor=processor,
+                )
+                del model
+                del processor
                 del model_spatial
                 del processor_spatial
                 gc.collect()
@@ -122,21 +137,40 @@ def main():
                 extract_graph(clip, cfg)
 
         if not cfg.skip_eval:
-            # triplets and temporal eval
-            # TODO pass model and processor from outside
-            for clip in cfg.clips:
-                evaluate_triplets(clip, cfg)
-            for clip in cfg.clips:
-                evaluate_temporal(clip, cfg)
-
-            # spatial eval
+            # Load models for eval
+            model, processor = get_patched_qwen(
+                qwen_version=cfg.eval.qwen_version,
+                use_bnb_4bit=cfg.eval.get("use_bnb_4bit", False),
+                use_bnb_8bit=cfg.eval.get("use_bnb_8bit", False),
+            )
             model_spatial, processor_spatial = get_patched_qwen_for_spatial_grounding(
                 qwen_version=cfg.eval.qwen_version,
                 use_bnb_4bit=cfg.feature_extraction.bnb_4bit,
                 use_bnb_8bit=cfg.feature_extraction.bnb_8bit,
             )
+
+            # triplets and temporal eval
             for clip in cfg.clips:
-                evaluate_spatial(clip, cfg, model_spatial, processor_spatial)
+                evaluate_triplets(clip, cfg, model=model, processor=processor)
+            for clip in cfg.clips:
+                evaluate_temporal(clip, cfg, model=model, processor=processor)
+
+            # spatial eval
+            for clip in cfg.clips:
+                evaluate_spatial(
+                    clip=clip,
+                    cfg=cfg,
+                    model_spatial=model_spatial,
+                    processor_spatial=processor_spatial,
+                    model=model,
+                    processor=processor,
+                )
+                # Clear VRAM after each clip to prevent OOM
+                gc.collect()
+                torch.cuda.empty_cache()
+
+            del model
+            del processor
             del model_spatial
             del processor_spatial
             gc.collect()
