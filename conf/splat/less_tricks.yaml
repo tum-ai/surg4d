@@ -1,6 +1,6 @@
 config_path: arguments/cholecseg8k/no_tv.py # this config disables total variation losses
 
-depth_loss_weight: 0.5
+depth_loss_weight: 1.0
 opacity_loss_weight: 0.5
 
 dynamic_language: true

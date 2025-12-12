@@ -25,15 +25,17 @@ def extract_qwen_features(
         if cfg.feature_extraction.aggregate_with_instance_masks
         else cfg.feature_extraction.semantic_mask_subdir
     )
-    frame_stems = [f.stem for f in img_dir.glob("*.jpg")]
+    # Support both JPG and PNG images
+    image_files = list(img_dir.glob("*.jpg")) + list(img_dir.glob("*.png"))
+    frame_data = [(f.stem, f.suffix) for f in image_files]
 
     patch_dir = clip_dir / cfg.feature_extraction.patch_feat_subdir
     instance_dir = clip_dir / cfg.feature_extraction.instance_feat_subdir
     patch_dir.mkdir(parents=True, exist_ok=True)
     instance_dir.mkdir(parents=True, exist_ok=True)
 
-    for frame_stem in frame_stems:
-        image = Image.open(img_dir / f"{frame_stem}.jpg")
+    for frame_stem, ext in frame_data:
+        image = Image.open(img_dir / f"{frame_stem}{ext}")
         frame_stem_just_number = frame_stem.replace("frame_", "")
 
         feats = qwen_encode_image(image, model, processor, qwen_version)

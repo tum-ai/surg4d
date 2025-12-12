@@ -14,8 +14,8 @@ vipe_vda: true # use video depth anything
 vipe_save_viz: false
 
 vipe_slam_map: false # use slam map as pointcloud instead of aggregated depth projections
-pc_single_depth_projection: true # use single depth projection based on instance count and depth range
-pc_single_depth_use_instance_count: false # prioritize frames with more instances in the instance mask
+vipe_pc_single_depth_projection: true # use single depth projection based on instance count and depth range
+vipe_pc_single_depth_use_instance_count: false # prioritize frames with more instances in the instance mask
 vipe_depth_step: 16 # stride for depth maps that end up in pointclouds, only used if pc_single_depth_projection is false and vipe_slam_map is false
 
 # Frame selection criteria for single depth projection (sorts by instance count first, then depth range as tie-breaker)

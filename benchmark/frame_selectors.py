@@ -89,9 +89,10 @@ class TripletsFrameSelector:
             print(f"Expected structure: {clip_dir}/{self.config.images_subdir}/")
             return []
         
-        image_paths = list(sorted(images_dir.glob("*.jpg")))
+        # Support both JPG and PNG images
+        image_paths = list(sorted(images_dir.glob("*.jpg")) + sorted(images_dir.glob("*.png")))
         if not image_paths:
-            print(f"ERROR: No .jpg images found in {images_dir}")
+            print(f"ERROR: No .jpg or .png images found in {images_dir}")
             return []
         
         print(f"Found {len(image_paths)} images in {images_dir}")

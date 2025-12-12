@@ -1,7 +1,9 @@
 semantic_mask_subdir: semantic_masks
 instance_mask_subdir: instance_masks
 depth_subdir: depth
+confidence_subdir: confidence
 
+# spatial label preprocessing
 spatial_labels_root: data/spatial_labels
 spatial_labels_input_filename_template: "{clip_name}_spatial.json"
 spatial_labels_output_filename: "spatial_labels.json"
@@ -10,16 +12,23 @@ label_viz_subdir: label_viz
 
 frames_divisor: 32 # after removing black borders, center crop to multiple of this for qwen to work
 
+depth_estimation: da3 # "da3" or "vipe"
+
+# vipe settings
 vipe_vda: true # use video depth anything
 vipe_save_viz: false
-
 vipe_slam_map: false # use slam map as pointcloud instead of aggregated depth projections
-pc_single_depth_projection: true # use single depth projection based on instance count and depth range
-pc_single_depth_use_instance_count: false # prioritize frames with more instances in the instance mask
+vipe_pc_single_depth_projection: true # use single depth projection based on instance count and depth range
+vipe_pc_single_depth_use_instance_count: false # prioritize frames with more instances in the instance mask
 vipe_depth_step: 16 # stride for depth maps that end up in pointclouds, only used if pc_single_depth_projection is false and vipe_slam_map is false
 
-# Frame selection criteria for single depth projection (sorts by instance count first, then depth range as tie-breaker)
+# depth anything v3 settings
+da3_pc_frame_number: 40
+da3_visualize: true
+da3_conf_thresh_percentile: 0.0
 
 verbose_output: false # keep intermediate output files (mostly vipe)
+pc_ply_visualization_filename: pointcloud_viz.ply # set to None to disable
 
+# instance mask conversion
 min_component_area: 5 # minimum area of a component to be considered an instance

@@ -40,10 +40,11 @@ class TemporalFrameEvaluator:
             self.video_frames = []
             self.num_frames = 0
         else:
-            self.video_frames = sorted(list(images_dir.glob("*.jpg")))
+            # Support both JPG and PNG images
+            self.video_frames = sorted(list(images_dir.glob("*.jpg")) + list(images_dir.glob("*.png")))
             self.num_frames = len(self.video_frames)
             if self.num_frames == 0:
-                print(f"ERROR: No .jpg images found in {images_dir}")
+                print(f"ERROR: No .jpg or .png images found in {images_dir}")
         
         self.graph_path = config.graph_dir
         
@@ -108,7 +109,7 @@ class TemporalFrameEvaluator:
         # Check if frames were loaded successfully
         if self.num_frames == 0:
             print("ERROR: No frames available for temporal evaluation. Cannot proceed.")
-            print("Please check that the images directory exists and contains .jpg files.")
+            print("Please check that the images directory exists and contains .jpg or .png files.")
             return {
                 'ablations': {},
                 'per_query_results': [],

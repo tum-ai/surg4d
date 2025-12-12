@@ -28,6 +28,28 @@ from PIL import Image
 from qwen_vl_utils import process_vision_info
 
 
+def find_image_path(images_dir: Path, frame_number: int) -> Optional[Path]:
+    """Find image file for a given frame number, supporting both JPG and PNG formats.
+    
+    Args:
+        images_dir: Directory containing images
+        frame_number: Frame number (0-indexed)
+    
+    Returns:
+        Path to image file if found, None otherwise
+    """
+    frame_stem = f"frame_{frame_number:06d}"
+    jpg_path = images_dir / f"{frame_stem}.jpg"
+    png_path = images_dir / f"{frame_stem}.png"
+    
+    if jpg_path.exists():
+        return jpg_path
+    elif png_path.exists():
+        return png_path
+    else:
+        return None
+
+
 def get_patched_qwen_for_spatial_grounding(
     qwen_version: str = "qwen25",
     use_bnb_4bit: bool = False,
@@ -1574,8 +1596,8 @@ def frame_attn_refine_feat_queries(
 
     for timestep, timestep_queries in clip_gt.items():
         frame_number = int(timestep_queries["frame_number"])  # local idx
-        frame_path = images_dir / f"frame_{frame_number:06d}.jpg"
-        if not frame_path.exists():
+        frame_path = find_image_path(images_dir, frame_number)
+        if frame_path is None:
             continue
         image = Image.open(frame_path).convert("RGB")
 
@@ -1645,8 +1667,8 @@ def frame_attn_feat_queries(
 
     for timestep, timestep_queries in clip_gt.items():
         frame_number = int(timestep_queries["frame_number"])  # local idx
-        frame_path = images_dir / f"frame_{frame_number:06d}.jpg"
-        if not frame_path.exists():
+        frame_path = find_image_path(images_dir, frame_number)
+        if frame_path is None:
             continue
         image = Image.open(frame_path).convert("RGB")
 
@@ -1744,8 +1766,8 @@ def frame_direct_feat_queries(
 
     for timestep, timestep_queries in clip_gt.items():
         frame_number = int(timestep_queries["frame_number"])  # local idx
-        frame_path = images_dir / f"frame_{frame_number:06d}.jpg"
-        if not frame_path.exists():
+        frame_path = find_image_path(images_dir, frame_number)
+        if frame_path is None:
             continue
         image = Image.open(frame_path).convert("RGB")
 
@@ -1862,8 +1884,8 @@ def dump_spatial_prediction_visualizations(
             continue
         frame_number = int(gt_data[timestep_str]["frame_number"])  # type: ignore[index]
         # Use frame_number directly from GT (assumed local zero-based index)
-        frame_path = images_dir / f"frame_{frame_number:06d}.jpg"
-        if not frame_path.exists():
+        frame_path = find_image_path(images_dir, frame_number)
+        if frame_path is None:
             continue
         base_img = cv2.imread(str(frame_path))
         if base_img is None:
