@@ -9,7 +9,7 @@
       "query_id": "video24_09836_q1",
       "query_type": "action_onset",
       "question": "When does one of the graspers first detach itself from the gallbladder?",
-      "answer_format": "Frame X",
+      "answer_format": "Timestep X",
       "ground_truth": {
         "frame": 2
       },
@@ -19,7 +19,7 @@
       "query_id": "video24_09836_q2",
       "query_type": "action_duration",
       "question": "what is the longest time during which one of the graspers grasps the gallbladder and during which frames?",
-      "answer_format": "Frames X-Y (or multiple ranges: X-Y, A-B)",
+      "answer_format": "Timesteps X-Y (or multiple ranges: X-Y, A-B)",
       "ground_truth": {
         "ranges": [
           [

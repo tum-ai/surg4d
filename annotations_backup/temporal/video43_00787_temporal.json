@@ -8,8 +8,8 @@
     {
       "query_id": "video43_00787_q1",
       "query_type": "action_duration",
-      "question": "During which frames is the grasper pulling the gallbladder?",
-      "answer_format": "Frames X-Y (or multiple ranges: X-Y, A-B)",
+      "question": "During which timesteps is the grasper pulling the gallbladder?",
+      "answer_format": "Timesteps X-Y (or multiple ranges: X-Y, A-B)",
       "ground_truth": {
         "ranges": [
           [

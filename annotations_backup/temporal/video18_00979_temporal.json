@@ -9,7 +9,7 @@
       "query_id": "video18_00979_q1",
       "query_type": "action_onset",
       "question": "When does the hook first touch the gallbladder?",
-      "answer_format": "Frame X",
+      "answer_format": "Timestep X",
       "ground_truth": {
         "frame": 4
       },
@@ -18,8 +18,8 @@
     {
       "query_id": "video18_00979_q2",
       "query_type": "action_duration",
-      "question": "During which frames is tissue being grasped?",
-      "answer_format": "Frames X-Y (or multiple ranges: X-Y, A-B)",
+      "question": "During which timesteps is tissue being grasped?",
+      "answer_format": "Timesteps X-Y (or multiple ranges: X-Y, A-B)",
       "ground_truth": {
         "ranges": [
           [

@@ -9,7 +9,7 @@
       "query_id": "video12_19500_q1",
       "query_type": "action_onset",
       "question": "When does the hook first touch the gallbladder?",
-      "answer_format": "Frame X",
+      "answer_format": "Timestep X",
       "ground_truth": {
         "frame": 1
       },
@@ -19,7 +19,7 @@
       "query_id": "video12_19500_q2",
       "query_type": "action_onset",
       "question": "When is the second time the hook touches the gallbladder?",
-      "answer_format": "Frame X",
+      "answer_format": "Timestep X",
       "ground_truth": {
         "frame": 7
       },
@@ -28,8 +28,8 @@
     {
       "query_id": "video12_19500_q3",
       "query_type": "action_duration",
-      "question": "During which frames is the hook cutting / dissecting the gallbladder?",
-      "answer_format": "Frames X-Y (or multiple ranges: X-Y, A-B)",
+      "question": "During which timesteps is the hook cutting / dissecting the gallbladder?",
+      "answer_format": "Timesteps X-Y (or multiple ranges: X-Y, A-B)",
       "ground_truth": {
         "ranges": [
           [
@@ -43,8 +43,8 @@
     {
       "query_id": "video12_19500_q4",
       "query_type": "action_duration",
-      "question": "During which frames is tissue being grasped by the grasper?",
-      "answer_format": "Frames X-Y (or multiple ranges: X-Y, A-B)",
+      "question": "During which timesteps is tissue being grasped by the grasper?",
+      "answer_format": "Timesteps X-Y (or multiple ranges: X-Y, A-B)",
       "ground_truth": {
         "ranges": [
           [

@@ -8,11 +8,12 @@
     {
       "query_id": "video28_00320_q1",
       "query_type": "action_duration",
-      "question": "During which frames is tissue being grasped?",
-      "answer_format": "Frames X-Y (or multiple ranges: X-Y, A-B)",
+      "question": "During which timesteps is tissue being touched by the lower grasper?",
+      "answer_format": "Timesteps X-Y (or multiple ranges: X-Y, A-B)",
       "ground_truth": {
         "ranges": [
-          []
+          [3, 6],
+          [13, 19]
         ]
       },
       "notes": "Use multiple ranges if action happens multiple times"

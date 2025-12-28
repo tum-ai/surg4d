@@ -9,7 +9,7 @@
       "query_id": "video12_19660_q1",
       "query_type": "action_onset",
       "question": "When does the grasper start grasping the gallbladder?",
-      "answer_format": "Frame X",
+      "answer_format": "Timestep X",
       "ground_truth": {
         "frame": 15
       },
@@ -19,7 +19,7 @@
       "query_id": "video12_19660_q2",
       "query_type": "action_onset",
       "question": "When does the grasper let go of the gallbladder?",
-      "answer_format": "Frame X",
+      "answer_format": "Timestep X",
       "ground_truth": {
         "frame": 16
       },
@@ -28,8 +28,8 @@
     {
       "query_id": "video12_19660_q3",
       "query_type": "action_duration",
-      "question": "During which frames is the gallbladder being grasped?",
-      "answer_format": "Frames X-Y (or multiple ranges: X-Y, A-B)",
+      "question": "During which timesteps is the gallbladder being grasped?",
+      "answer_format": "Timesteps X-Y (or multiple ranges: X-Y, A-B)",
       "ground_truth": {
         "ranges": [
           [
@@ -44,7 +44,7 @@
       "query_id": "video12_19660_q4",
       "query_type": "action_onset",
       "question": "When does the hook first touch the gallbladder?",
-      "answer_format": "Frame X",
+      "answer_format": "Timestep X",
       "ground_truth": {
         "frame": 3
       },
@@ -54,7 +54,7 @@
       "query_id": "video12_19660_q5",
       "query_type": "action_onset",
       "question": "When is the second time the hook touches the gallbladder?",
-      "answer_format": "Frame X",
+      "answer_format": "Timestep X",
       "ground_truth": {
         "frame": 9
       },
