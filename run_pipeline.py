@@ -176,10 +176,10 @@ def main():
             gc.collect()
             torch.cuda.empty_cache()
 
-        if not cfg.skip_compute_metrics:
-            compute_spatial_metrics(cfg)
-            compute_temporal_metrics(cfg)
-            compute_triplets_metrics(cfg)
+    if not cfg.skip_compute_metrics:
+        compute_spatial_metrics(cfg)
+        compute_temporal_metrics(cfg)
+        compute_triplets_metrics(cfg)
 
 
 if __name__ == "__main__":

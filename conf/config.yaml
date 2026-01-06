@@ -15,7 +15,7 @@ skip_preprocessing: true
 skip_feature_extraction: true
 skip_autoencoder: true
 skip_splat: true
-skip_graph_extraction: false
+skip_graph_extraction: true
 skip_eval: false
 skip_compute_metrics: false
 
@@ -25,7 +25,7 @@ cholect50_root: data/cholect50
 preprocessed_root: data/preprocessed/qwen3_da3
 output_root: output/qwen3_da3
 
-whole_pipeline_clips_sequentially: true
+whole_pipeline_clips_sequentially: false
 
 config_dumps:
   - ${output_root}/config.yaml

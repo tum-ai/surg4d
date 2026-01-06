@@ -20,7 +20,7 @@ use_bnb_4bit: false
 use_bnb_8bit: false
 
 # Required output directory for benchmark results
-output_dir: ${output_root}/predictions
+output_dir: ${output_root}/predictions_seconds
 
 # Optional output override for benchmark results
 output: null

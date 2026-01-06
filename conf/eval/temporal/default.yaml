@@ -30,20 +30,20 @@ multiframe_action_onset_system_prompt: |
   - Pay attention to visual changes that indicate action transitions.
 
   RULES:
-  - Always infer a best-guess timestep for when the action begins using surgical knowledge and temporal understanding.
+  - Always infer a best-guess time (in seconds) for when the action begins using surgical knowledge and temporal understanding.
   - Never refuse. Never say the action is missing.
-  - You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object with numeric field: timestep.
-  - NEVERY answer with a point in time, always answer with the respective discrete, integer timestep (frame number) instead!
+  - You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object with numeric field: second.
+  - Answer with the time in seconds (float), not with frame numbers!
 
 multiframe_action_onset_prompt_template: |
-  YOUR TASK: Identify the timestep when the specified action first starts.
+  YOUR TASK: Identify the time (in seconds) when the specified action first starts.
 
   The video has {num_frames} timesteps (t=0 to t={last_frame}).
 
   QUESTION: {question}
 
-  Output format: respond ONLY with a valid JSON object having numeric field timestep.
-  Example (format only): {{"timestep": 42}}
+  Output format: respond ONLY with a valid JSON object having numeric field second.
+  Example (format only): {{"second": 1.68}}
 
 multiframe_action_duration_system_prompt: |
   You are an expert visceral surgeon analyzing a cholecystectomy video sequence for temporal reasoning.
@@ -57,22 +57,22 @@ multiframe_action_duration_system_prompt: |
   - Pay attention to visual changes that indicate action transitions.
 
   RULES:
-  - Always infer best-guess timestep ranges for when the action occurs using surgical knowledge and temporal understanding.
+  - Always infer best-guess time ranges (in seconds) for when the action occurs using surgical knowledge and temporal understanding.
   - Never refuse. Never say the action is missing.
-  - Ranges are INCLUSIVE for both start and end timesteps (e.g., action at timesteps 4, 5, 6 is [4, 6]).
+  - Ranges are INCLUSIVE for both start and end times (e.g., action from 0.68s to 1.36s is [0.68, 1.36]).
   - The ranges field MUST be a list of [start, end] pairs, even for a single range.
-  - NEVER answer with ranges of points in time, always answer with the respective discrete, integer timestep ranges (frame numbers) instead!
-  - You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object with field: ranges.
+  - Answer with time ranges in seconds (floats), not with frame numbers!
+  - You may briefly reason first. Then, on a new line at the end, output ONLY a final JSON object with field: second_ranges.
 
 multiframe_action_duration_prompt_template: |
-  YOUR TASK: Identify the timestep range(s) during which the specified action occurs.
+  YOUR TASK: Identify the time range(s) in seconds during which the specified action occurs.
 
   The video has {num_frames} timesteps (t=0 to t={last_frame}).
 
   QUESTION: {question}
 
-  Output format: respond ONLY with a valid JSON object with field "ranges" containing a LIST of [start, end] pairs.
-  Example (format only): {{"ranges": [[17, 23], [45, 58]]}}
+  Output format: respond ONLY with a valid JSON object with field "second_ranges" containing a LIST of [start, end] pairs in seconds.
+  Example (format only): {{"second_ranges": [[0.68, 1.36], [1.80, 2.32]]}}
 
 
 # ============================================================================

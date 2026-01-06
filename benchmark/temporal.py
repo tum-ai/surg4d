@@ -51,6 +51,23 @@ def load_video_frames(video_dir: Path, images_subdir: str) -> "Tuple[List[Path],
     return frames, num_frames
 
 
+def seconds_to_timestep(seconds: float, num_timesteps: int, fps: float) -> int:
+    """Convert seconds to nearest timestep using nearest neighbor rounding.
+    
+    Args:
+        seconds: Time in seconds
+        num_timesteps: Total number of timesteps (frames)
+        fps: Frames per second
+        
+    Returns:
+        Nearest timestep (integer frame index)
+    """
+    # Convert seconds to frame index and round to nearest integer
+    frame_idx = int(round(seconds * fps))
+    # Clamp to valid range
+    return max(0, min(frame_idx, num_timesteps - 1))
+
+
 def load_graph_data(graph_path: Path) -> Dict[str, Any]:
     """Load precomputed 4D graph data.
     
@@ -218,11 +235,15 @@ def parse_single_frame(response: str, query_type: str) -> Optional[Dict]:
                 if isinstance(inner, dict):
                     data = inner
 
-            # Only support "timestep" key
+            # Support both "timestep" (old format) and "second" (new Qwen3 format)
             if 'timestep' in data:
                 timestep_val = data['timestep']
                 if isinstance(timestep_val, (int, float)):
                     return {'timestep': int(timestep_val)}
+            elif 'second' in data:
+                second_val = data['second']
+                if isinstance(second_val, (int, float)):
+                    return {'second': float(second_val)}
         return None
     except Exception:
         return None
@@ -236,7 +257,7 @@ def parse_frame_ranges(response: str, query_type: str) -> Optional[Dict]:
         query_type: Type of query (for unwrapping nested JSON)
         
     Returns:
-        Dict with 'ranges' key or None
+        Dict with 'ranges' or 'second_ranges' key or None
     """
     try:
         start = response.find('{')
@@ -245,11 +266,12 @@ def parse_frame_ranges(response: str, query_type: str) -> Optional[Dict]:
             json_str = response[start:end]
             data = json.loads(json_str)
             
-            if 'ranges' not in data and isinstance(data, dict):
+            if 'ranges' not in data and 'second_ranges' not in data and isinstance(data, dict):
                 inner = data.get(query_type)
                 if isinstance(inner, dict):
                     data = inner
                     
+            # Support both "ranges" (old format) and "second_ranges" (new Qwen3 format)
             if 'ranges' in data:
                 ranges = []
                 for r in data['ranges']:
@@ -257,6 +279,13 @@ def parse_frame_ranges(response: str, query_type: str) -> Optional[Dict]:
                         ranges.append([int(r[0]), int(r[1])])
                 if ranges:
                     return {'ranges': ranges}
+            elif 'second_ranges' in data:
+                second_ranges = []
+                for r in data['second_ranges']:
+                    if isinstance(r, list) and len(r) == 2:
+                        second_ranges.append([float(r[0]), float(r[1])])
+                if second_ranges:
+                    return {'second_ranges': second_ranges}
         return None
     except Exception:
         return None
@@ -368,6 +397,7 @@ def multiframe_queries(
     
     # Calculate effective FPS based on stride
     # Original video is at video_fps, but we sample every stride frames
+    # For 20 graph timesteps from 25 fps video: effective_fps = 25 / 4 = 6.25
     effective_fps = cfg.eval.video_fps / stride
     
     parser_map = {
@@ -412,6 +442,19 @@ def multiframe_queries(
         
         # Parse response
         predicted = parser_map[query_type](response, query_type)
+        
+        # Convert seconds to timesteps if using Qwen3 format
+        if predicted and 'second' in predicted:
+            # Convert single second to timestep
+            predicted['timestep'] = seconds_to_timestep(predicted['second'], num_ts, effective_fps)
+        elif predicted and 'second_ranges' in predicted:
+            # Convert second ranges to timestep ranges
+            timestep_ranges = []
+            for start_sec, end_sec in predicted['second_ranges']:
+                start_timestep = seconds_to_timestep(start_sec, num_ts, effective_fps)
+                end_timestep = seconds_to_timestep(end_sec, num_ts, effective_fps)
+                timestep_ranges.append([start_timestep, end_timestep])
+            predicted['ranges'] = timestep_ranges
         
         # Build message history for consistency with graph_agent
         # (multiframe doesn't support tools, so this is just the initial query and response)
