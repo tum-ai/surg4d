@@ -104,35 +104,61 @@ def process_clip_cotracker(clip: DictConfig, cfg: DictConfig):
     torch.save(control_point_validity.cpu(), validity_path)
     logger.info(f"Saved control point validity: {validity_path}")
     
-    # Compute Gaussian-to-control-point associations
-    # This requires the init frame index (coarse_frame_idx)
-    init_frame_idx = cfg.preprocessing.da3_pc_frame_number
-    logger.info(f"Computing associations using init frame {init_frame_idx}...")
+    # Compute Gaussian-to-control-point associations for multiple init frames
+    # Use first, middle, and last frames (matching preprocess.py multi-frame initialization)
+    T = control_points_2d.shape[0]
+    init_frame_indices = [0, T // 2, T - 1]
+    logger.info(f"Computing associations for init frames: {init_frame_indices}")
     
-    # Load confidence directory for filtering (matches da3_to_single_view_colmap filtering)
+    # Load confidence directory for filtering (matches da3_to_multi_view_colmap filtering)
     confidence_dir = clip_dir / cfg.preprocessing.confidence_subdir
     
-    associations = compute_gaussian_control_point_associations(
-        control_points_2d[init_frame_idx],
-        depth_dir,
-        init_frame_idx,
-        instance_masks[init_frame_idx] if instance_masks is not None else None,
-        k_neighbors=cfg.splat.cotracker_k_neighbors,
-        grid_size=cfg.preprocessing.cotracker_grid_size,
-        pixel_stride=cfg.preprocessing.da3_pc_pixel_stride,
-        confidence_dir=confidence_dir,
-        conf_thresh_percentile=cfg.preprocessing.da3_conf_thresh_percentile,
-    )
+    # Compute associations for each init frame and concatenate
+    all_indices = []
+    all_weights = []
+    gaussians_per_frame = []
     
-    # associations contains:
-    # - indices: (N_gaussians, K) - indices of associated control points (torch.Tensor)
-    # - weights: (N_gaussians, K) - IDW weights (torch.Tensor)
+    for init_frame_idx in init_frame_indices:
+        logger.info(f"Computing associations for frame {init_frame_idx}...")
+        associations = compute_gaussian_control_point_associations(
+            control_points_2d[init_frame_idx],
+            depth_dir,
+            init_frame_idx,
+            instance_masks[init_frame_idx] if instance_masks is not None else None,
+            k_neighbors=cfg.splat.cotracker_k_neighbors,
+            grid_size=cfg.preprocessing.cotracker_grid_size,
+            pixel_stride=cfg.preprocessing.da3_pc_pixel_stride,
+            confidence_dir=confidence_dir,
+            conf_thresh_percentile=cfg.preprocessing.da3_conf_thresh_percentile,
+        )
+        
+        all_indices.append(associations["indices"])
+        all_weights.append(associations["weights"])
+        n_gaussians_frame = associations["indices"].shape[0]
+        gaussians_per_frame.append(n_gaussians_frame)
+        logger.info(f"Frame {init_frame_idx}: {n_gaussians_frame} Gaussians")
     
+    # Concatenate associations from all frames
+    combined_indices = torch.cat(all_indices, dim=0)  # (N_total, K)
+    combined_weights = torch.cat(all_weights, dim=0)  # (N_total, K)
+    
+    total_gaussians = combined_indices.shape[0]
+    logger.info(f"Total Gaussians from all frames: {total_gaussians}")
+    logger.info(f"Gaussians per frame: {dict(zip(init_frame_indices, gaussians_per_frame))}")
+    
+    # Save associations
     indices_path = cotracker_dir / "gaussian_control_point_indices.pth"
     weights_path = cotracker_dir / "gaussian_control_point_weights.pth"
     
-    torch.save(associations["indices"].cpu(), indices_path)
-    torch.save(associations["weights"].cpu(), weights_path)
+    torch.save(combined_indices.cpu(), indices_path)
+    torch.save(combined_weights.cpu(), weights_path)
+    
+    # Also save the frame-wise counts for reference
+    frame_counts_path = cotracker_dir / "gaussians_per_init_frame.pth"
+    torch.save({
+        "init_frame_indices": init_frame_indices,
+        "gaussians_per_frame": gaussians_per_frame,
+    }, frame_counts_path)
     
     logger.info(f"Saved associations: {indices_path}, {weights_path}")
     
@@ -142,8 +168,8 @@ def process_clip_cotracker(clip: DictConfig, cfg: DictConfig):
     
     gaussian_positions = precompute_control_point_positions(
         control_points_3d,
-        associations["indices"],
-        associations["weights"],
+        combined_indices,
+        combined_weights,
         control_point_validity,
     )
     

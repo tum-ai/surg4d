@@ -3,9 +3,214 @@ import pycolmap
 import rerun as rr
 from PIL import Image
 from pathlib import Path
+from typing import List
 
 from depth_anything_3.utils.export.glb import _depths_to_world_points_with_colors
 from depth_anything_3.utils.export.colmap import _create_xyf
+
+
+def da3_to_multi_view_colmap(
+    prediction,
+    export_dir: str,
+    image_paths: list[str],
+    view_indices: List[int],
+    conf_thresh_percentile: float = 40.0,
+    process_res_method: str = "upper_bound_resize",
+    pixel_stride: int = 1,
+):
+    """
+    Export COLMAP format with points from multiple views (e.g., first, middle, last).
+    All cameras/images are still added, but only the selected views have point observations.
+    Points from different views are simply concatenated (may have duplicates in overlapping regions).
+    
+    Args:
+        prediction: DepthAnything3 prediction object
+        export_dir: Directory to export COLMAP files
+        image_paths: List of image file paths
+        view_indices: List of frame indices to use for point cloud (e.g., [0, T//2, T-1])
+        conf_thresh_percentile: Confidence threshold percentile for filtering
+        pixel_stride: Stride for subsampling pixels (e.g., 3 = every 3rd pixel = 1/9 points)
+    """
+    # 1. Data preparation - process each selected view
+    conf_thresh = np.percentile(prediction.conf, conf_thresh_percentile)
+
+    num_frames = len(prediction.processed_images)
+    h, w = prediction.processed_images.shape[1:3]
+
+    # Collect points from all selected views
+    all_points = []
+    all_colors = []
+    all_points_xyf = []  # For 2D observations
+    view_point_counts = []  # Track how many points come from each view
+
+    for view_idx in view_indices:
+        # Extract this view's data
+        view_depth = prediction.depth[view_idx : view_idx + 1]
+        view_intrinsics = prediction.intrinsics[view_idx : view_idx + 1]
+        view_extrinsics = prediction.extrinsics[view_idx : view_idx + 1]
+        view_images = prediction.processed_images[view_idx : view_idx + 1]
+        view_conf = prediction.conf[view_idx : view_idx + 1]
+
+        # Apply pixel stride subsampling if requested
+        if pixel_stride > 1:
+            view_depth = view_depth[:, ::pixel_stride, ::pixel_stride]
+            view_conf = view_conf[:, ::pixel_stride, ::pixel_stride]
+            view_images = view_images[:, ::pixel_stride, ::pixel_stride, :]
+            
+            # Adjust intrinsics for subsampled resolution
+            view_intrinsics = view_intrinsics.copy()
+            view_intrinsics[:, 0, 0] /= pixel_stride  # fx
+            view_intrinsics[:, 1, 1] /= pixel_stride  # fy
+            view_intrinsics[:, 0, 2] /= pixel_stride  # cx
+            view_intrinsics[:, 1, 2] /= pixel_stride  # cy
+
+        # Get points from this view
+        points, colors = _depths_to_world_points_with_colors(
+            view_depth,
+            view_intrinsics,
+            view_extrinsics,
+            view_images,
+            view_conf,
+            conf_thresh,
+        )
+        
+        # Get the actual height and width after subsampling
+        h_subsampled, w_subsampled = view_depth.shape[1:3]
+
+        # Create xyf mapping for this view
+        points_xyf = _create_xyf(1, h_subsampled, w_subsampled).reshape(-1, 3)
+        # Filter by confidence (same as in _depths_to_world_points_with_colors)
+        valid_mask = (
+            (view_conf.reshape(-1) >= conf_thresh)
+            & np.isfinite(view_depth.reshape(-1))
+            & (view_depth.reshape(-1) > 0)
+        )
+        points_xyf = points_xyf[valid_mask]
+
+        all_points.append(points)
+        all_colors.append(colors)
+        all_points_xyf.append(points_xyf)
+        view_point_counts.append(len(points))
+
+    # Concatenate all points
+    all_points = np.concatenate(all_points, axis=0)
+    all_colors = np.concatenate(all_colors, axis=0)
+    num_points = len(all_points)
+
+    # 2. Set Reconstruction
+    reconstruction = pycolmap.Reconstruction()
+
+    # Add all cameras first
+    for fidx in range(num_frames):
+        orig_w, orig_h = Image.open(image_paths[fidx]).size
+
+        intrinsic = prediction.intrinsics[fidx]
+        if process_res_method.endswith("resize"):
+            intrinsic = intrinsic.copy()
+            intrinsic[:1] *= orig_w / w
+            intrinsic[1:2] *= orig_h / h
+        elif process_res_method == "crop":
+            raise NotImplementedError("COLMAP export for crop method is not implemented")
+        else:
+            raise ValueError(f"Unknown process_res_method: {process_res_method}")
+
+        pycolmap_intri = np.array(
+            [intrinsic[0, 0], intrinsic[1, 1], intrinsic[0, 2], intrinsic[1, 2]]
+        )
+
+        # set and add camera
+        camera = pycolmap.Camera()
+        camera.camera_id = fidx + 1
+        camera.model = pycolmap.CameraModelId.PINHOLE
+        camera.width = orig_w
+        camera.height = orig_h
+        camera.params = pycolmap_intri
+        reconstruction.add_camera(camera)
+
+        # set and add rig (from camera)
+        rig = pycolmap.Rig()
+        rig.rig_id = camera.camera_id
+        rig.add_ref_sensor(camera.sensor_id)
+        reconstruction.add_rig(rig)
+
+    # Add 3D points first so we can reference them
+    point3d_ids = []
+    for vidx in range(num_points):
+        track = pycolmap.Track()
+        point3d_id = reconstruction.add_point3D(all_points[vidx], track, all_colors[vidx])
+        point3d_ids.append(point3d_id)
+
+    # Now add images with point2d observations
+    point_offset = 0
+    for fidx in range(num_frames):
+        orig_w, orig_h = Image.open(image_paths[fidx]).size
+
+        intrinsic = prediction.intrinsics[fidx]
+        if process_res_method.endswith("resize"):
+            intrinsic = intrinsic.copy()
+            intrinsic[:1] *= orig_w / w
+            intrinsic[1:2] *= orig_h / h
+
+        extrinsic = prediction.extrinsics[fidx]
+        cam_from_world = pycolmap.Rigid3d(
+            pycolmap.Rotation3d(extrinsic[:3, :3]), extrinsic[:3, 3]
+        )
+
+        # set image
+        image = pycolmap.Image()
+        image.image_id = fidx + 1
+        image.camera_id = fidx + 1
+
+        # set and add frame (from image)
+        frame = pycolmap.Frame()
+        frame.frame_id = image.image_id
+        frame.rig_id = fidx + 1
+        frame.add_data_id(image.data_id)
+        frame.rig_from_world = cam_from_world
+        reconstruction.add_frame(frame)
+
+        # Check if this frame is one of the selected views
+        if fidx in view_indices:
+            view_list_idx = view_indices.index(fidx)
+            points_xyf_view = all_points_xyf[view_list_idx]
+            num_points_view = view_point_counts[view_list_idx]
+            
+            # Calculate the offset into all_points for this view
+            view_point_offset = sum(view_point_counts[:view_list_idx])
+            
+            # Get subsampled dimensions for this view
+            if pixel_stride > 1:
+                h_subsampled = prediction.depth.shape[1] // pixel_stride
+                w_subsampled = prediction.depth.shape[2] // pixel_stride
+            else:
+                h_subsampled, w_subsampled = h, w
+            
+            point2d_list = []
+            for vidx in range(num_points_view):
+                point2d = points_xyf_view[vidx][:2].copy()
+                # Scale from subsampled resolution to original resolution
+                point2d[0] *= (w / w_subsampled) * (orig_w / w)
+                point2d[1] *= (h / h_subsampled) * (orig_h / h)
+                point3d_id = point3d_ids[view_point_offset + vidx]
+                point2d_list.append(pycolmap.Point2D(point2d, point3d_id))
+                # Update the track for this point
+                reconstruction.point3D(point3d_id).track.add_element(
+                    image.image_id, len(point2d_list) - 1
+                )
+            image.points2D = pycolmap.Point2DList(point2d_list)
+        else:
+            # Empty point2d list for other views
+            image.points2D = pycolmap.Point2DList([])
+
+        # set and add image
+        image.frame_id = image.image_id
+        image.name = Path(image_paths[fidx]).name
+        reconstruction.add_image(image)
+
+    # 3. Export
+    reconstruction.write(export_dir)
+    
+    return view_point_counts  # Return counts for downstream use
 
 
 def da3_to_single_view_colmap(

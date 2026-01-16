@@ -20,8 +20,8 @@ setup = { depends-on = ["install-simple-knn", "install-rasterization", "install-
 LD_LIBRARY_PATH = "$PIXI_PROJECT_ROOT/.pixi/envs/default/lib/python3.10/site-packages/torch/lib:$LD_LIBRARY_PATH"
 # ignore ~/.local packages in case someone accidentally installed stuff with system python
 PYTHONNOUSERSITE = "1"
-# use gpu 1 on a4000-2402n18 (t's machine)
-# CUDA_VISIBLE_DEVICES = "$(if [ $(hostname) = 'a4000-2402n18' ]; then echo '1'; fi)"
+# CUDA_DEVICE_ORDER ensures GPU numbering matches nvidia-smi
+CUDA_DEVICE_ORDER = "PCI_BUS_ID"
 TOKENIZERS_PARALLELISM="false"
 
 [dependencies]

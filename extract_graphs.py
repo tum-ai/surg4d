@@ -247,8 +247,9 @@ def deform_at_timestep(gaussians: GaussianModel, timestep: float):
         positions = means3D_final.detach().cpu().numpy()
         lang_patch = lang_final[:, :3].detach().cpu().numpy()
         lang_instance = lang_final[:, 3:].detach().cpu().numpy()
-        lang_patch /= np.linalg.norm(lang_patch, axis=-1, keepdims=True)
-        lang_instance /= np.linalg.norm(lang_instance, axis=-1, keepdims=True)
+        # Normalize with epsilon to prevent NaN from zero-norm vectors
+        lang_patch /= (np.linalg.norm(lang_patch, axis=-1, keepdims=True) + 1e-9)
+        lang_instance /= (np.linalg.norm(lang_instance, axis=-1, keepdims=True) + 1e-9)
 
     return positions, lang_patch, lang_instance
 
@@ -289,8 +290,10 @@ def cluster_gaussians(gaussians: GaussianModel, cfg: DictConfig):
         ).fit_predict(dist_matrix)
     else:
         # pos
+        # Doing this for a few timesteps only, tradeoff with runtime
         deformed_data = [deform_at_timestep(gaussians, t) for t in [0.0, 0.5, 1.0]]
         pos_through_time = np.concatenate([normalize_dep_dim(i[0]) for i in deformed_data], axis=-1)
+        # Only taking the features for the first timestep, assuming they are roughly constant per instance
         instance_features = normalize_dep_dim(deformed_data[0][2])
         clustering_feats = np.concatenate(
             [

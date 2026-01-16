@@ -9,6 +9,7 @@ import subprocess
 import shutil
 import sys
 import torch
+from loguru import logger
 from vipe import make_pipeline
 from vipe.streams.base import ProcessedVideoStream
 from vipe.streams.frame_dir_stream import FrameDirStream
@@ -24,7 +25,7 @@ from scripts.vipe_to_colmap_local import convert_vipe_to_colmap
 from cholec_utils import get_clip_seg8k, parse_cholecseg8k_instance_mask
 from vipe.utils.depth import reliable_depth_mask_range
 from vipe.utils.io import read_depth_artifacts
-from da3_utils import da3_to_single_view_colmap, log_da3_rerun
+from da3_utils import da3_to_multi_view_colmap, log_da3_rerun
 from scene.colmap_loader import read_points3D_binary
 from scene.dataset_readers import storePly
 
@@ -572,7 +573,9 @@ def da3(clip: DictConfig, cfg: DictConfig):
     rgb_dir.rename(images_dir)
 
     # load da3 model
-    model = DepthAnything3.from_pretrained("depth-anything/DA3NESTED-GIANT-LARGE")
+    # TODO: change back, debugging on small GPU for now
+    # model = DepthAnything3.from_pretrained("depth-anything/DA3NESTED-GIANT-LARGE")
+    model = DepthAnything3.from_pretrained("depth-anything/DA3-LARGE-1.1")
     model = model.to("cuda:0")
 
     # construct image paths and determine processing resolution close to orig
@@ -591,17 +594,30 @@ def da3(clip: DictConfig, cfg: DictConfig):
         process_res_method="upper_bound_resize",
     )
 
-    # dump to colmap with pc consisting of single depth projection
+    # dump to colmap with pc consisting of multi-frame depth projection (first, middle, last)
     colmap_dir = clip_dir / "sparse" / "0"
     colmap_dir.mkdir(parents=True, exist_ok=True)
-    da3_to_single_view_colmap(
+    
+    # Remove stale PLY file so it gets regenerated from the new .bin
+    stale_ply = colmap_dir / "points3D.ply"
+    if stale_ply.exists():
+        stale_ply.unlink()
+        logger.info(f"Removed stale PLY file: {stale_ply}")
+    
+    # Use first, middle, and last frames for initialization
+    num_frames_total = len(prediction.depth)
+    init_frame_indices = [0, num_frames_total // 2, num_frames_total - 1]
+    logger.info(f"Initializing point cloud from frames: {init_frame_indices}")
+    
+    view_point_counts = da3_to_multi_view_colmap(
         prediction,
         colmap_dir,
         image_filenames,
-        single_view_idx=cfg.preprocessing.da3_pc_frame_number,
+        view_indices=init_frame_indices,
         conf_thresh_percentile=cfg.preprocessing.da3_conf_thresh_percentile,
         pixel_stride=cfg.preprocessing.da3_pc_pixel_stride,
     )
+    logger.info(f"Point counts per view: {dict(zip(init_frame_indices, view_point_counts))}")
 
     # store depth maps and confidence mapsin original resolution
     depth_dir = clip_dir / cfg.preprocessing.depth_subdir

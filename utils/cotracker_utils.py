@@ -177,12 +177,14 @@ def track_control_points(
     print(f"shape of images_torch: {images_torch.shape}")
     n_frames = images_torch.shape[1]
     
-    # Run CoTracker3 forward and backward from the middle frame
-    middle_frame = n_frames // 2
     with torch.no_grad():
-        tracks, visibility = predictor(images_torch, grid_size=grid_size, grid_query_frame=middle_frame, backward_tracking=True)
-        # tracks: (B, T, N, 2) - (batch, time, points, xy)
-        # visibility: (B, T, N) - (batch, time, points)
+        # each track: (B, T, N, 2) - (batch, time, points, xy)
+        # each visibility: (B, T, N) - (batch, time, points)
+        tracks_beginning, visibility_beginning = predictor(images_torch, grid_size=grid_size, grid_query_frame=0, backward_tracking=False)
+        tracks_end, visibility_end = predictor(images_torch, grid_size=grid_size, grid_query_frame=n_frames - 1, backward_tracking=True)
+        tracks_middle, visibility_middle = predictor(images_torch, grid_size=grid_size, grid_query_frame=(n_frames // 2), backward_tracking=True)
+        tracks = torch.cat([tracks_beginning, tracks_middle, tracks_end], dim=2)
+        visibility = torch.cat([visibility_beginning, visibility_middle, visibility_end], dim=2)
 
     print(f"shape of tracks: {tracks.shape}")
 

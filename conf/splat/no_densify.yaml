@@ -20,14 +20,14 @@ dynamic_color: false
 # coarse iterations cut by 10x because we're only overfitting the feature heads on a single frame
 coarse_base_iterations: 0
 coarse_lang_iterations: 1
-fine_base_iterations: 500
-fine_lang_iterations: 500
+fine_base_iterations: 1000
+fine_lang_iterations: 1000
 
 # settings for simplifying coarse training for high quality initial depth map
 # TODO: fix this later, only for debugging
 densify_until_iter: 0
 coarse_freeze_xyz: true # freeze gaussian means during coarse
-coarse_frame_idx: ${preprocessing.da3_pc_frame_number} # overfit coarse on the frame we initialize from
+coarse_frame_idx: null # train on all frames during coarse (point cloud initialized from first/middle/last frames)
 
 # fine (dynamic) stage progressive frame sampling window
 progressive_window:
