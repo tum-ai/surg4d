@@ -683,7 +683,7 @@ def main():
     out_dir = Path(cfg.preprocessed_root)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for config_dump in cfg.config_dumps:
+    for config_dump in cfg.config_dumps or []:
         Path(config_dump).parent.mkdir(parents=True, exist_ok=True)
         OmegaConf.save(cfg, config_dump)
 
