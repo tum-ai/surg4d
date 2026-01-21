@@ -7,16 +7,6 @@
   "annotations": [
     {
       "query_id": "video55_00588_q1",
-      "query_type": "action_onset",
-      "question": "When does the hook start moving away from the gallbladder?",
-      "answer_format": "Timestep X",
-      "ground_truth": {
-        "frame": 12
-      },
-      "notes": "Optional: Add notes about this annotation"
-    },
-    {
-      "query_id": "video55_00588_q2",
       "query_type": "action_duration",
       "question": "grasper holding the cystic duct",
       "answer_format": "Timesteps X-Y (or multiple ranges: X-Y, A-B)",
@@ -31,7 +21,7 @@
       "notes": "Use multiple ranges if action happens multiple times"
     },
     {
-      "query_id": "video55_00588_q3",
+      "query_id": "video55_00588_q2",
       "query_type": "action_duration",
       "question": "l-hook poking into the cystic duct",
       "answer_format": "Timesteps X-Y (or multiple ranges: X-Y, A-B)",
