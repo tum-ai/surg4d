@@ -1146,6 +1146,9 @@ def graph_agent_predict_query_list(
     point_n2o: Callable[[np.ndarray], np.ndarray],
     max_iterations: int = 10,
     tool_call_limits: Optional[Dict[str, Optional[int]]] = None,
+    graph_tools: Optional[Any] = None,
+    tool_viz_dir: Optional[Path] = None,
+    query_type: str = "objects",
 ):
     """Use prompt_graph_agent with tools to predict a 3D point per query.
 
@@ -1159,9 +1162,19 @@ def graph_agent_predict_query_list(
         int(frame_number), train_cameras, frame_name
     )
 
-    for query in queries_list:
+    for query_idx, query in enumerate(queries_list):
         substring = query["query"]
         question = prompt_template.format(substring=substring)
+        
+        # Start recording if tool visualization is enabled
+        if tool_viz_dir is not None and graph_tools is not None:
+            # Sanitize query text for filename
+            sanitized_query = re.sub(r'[^\w\s-]', '', substring)  # Remove special chars
+            sanitized_query = re.sub(r'\s+', '_', sanitized_query)  # Replace whitespace with _
+            sanitized_query = sanitized_query[:50]  # Limit length
+            rrd_filename = f"t{timestep_idx:03d}_{query_type}_{query_idx:02d}_{sanitized_query}.rrd"
+            rrd_file = tool_viz_dir / rrd_filename
+            graph_tools.start_recording(str(rrd_file))
 
         # Call Qwen agent with the graph at this specific timestep
         agent_result = prompt_graph_agent(
@@ -1179,6 +1192,10 @@ def graph_agent_predict_query_list(
             max_iterations=max_iterations,
             tool_call_limits=tool_call_limits,
         )
+        
+        # Stop recording if tool visualization is enabled
+        if tool_viz_dir is not None and graph_tools is not None:
+            graph_tools.stop_recording()
 
         response = agent_result["final_answer"]
 
@@ -1292,6 +1309,13 @@ def graph_agent_feat_queries(
         autoencoder=autoencoder,
     )
 
+    # Setup tool visualization directory if configured
+    tool_viz_enabled = cfg.eval.spatial.tool_viz_dir is not None
+    tool_viz_dir = None
+    if tool_viz_enabled:
+        tool_viz_dir = Path(cfg.eval.spatial.tool_viz_dir) / clip.name
+        tool_viz_dir.mkdir(parents=True, exist_ok=True)
+
     # Parse graph_agent_tools config (objects with name and max_calls)
     tool_names = []
     tool_call_limits = {}
@@ -1343,6 +1367,9 @@ def graph_agent_feat_queries(
             point_n2o=point_n2o,
             max_iterations=max_iterations,
             tool_call_limits=tool_call_limits,
+            graph_tools=graph_tools,
+            tool_viz_dir=tool_viz_dir,
+            query_type="objects",
         )
 
         results[timestep]["actions"] = graph_agent_predict_query_list(
@@ -1362,6 +1389,9 @@ def graph_agent_feat_queries(
             point_n2o=point_n2o,
             max_iterations=max_iterations,
             tool_call_limits=tool_call_limits,
+            graph_tools=graph_tools,
+            tool_viz_dir=tool_viz_dir,
+            query_type="actions",
         )
 
         # Clear VRAM after each timestep to prevent OOM

@@ -4,6 +4,9 @@ output_dir: ${eval.output_dir}/spatial
 dump_visualizations: true
 visualizations_dir: ${eval.output_dir}/spatial_viz
 
+# Tool visualization (null to disable, directory path to enable)
+tool_viz_dir: ${eval.output_dir}/tool_viz/spatial
+
 layers: [0, 1, 2, 12, 16, 20, 24, 28, 31] # 0 to 31
 top_k_scores: 50 # for attn based methods wo/ refinement
 

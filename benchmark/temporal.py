@@ -11,6 +11,7 @@ Supports temporal query types:
 
 import gc
 import json
+import re
 import numpy as np
 from pathlib import Path
 from typing import List, Dict, Optional, Any, Tuple
@@ -762,8 +763,14 @@ def graph_agent_queries(
         qwen_feats=node_feats_npz,
         patch_latents_through_time=patch_latents_through_time,
         autoencoder=autoencoder,
-        fps=effective_fps,
     )
+    
+    # Setup tool visualization directory if configured
+    tool_viz_enabled = cfg.eval.temporal.tool_viz_dir is not None
+    tool_viz_dir = None
+    if tool_viz_enabled:
+        tool_viz_dir = Path(cfg.eval.temporal.tool_viz_dir) / clip.name
+        tool_viz_dir.mkdir(parents=True, exist_ok=True)
     
     # Parse graph_agent_tools config (list of objects with name and max_calls)
     tool_names = []
@@ -796,6 +803,17 @@ def graph_agent_queries(
     results = []
     for query_anno in annotations:
         query_type = query_anno['query_type']
+        query_id = query_anno['query_id']
+        question_text = query_anno['question']
+        
+        # Start recording if tool visualization is enabled
+        if tool_viz_enabled:
+            # Sanitize question text for filename
+            sanitized_question = re.sub(r'[^\w\s-]', '', question_text)  # Remove special chars
+            sanitized_question = re.sub(r'\s+', '_', sanitized_question)  # Replace whitespace with _
+            sanitized_question = sanitized_question[:50]  # Limit length
+            rrd_file = tool_viz_dir / f"{query_id}_{sanitized_question}.rrd"
+            graph_tools.start_recording(str(rrd_file))
         
         system_prompt_key = f"graph_agent_{query_type}_system_prompt"
         template_key = f"graph_agent_{query_type}_prompt_template"
@@ -830,6 +848,10 @@ def graph_agent_queries(
             max_iterations=cfg.eval.temporal.graph_agent_max_iterations,
             tool_call_limits=tool_call_limits,
         )
+        
+        # Stop recording if tool visualization is enabled
+        if tool_viz_enabled:
+            graph_tools.stop_recording()
         
         # Extract response (agent_result is a dict when tools are used)
         if isinstance(agent_result, dict):

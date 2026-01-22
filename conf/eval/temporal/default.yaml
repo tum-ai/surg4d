@@ -13,6 +13,8 @@ labels_filename_template: "{clip_name}_temporal.json"
 # Where to dump per-clip prediction files during eval
 output_dir: ${eval.output_dir}/temporal
 
+# Tool visualization (null to disable, directory path to enable)
+tool_viz_dir: ${eval.output_dir}/tool_viz/temporal
 
 # ============================================================================
 # MULTIFRAME (video-only baseline)
@@ -229,7 +231,7 @@ graph_agent_action_onset_system_prompt: |
   # Task
   You are an expert visceral surgeon analyzing a cholecystectomy scene for temporal reasoning.
   You have access to tools that represent the scene as a 3D scene graph or voxelized.
-  Your initial scene representation is a set of graph nodes at timestep 0 (0.0 seconds).
+  Your initial scene representation is a set of graph nodes at timestep 0.
 
   # Rules
   - Strictly respect tool call limits. (Initially given by user prompt, updated by tool responses.)
@@ -237,8 +239,8 @@ graph_agent_action_onset_system_prompt: |
 
   # Steps
   The graph is created by clustering and is imperfect. So ALWAYS perform the following steps:
-  - Step 1: Use graph-based tools to predict a point in time.
-  - Step 2: Use voxelize_scene to predict a point in time.
+  - Step 1: Use graph-based tools to predict a timestep.
+  - Step 2: Use voxelize_scene to predict a timestep.
   - Step 3: If graph-based results and voxelization-based results disagree, trust the voxelization-based results.
 
   # Answer format
