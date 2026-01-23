@@ -3,7 +3,6 @@ import hydra
 from omegaconf import DictConfig
 import torch
 import numpy as np
-import os
 import random
 from tqdm import tqdm
 import shutil
@@ -12,18 +11,21 @@ from autoencoder.train_qwen import train
 from autoencoder.model_qwen import QwenAutoencoder
 
 
-def save_dim_reduced(clip: DictConfig, cfg: DictConfig):
+def save_dim_reduced(clip: DictConfig, cfg: DictConfig, ae: QwenAutoencoder = None):
     clip_dir = Path(cfg.preprocessed_root) / clip.name
-    ae = QwenAutoencoder(
-        input_dim=cfg.autoencoder.full_dim, latent_dim=cfg.autoencoder.latent_dim
-    ).to("cuda")
-    ae.load_state_dict(
-        torch.load(
-            clip_dir / cfg.autoencoder.checkpoint_subdir / "best_ckpt.pth",
-            map_location="cuda",
+    
+    # Load autoencoder if not provided (per-clip mode)
+    if ae is None:
+        ae = QwenAutoencoder(
+            input_dim=cfg.autoencoder.full_dim, latent_dim=cfg.autoencoder.latent_dim
+        ).to("cuda")
+        ae.load_state_dict(
+            torch.load(
+                clip_dir / cfg.autoencoder.checkpoint_subdir / "best_ckpt.pth",
+                map_location="cuda",
+            )
         )
-    )
-    ae.eval()
+        ae.eval()
 
     patch_dir = clip_dir / cfg.autoencoder.patch_feat_subdir
     instance_dir = clip_dir / cfg.autoencoder.instance_feat_subdir
@@ -96,17 +98,46 @@ def save_dim_reduced(clip: DictConfig, cfg: DictConfig):
         np.save(reduced_cat_dir / sm_file.name.replace("s", "f"), combined_feat)
 
 
+def train_global_ae(clips, cfg: DictConfig):
+    """Train a single global autoencoder on features from all clips."""
+    preprocessed_root = Path(cfg.preprocessed_root)
+    checkpoint_dir = preprocessed_root / cfg.autoencoder.global_checkpoint_dir
+
+    # Collect all feature directories from all clips
+    all_data_dirs = []
+    for clip in clips:
+        clip_dir = preprocessed_root / clip.name
+        all_data_dirs.extend([
+            clip_dir / cfg.autoencoder.patch_feat_subdir,
+            clip_dir / cfg.autoencoder.instance_feat_subdir,
+        ])
+
+    # Train on all features from all clips
+    train(
+        data_dirs=all_data_dirs,
+        checkpoint_dir=checkpoint_dir,
+        epochs=cfg.autoencoder.epochs,
+        lr=cfg.autoencoder.lr,
+        batch_size=cfg.autoencoder.batch_size,
+        full_dim=cfg.autoencoder.full_dim,
+        latent_dim=cfg.autoencoder.latent_dim,
+    )
+
+
 def train_ae(
     clip: DictConfig,
     cfg: DictConfig,
 ):
+    clip_dir = Path(cfg.preprocessed_root) / clip.name
+    data_dirs = [
+        clip_dir / cfg.autoencoder.patch_feat_subdir,
+        clip_dir / cfg.autoencoder.instance_feat_subdir,
+    ]
+    checkpoint_dir = clip_dir / cfg.autoencoder.checkpoint_subdir
+    
     train(
-        clip_path=str(Path(cfg.preprocessed_root) / clip.name),
-        checkpoint_subdir=cfg.autoencoder.checkpoint_subdir,
-        lf_dir_names=[
-            cfg.autoencoder.patch_feat_subdir,
-            cfg.autoencoder.instance_feat_subdir,
-        ],
+        data_dirs=data_dirs,
+        checkpoint_dir=checkpoint_dir,
         epochs=cfg.autoencoder.epochs,
         lr=cfg.autoencoder.lr,
         batch_size=cfg.autoencoder.batch_size,
@@ -128,8 +159,25 @@ def main(cfg: DictConfig):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(42)
 
-    for clip in tqdm(cfg.clips, desc="Training autoencoders", unit="clip"):
-        train_ae(clip, cfg)
+    if cfg.autoencoder.global_mode:
+        # Global mode: train one autoencoder on all clips
+        train_global_ae(cfg.clips, cfg)
+        
+        # Load global autoencoder once
+        global_checkpoint_path = Path(cfg.preprocessed_root) / cfg.autoencoder.global_checkpoint_dir / "best_ckpt.pth"
+        global_ae = QwenAutoencoder(
+            input_dim=cfg.autoencoder.full_dim, latent_dim=cfg.autoencoder.latent_dim
+        ).to("cuda")
+        global_ae.load_state_dict(torch.load(global_checkpoint_path, map_location="cuda"))
+        global_ae.eval()
+        
+        # Apply global autoencoder to each clip
+        for clip in tqdm(cfg.clips, desc="Encoding with global AE", unit="clip"):
+            save_dim_reduced(clip, cfg, ae=global_ae)
+    else:
+        # Per-clip mode: train separate autoencoder for each clip
+        for clip in tqdm(cfg.clips, desc="Training autoencoders", unit="clip"):
+            train_ae(clip, cfg)
 
 
 if __name__ == "__main__":

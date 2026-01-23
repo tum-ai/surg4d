@@ -732,8 +732,11 @@ def graph_agent_queries(
     num_ts = adjacency.shape[0]
     
     # Load autoencoder for highres inspection tools (following spatial pattern)
-    clip_dir = Path(cfg.preprocessed_root) / clip.name
-    autoencoder_path = clip_dir / cfg.eval.temporal.graph_agent_autoencoder_checkpoint_subdir / "best_ckpt.pth"
+    if cfg.eval.temporal.graph_agent_use_global_autoencoder:
+        autoencoder_path = Path(cfg.preprocessed_root) / cfg.eval.temporal.graph_agent_global_autoencoder_checkpoint_dir / "best_ckpt.pth"
+    else:
+        clip_dir = Path(cfg.preprocessed_root) / clip.name
+        autoencoder_path = clip_dir / cfg.eval.temporal.graph_agent_autoencoder_checkpoint_subdir / "best_ckpt.pth"
     
     autoencoder = QwenAutoencoder(
         input_dim=cfg.eval.temporal.graph_agent_autoencoder_full_dim,

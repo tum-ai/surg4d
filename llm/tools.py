@@ -634,7 +634,7 @@ def inspect_node_through_time(
 
         entry = {
             "timestep": int(t),
-            "lowres_visual_descriptor": IMAGE_PLACEHOLDER,
+            "rough_image": IMAGE_PLACEHOLDER,
             "centroid": {
                 "x": round(float(c[0]), 2),
                 "y": round(float(c[1]), 2),
@@ -755,7 +755,7 @@ def inspect_scene_at_time(
 
         nodes_data.append({
             "node_id": int(n),
-            "lowres_visual_descriptor": IMAGE_PLACEHOLDER,
+            "rough_image": IMAGE_PLACEHOLDER,
             "centroid": {
                 "x": round(float(c[0]), 2),
                 "y": round(float(c[1]), 2),
@@ -902,7 +902,8 @@ def voxelize_scene(
 
     Returns:
         Dict with "text" (JSON description) and "vision_features" (one tensor per non-empty sample).
-        Text contains sample metadata (bbox, content_density, grid index).
+        Text contains sample metadata (voxel_index, bbox, content_density, grid index).
+        voxel_index is a 3D tuple (i, j, k) indicating the voxel's position in the grid.
         Vision features are visual descriptors for scene content at each sampled location.
         Only non-empty voxels are included in the output.
     """
@@ -980,6 +981,7 @@ def voxelize_scene(
                 # Store sample metadata
                 voxels_data.append(
                     {
+                        "voxel_index": [int(i), int(j), int(k)],
                         "bbox": [round(float(x), 2) for x in voxel_center]
                         + [round(float(x), 2) for x in voxel_size],
                         "visual_descriptor": IMAGE_PLACEHOLDER,
@@ -1228,6 +1230,45 @@ class GraphTools:
         """Increment and return the tool call counter."""
         self.call_counter += 1
         return self.call_counter
+    
+    def log_final_prediction(
+        self,
+        position: np.ndarray,
+        timestep_idx: int,
+        label: str,
+        entity_name: str = "zz_final_prediction",
+    ):
+        """Log a final prediction point to the rerun trace.
+        
+        Args:
+            position: 3D position in original coordinates (1, 3) or (3,)
+            timestep_idx: Timestep index to log at
+            label: Label text to display with the point
+            entity_name: Entity name for the rerun log (default: "zz_final_prediction")
+        """
+        from rerun_utils import _compute_scene_extent
+        
+        # Ensure position is (1, 3) shape
+        pos_arr = np.array(position, dtype=np.float32).reshape(1, 3)
+        
+        # Set the timestep
+        self.rr.set_time("timestep", sequence=int(timestep_idx))
+        
+        # Compute appropriate point size based on scene extent
+        scene_extent = _compute_scene_extent(self.positions[timestep_idx])
+        point_radius = max(scene_extent * 0.025, 1e-4)  # Larger than tool points (0.008)
+        
+        # Log the final prediction as a big red point
+        self.rr.log(
+            entity_name,
+            self.rr.Points3D(
+                positions=pos_arr,
+                colors=[[255, 0, 0]],  # Bright red
+                radii=point_radius,
+                labels=[f"prediction: {label}"],
+                show_labels=True,
+            )
+        )
 
     def get_all_tools(self) -> Dict[str, Tuple[Callable, Dict[str, Any]]]:
         """Returns tools dict with graph data already bound.

@@ -1,13 +1,8 @@
 defaults:
-  # - triplets: default
-  # - temporal: default
+  - triplets: null
+  - temporal: default
   - spatial: default
   - _self_
-
-# nulling skips - comment out to enable
-triplets: null
-temporal: null
-# spatial: null
 
 # Qwen version for evaluation (should match feature_extraction.qwen_version)
 qwen_version: ${feature_extraction.qwen_version}

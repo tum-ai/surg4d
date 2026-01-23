@@ -1224,27 +1224,11 @@ def graph_agent_predict_query_list(
         
         # Log final prediction to rerun before stopping recording
         if tool_viz_dir is not None and graph_tools is not None:
-            # Use rerun logger from the GraphTools instance
-            from rerun_utils import _compute_scene_extent
-            
-            graph_tools.rr.set_time("timestep", sequence=int(timestep_idx))
-            
-            # Compute appropriate point size based on scene extent
-            scene_extent = _compute_scene_extent(graph_tools.positions[timestep_idx])
-            point_radius = max(scene_extent * 0.025, 1e-4)  # Larger than tool points (0.008)
-            
-            # Log the final prediction as a big red point
-            graph_tools.rr.log(
-                "zz_final_prediction",
-                graph_tools.rr.Points3D(
-                    positions=pos_arr_original,
-                    colors=[[255, 0, 0]],  # Bright red
-                    radii=point_radius,
-                    labels=[f"prediction: {substring}"],
-                    show_labels=True,
-                )
+            graph_tools.log_final_prediction(
+                position=pos_arr_original,
+                timestep_idx=timestep_idx,
+                label=substring,
             )
-            
             graph_tools.stop_recording()
         pixels = project_3d_to_2d(pos_arr_original, proj_matrix, img_width, img_height)
 
@@ -1309,8 +1293,11 @@ def graph_agent_feat_queries(
     node_extents_norm = distance_o2n(node_extents)
 
     # Load autoencoder for inspect_highres_node_at_time tool
-    clip_dir = Path(cfg.preprocessed_root) / clip.name
-    autoencoder_path = clip_dir / cfg.eval.spatial.graph_agent_autoencoder_checkpoint_subdir / "best_ckpt.pth"
+    if cfg.eval.spatial.graph_agent_use_global_autoencoder:
+        autoencoder_path = Path(cfg.preprocessed_root) / cfg.eval.spatial.graph_agent_global_autoencoder_checkpoint_dir / "best_ckpt.pth"
+    else:
+        clip_dir = Path(cfg.preprocessed_root) / clip.name
+        autoencoder_path = clip_dir / cfg.eval.spatial.graph_agent_autoencoder_checkpoint_subdir / "best_ckpt.pth"
     autoencoder = QwenAutoencoder(
         input_dim=cfg.eval.spatial.graph_agent_autoencoder_full_dim,
         latent_dim=cfg.eval.spatial.graph_agent_autoencoder_latent_dim,

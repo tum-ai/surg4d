@@ -116,6 +116,8 @@ frame_direct_prompt_template: |
 graph_agent_autoencoder_checkpoint_subdir: ${autoencoder.checkpoint_subdir}
 graph_agent_autoencoder_full_dim: ${autoencoder.full_dim}
 graph_agent_autoencoder_latent_dim: ${autoencoder.latent_dim}
+graph_agent_use_global_autoencoder: ${autoencoder.global_mode}
+graph_agent_global_autoencoder_checkpoint_dir: ${autoencoder.global_checkpoint_dir}
 graph_agent_max_iterations: 20
 graph_agent_tools:
   - name: node_overlap_position_at_time

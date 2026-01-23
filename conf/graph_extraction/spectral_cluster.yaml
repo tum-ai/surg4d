@@ -13,10 +13,12 @@ iteration: -1
 checkpoint_subdir: ${autoencoder.checkpoint_subdir}
 full_dim: ${autoencoder.full_dim}
 latent_dim: ${autoencoder.latent_dim}
+use_global_autoencoder: ${autoencoder.global_mode}
+global_autoencoder_checkpoint_dir: ${autoencoder.global_checkpoint_dir}
 
 # gaussian filtering before clustering
 # relevance is defined as opacity * ||language_feature||_2 in latent space
-relevance_threshold: 0.45
+relevance_threshold: 0.0
 
 # clustering
 cluster_method: spectral # one of: [spectral, hdbscan]
@@ -45,8 +47,8 @@ spectral_clustering:
   spectral_embedding_dim: 5
   hdbscan_args:
     metric: euclidean
-    min_cluster_size: 150
-    min_samples: 150
+    min_cluster_size: 200
+    min_samples: 200
 
 # cluster filtering after clustering
 min_gaussians_per_cluster: 150

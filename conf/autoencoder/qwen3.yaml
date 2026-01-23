@@ -11,3 +11,7 @@ full_dim: 16384  # 4096 * 4 (main + 3 deepstack layers concatenated)
 
 patch_feat_subdir: ${feature_extraction.patch_feat_subdir}
 instance_feat_subdir: ${feature_extraction.instance_feat_subdir}
+
+# Global autoencoder mode: train one AE across all clips instead of per-clip
+global_mode: false
+global_checkpoint_dir: output/global_ae

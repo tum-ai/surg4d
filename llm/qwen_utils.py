@@ -407,6 +407,7 @@ def ask_qwen_about_image_features(
     system_prompt: str = "You are a medical assistant designed to aid medical practitioners during a cholecystectomy procedure. The surgeon user will ask you a question and show you their current situation, and you give a concise answer.",
     max_tokens: int = 5012,
     seed: int = 42,
+    qwen_version: str = "qwen25",
 ):
     messages = [
         {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
@@ -419,7 +420,7 @@ def ask_qwen_about_image_features(
         },
     ]
     return generate_with_vision_features(
-        messages, [image_features], model, processor, max_tokens=max_tokens, seed=seed
+        messages, [image_features], model, processor, qwen_version=qwen_version, max_tokens=max_tokens, seed=seed
     )
 
 
@@ -1151,72 +1152,56 @@ def prompt_graph_agent(
     extents = node_extents[initial_timestep_idx]
     centers = node_centers[initial_timestep_idx]
 
-    graph_content = []
-    graph_content.append(
-        {
-            "type": "text",
-            "text": f'<graph-nodes timestep="{initial_timestep_idx}">\n',
-        }
-    )
+    # Build JSON structure with IMAGE_PLACEHOLDER markers for nodes
+    nodes_data = []
     for n in range(centroids.shape[0]):
-        graph_content.extend(
-            [
-                {
-                    "type": "text",
-                    "text": f'<node id="{n}">\n',
-                },
-                {
-                    "type": "text",
-                    "text": "<lowres-visual-descriptor>",
-                },
-                {
-                    "type": "image",
-                    "image": None,
-                },
-                {
-                    "type": "text",
-                    "text": "</lowres-visual-descriptor>\n",
-                },
-                {
-                    "type": "text",
-                    "text": f'<centroid x="{centroids[n][0]:.2f}" y="{centroids[n][1]:.2f}" z="{centroids[n][2]:.2f}"/>\n',
-                },
-                {
-                    "type": "text",
-                    "text": f'<bbox-center x="{centers[n][0]:.2f}" y="{centers[n][1]:.2f}" z="{centers[n][2]:.2f}"/>\n',
-                },
-                {
-                    "type": "text",
-                    "text": f'<bbox-extent x="{extents[n][0]:.2f}" y="{extents[n][1]:.2f}" z="{extents[n][2]:.2f}"/>\n',
-                },
-                {
-                    "type": "text",
-                    "text": "</node>\n",
-                },
-            ]
-        )
-    graph_content.append(
-        {
-            "type": "text",
-            "text": "</graph-nodes>\n",
-        }
-    )
+        nodes_data.append({
+            "node_id": int(n),
+            "rough_image": IMAGE_PLACEHOLDER,
+            "centroid": {
+                "x": round(float(centroids[n][0]), 2),
+                "y": round(float(centroids[n][1]), 2),
+                "z": round(float(centroids[n][2]), 2),
+            },
+            "bbox_center": {
+                "x": round(float(centers[n][0]), 2),
+                "y": round(float(centers[n][1]), 2),
+                "z": round(float(centers[n][2]), 2),
+            },
+            "bbox_extent": {
+                "x": round(float(extents[n][0]), 2),
+                "y": round(float(extents[n][1]), 2),
+                "z": round(float(extents[n][2]), 2),
+            },
+        })
 
-    # Add tool call limits information to the prompt
+    graph_data = {
+        "timestep": int(initial_timestep_idx),
+        "nodes": nodes_data,
+    }
+
+    # Serialize to JSON and split by IMAGE_PLACEHOLDER to interleave images
+    graph_json = json.dumps(graph_data, indent=2)
+    graph_parts = graph_json.split(IMAGE_PLACEHOLDER)
+    
+    # Build interleaved content: text, image, text, image, ..., text
+    graph_content = []
+    for i, part in enumerate(graph_parts):
+        if part:
+            graph_content.append({"type": "text", "text": part})
+        if i < len(nodes_data):
+            graph_content.append({"type": "image", "image": None})
+
+    # Add tool call limits information to the prompt (as JSON)
     tool_limits_content = []
     if tool_call_limits is not None:
-        tool_limits_content.append(
-            {"type": "text", "text": "<tool-call-limits>\n"}
-        )
+        tool_limits_data = {}
         for tool_name in tools.keys():
             limit = tool_call_limits.get(tool_name, None)
-            limit_str = "infinite" if limit is None else str(limit)
-            tool_limits_content.append(
-                {"type": "text", "text": f'<tool name="{tool_name}" remaining_calls="{limit_str}" />\n'}
-            )
-        tool_limits_content.append(
-            {"type": "text", "text": "</tool-call-limits>\n"}
-        )
+            tool_limits_data[tool_name] = "infinite" if limit is None else limit
+        
+        tool_limits_json = json.dumps({"tool_call_limits": tool_limits_data}, indent=2)
+        tool_limits_content.append({"type": "text", "text": tool_limits_json + "\n\n"})
 
     messages = [
         {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
@@ -1224,10 +1209,9 @@ def prompt_graph_agent(
             "role": "user",
             "content": [
                 *graph_content,
+                {"type": "text", "text": "\n\n"},
                 *tool_limits_content,
-                {"type": "text", "text": "<user-prompt>"},
                 {"type": "text", "text": question},
-                {"type": "text", "text": "</user-prompt>\n"},
             ],
         },
     ]

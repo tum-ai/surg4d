@@ -41,6 +41,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def get_autoencoder_path(clip: DictConfig, cfg: DictConfig) -> Path:
+    """Get autoencoder checkpoint path (global or per-clip based on config)."""
+    if cfg.graph_extraction.use_global_autoencoder:
+        return Path(cfg.preprocessed_root) / cfg.graph_extraction.global_autoencoder_checkpoint_dir / "best_ckpt.pth"
+    else:
+        clip_dir = Path(cfg.preprocessed_root) / clip.name
+        return clip_dir / cfg.graph_extraction.checkpoint_subdir / "best_ckpt.pth"
+
+
 def load_gaussian_model(
     clip: DictConfig,
     cfg: DictConfig,
@@ -90,7 +99,7 @@ def load_gaussian_model(
     parser.add_argument("--store_verbose", action="store_true")
 
     # Build command line args
-    qwen_ae_path = clip_dir / cfg.graph_extraction.checkpoint_subdir / "best_ckpt.pth"
+    qwen_ae_path = get_autoencoder_path(clip, cfg)
 
     cmd_args = [
         "-s",
@@ -647,8 +656,7 @@ def bhattacharyya_coefficient(mu1, Sigma1, mu2, Sigma2):
 def decode_qwen(lfs: torch.Tensor, cfg: DictConfig, clip: DictConfig) -> np.ndarray:
     BATCH_SIZE = cfg.graph_extraction.decode_batch_size
 
-    clip_dir = Path(cfg.preprocessed_root) / clip.name
-    ae_path = clip_dir / cfg.graph_extraction.checkpoint_subdir / "best_ckpt.pth"
+    ae_path = get_autoencoder_path(clip, cfg)
 
     ae = QwenAutoencoder(
         input_dim=cfg.graph_extraction.full_dim,

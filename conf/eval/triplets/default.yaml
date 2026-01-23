@@ -1,484 +1,245 @@
-FRAMERATE: 25
-NUM_FRAMES: 80
-TEMP_CONTEXT_FR_MULTIPLIER: 1
+# ============================================================================
+# TRIPLETS BENCHMARK CONFIGURATION
+# ============================================================================
+# This config defines settings for surgical action triplet recognition evaluation
+# GT triplets are loaded from CholecT50 annotations
+
+# Methods to run
+methods: ["single_frame", "multiframe", "graph_agent_single"]
 
 # Where to dump per-clip prediction files during eval
 output_dir: ${eval.output_dir}/triplets
-mask_overlay_viz_output_dir: ${eval.output_dir}/triplets_mask_overlays
 
-# Evaluate on frames aligned to graph timesteps (80 frames -> 20 steps)
-# Stride 4 means we evaluate at frames: 0,4,8,... within each clip
-frame_stride: 4
-align_to_graph: true
-dump_viz: true
-viz_output_dir: ${eval.output_dir}/triplets_viz
-viz_max_samples: 100
+# Tool visualization (null to disable, directory path to enable)
+tool_viz_dir: ${eval.output_dir}/tool_viz/triplets
 
-ablations: ["single_frame", "single_frame_mask_overlay", "multiframe", "multiframe_mask_overlay", "static_graph", "dynamic_graph", "static_descriptors", "dynamic_descriptors"]
-multiframe_video_mode: true
+# Frame/annotation alignment parameters
+FRAMERATE: 25  # Original video framerate
+NUM_FRAMES: 80  # Frames per clip
+frame_stride: 4  # Graph extraction stride (80 frames -> 20 timesteps)
 
-system_prompts:
-  single_frame: |
-    You are an expert visceral surgeon analyzing a cholecystectomy image.
-    Evaluate only the current image. Ensure instrument/verb/target combinations are coherent.
-  single_frame_mask_overlay: |
-    You are an expert visceral surgeon analyzing a cholecystectomy image.
-    Evaluate only the current image. Ensure instrument/verb/target combinations are coherent.
-  multiframe: |
-    You are an expert visceral surgeon analyzing a cholecystectomy video sequence.
-    Always evaluate only the specified timestep t; other frames are context only. Ensure instrument/verb/target combinations are coherent at t.
-  static_descriptors: |
-    You are an expert visceral surgeon analyzing a surgical scene with descriptors.
-    Ensure instrument/verb/target combinations are coherent.
+# Graph agent parameters
+graph_agent_max_iterations: 10
+enable_highres_tools: false
+max_inspect_node_calls: 20
+max_list_neighbors_calls: 15
+max_inspect_edge_calls: 10
+max_inspect_node_highres_calls: 5
+max_inspect_node_at_timestep_calls: 20
+max_list_neighbors_at_timestep_calls: 15
+max_inspect_edge_at_timestep_calls: 10
 
-    INPUT FORMAT:
-    - <descriptor>
-      - For each descriptor d:
-          <descriptor id="d">
-            [image descriptor]
-          </descriptor>
-    - </descriptor>
+# ============================================================================
+# SINGLE FRAME (image-only baseline)
+# ============================================================================
+single_frame_system_prompt: |
+  # Task
+  You are an expert visceral surgeon analyzing a cholecystectomy frame for surgical action triplets.
+  
+  # Rules
+  - Identify ALL instrument-verb-target triplets that are CLEARLY VISIBLE and ACTIVE in this frame
+  - Only report triplets where both instrument AND action are visible
+  - Ensure instrument/verb/target combinations are surgically coherent
+  - Reason briefly, then output final JSON
 
-    TASK: Determine which instrument-verb-target triplets are active using descriptors.
-    - Use object descriptors to identify instruments vs anatomy
-    - Output strictly the JSON specified in the user prompt; use STRING LABELS only
-    - You may briefly reason first. Then, on a new line at the end, output ONLY the final JSON object
-  static_graph: |
-    You are an expert visceral surgeon analyzing a surgical scene graph snapshot.
-    Ensure instrument/verb/target combinations are coherent.
+single_frame_prompt_template: |
+  Identify all active surgical triplets (instrument-verb-target) visible in this frame.
+  
+  Valid categories:
+  - instruments: grasper, bipolar, hook, scissors, clipper, irrigator
+  - verbs: grasp, retract, dissect, coagulate, clip, cut, aspirate, irrigate, pack, null_verb
+  - targets: gallbladder, cystic_plate, cystic_duct, cystic_artery, cystic_pedicle, blood_vessel, fluid, abdominal_wall_cavity, liver, adhesion, omentum, peritoneum, gut, specimen_bag, null_target
+  
+  Output format: {{"triplets": [{{"instrument": "<str>", "verb": "<str>", "target": "<str>", "confidence": <float>}}, ...]}}
+  
+  CRITICAL: Each triplet MUST have a different confidence value. Assess visibility independently.
+  - Use values like [0.92, 0.75, 0.53] NOT [0.90, 0.90, 0.90]
+  
+  Wrap JSON in ```json fenced block.
 
-    INPUT FORMAT:
-    - <scene-graph>
-      - <spatial-graph>
-        - For each node n:
-          <node id="n">
-            <descriptor> [image descriptor] </descriptor>
-            <centroid x="..." y="..." z="..."/>
-            <extent x="..." y="..." z="..."/>
-          </node>
-          - For each interacting pair (n,m):
-            <edge from="n" to="m" overlap_score="..." centroid_distance="..."/>
-      - </spatial-graph>
-    - </scene-graph>
+# ============================================================================
+# SINGLE FRAME + MASK OVERLAY
+# ============================================================================
+single_frame_mask_overlay_system_prompt: |
+  # Task
+  You are an expert visceral surgeon analyzing a cholecystectomy frame with segmentation overlays.
+  Colored regions indicate detected instrument/tissue instances.
+  
+  # Rules
+  - Use overlays to identify instruments and anatomical structures
+  - Only report triplets where both instrument AND action are visible
+  - Ensure instrument/verb/target combinations are surgically coherent
+  - Reason briefly, then output final JSON
 
-    TASK: Determine which instrument-verb-target triplets are active using nodes/edges.
-    - Use object descriptors to identify instruments vs anatomy
-    - Use edges/overlap and centroid distances to infer interactions
-    - Output strictly the JSON specified in the user prompt; use STRING LABELS only
-    - You may briefly reason first. Then, on a new line at the end, output ONLY the final JSON object
-  dynamic_descriptors: |
-    You are an expert visceral surgeon analyzing surgical scene with descriptors over time.
-    Evaluate only the specified timestep t; ensure instrument/verb/target combinations are coherent at t.
+single_frame_mask_overlay_prompt_template: |
+  Identify all active surgical triplets (instrument-verb-target) visible in this frame.
+  The image shows colored instance segmentation overlays to help identify objects.
+  
+  Valid categories:
+  - instruments: grasper, bipolar, hook, scissors, clipper, irrigator
+  - verbs: grasp, retract, dissect, coagulate, clip, cut, aspirate, irrigate, pack, null_verb
+  - targets: gallbladder, cystic_plate, cystic_duct, cystic_artery, cystic_pedicle, blood_vessel, fluid, abdominal_wall_cavity, liver, adhesion, omentum, peritoneum, gut, specimen_bag, null_target
+  
+  Output format: {{"triplets": [{{"instrument": "<str>", "verb": "<str>", "target": "<str>", "confidence": <float>}}, ...]}}
+  
+  CRITICAL: Each triplet MUST have a different confidence value based on visibility + segmentation clarity.
+  
+  Wrap JSON in ```json fenced block.
 
-    INPUT FORMAT:
-    - <descriptors>
-      - For each descriptor d:
-        - <descriptor id="d">
-          [image descriptor]
-        </descriptor>
-      - </descriptor>
-    - </descriptors>
+# ============================================================================
+# MULTIFRAME (video baseline)
+# ============================================================================
+multiframe_system_prompt: |
+  # Task
+  You are an expert visceral surgeon analyzing a cholecystectomy video for surgical action triplets.
+  
+  # Rules
+  - The video is provided at a specific framerate
+  - You will be asked to identify triplets at a specific time (in seconds)
+  - Use temporal context to disambiguate actions
+  - Evaluate ONLY the specified time point, other frames are context
+  - Reason briefly, then output final JSON
 
-    TASK: Determine which instrument-verb-target triplets are active using descriptors. Answer ONLY for the specified timestep t, other timesteps are context only.
-    - Identify instruments vs anatomy from descriptors
-    - Output strictly the JSON specified in the user prompt; use STRING LABELS only
-    - You may briefly reason first. Then, on a new line at the end, output ONLY the final JSON object
-  dynamic_graph: |
-    You are an expert visceral surgeon analyzing surgical scene graphs over time.
-    Evaluate only the specified timestep t; ensure instrument/verb/target combinations are coherent at t.
+multiframe_prompt_template: |
+  Identify all active surgical triplets (instrument-verb-target) at time t={target_second}s.
+  
+  Valid categories:
+  - instruments: grasper, bipolar, hook, scissors, clipper, irrigator
+  - verbs: grasp, retract, dissect, coagulate, clip, cut, aspirate, irrigate, pack, null_verb
+  - targets: gallbladder, cystic_plate, cystic_duct, cystic_artery, cystic_pedicle, blood_vessel, fluid, abdominal_wall_cavity, liver, adhesion, omentum, peritoneum, gut, specimen_bag, null_target
+  
+  Output format: {{"triplets": [{{"instrument": "<str>", "verb": "<str>", "target": "<str>", "confidence": <float>}}, ...]}}
+  
+  CRITICAL: Each triplet MUST have a different confidence value. Use temporal continuity to assess confidence.
+  
+  Evaluate ONLY at t={target_second}s. Other frames provide context only.
+  
+  Wrap JSON in ```json fenced block.
 
-    INPUT FORMAT:
-    - <scene-graph>
-      - <spatial-graphs> across timesteps t=0..T-1:
-        - <spatial-graph timestep="k">
-          - For each node n:
-            <node id="n">
-              <descriptor> [image descriptor] </descriptor>
-              <center x="..." y="..." z="..."/>
-              <centroid x="..." y="..." z="..."/>
-              <extent x="..." y="..." z="..."/>
-            </node>
-          - For each interacting pair (n,m):
-            <edge from="n" to="m" overlap_score="..." centroid_distance="..."/>
-        - </spatial-graph>
-      - </spatial-graphs>
-    - </scene-graph>
+# ============================================================================
+# MULTIFRAME + MASK OVERLAY
+# ============================================================================
+multiframe_mask_overlay_system_prompt: |
+  # Task
+  You are an expert visceral surgeon analyzing a cholecystectomy video with segmentation overlays.
+  Colored regions indicate detected instrument/tissue instances across time.
+  
+  # Rules
+  - Use overlays AND temporal context to identify triplets
+  - Evaluate ONLY the specified time point
+  - Ensure instrument/verb/target combinations are surgically coherent
+  - Reason briefly, then output final JSON
 
-    TASK: Determine which instrument-verb-target triplets are active using nodes/edges. Answer ONLY for the specified timestep t, other timesteps are context only.
-    - Identify instruments vs anatomy from descriptors
-    - Use nodes/edges/overlap and centroid distances to infer interactions/actions
-    - Output strictly the JSON specified in the user prompt; use STRING LABELS only
-    - You may briefly reason first. Then, on a new line at the end, output ONLY the final JSON object
+multiframe_mask_overlay_prompt_template: |
+  Identify all active surgical triplets (instrument-verb-target) at time t={target_second}s.
+  The video shows colored instance segmentation overlays across frames.
+  
+  Valid categories:
+  - instruments: grasper, bipolar, hook, scissors, clipper, irrigator
+  - verbs: grasp, retract, dissect, coagulate, clip, cut, aspirate, irrigate, pack, null_verb
+  - targets: gallbladder, cystic_plate, cystic_duct, cystic_artery, cystic_pedicle, blood_vessel, fluid, abdominal_wall_cavity, liver, adhesion, omentum, peritoneum, gut, specimen_bag, null_target
+  
+  Output format: {{"triplets": [{{"instrument": "<str>", "verb": "<str>", "target": "<str>", "confidence": <float>}}, ...]}}
+  
+  CRITICAL: Each triplet MUST have different confidence values.
+  
+  Evaluate ONLY at t={target_second}s.
+  
+  Wrap JSON in ```json fenced block.
 
-prompts:
-  single_frame: |
-    YOUR TASK: Identify instrument-verb-target triplets that are CURRENTLY ACTIVE and CLEARLY VISIBLE in this image.
-    
-    ⚠️ MANDATORY CONFIDENCE VARIANCE REQUIREMENT ⚠️
-    READ THIS FIRST - YOUR RESPONSE WILL BE REJECTED IF YOU VIOLATE THESE RULES:
-    
-    STEP 1: Assess EACH triplet's visibility/certainty level INDEPENDENTLY
-    STEP 2: Assign confidence from the appropriate tier based on that specific triplet's evidence quality
-    STEP 3: VERIFY that your confidence values span multiple tiers (unless only 1 triplet)
-    
-    ❌ UNACCEPTABLE (will be rejected):
-    - Using 0.92 for all triplets: [0.92, 0.92, 0.92]
-    - Using only 1-2 values: [0.92, 0.73, 0.92, 0.73]
-    - Staying in one tier: [0.90, 0.91, 0.92, 0.93]
-    
-    ✅ ACCEPTABLE:
-    - Diverse values across tiers: [0.94, 0.76, 0.52]
-    - Using full range: [0.93, 0.67, 0.44, 0.21]
-    - Values vary by visibility: [0.91, 0.78, 0.59]
-    
-    CONFIDENCE TIER SYSTEM (assess each triplet independently):
-    Tier 1 (0.90-0.95): ALL components clearly visible AND action definitively happening AND no ambiguity
-    Tier 2 (0.70-0.80): Instrument/target clear BUT action partially obscured OR minor ambiguity about verb
-    Tier 3 (0.50-0.65): Instrument clear BUT target partially obscured OR action inferred from position
-    Tier 4 (0.30-0.45): Multiple interpretations possible OR significant occlusion but context suggests this
-    Tier 5 (0.10-0.25): Speculative interpretation OR minimal evidence BUT anatomically plausible
-    
-    CRITICAL RULES:
-    - ONLY report triplets where both the instrument and the action are visible
-    - Do NOT infer from procedure context; return {"triplets": []} if unsure
-    - REASON ABOUT COMBINATIONS: Verify that each instrument/verb/target combination is surgically plausible
-    - IMPORTANT: Values for "instrument", "verb", and "target" MUST be STRING LABELS from VALID CATEGORIES below. Never output numeric IDs
-    
-    VALID CATEGORIES:
-    - instrument: ["grasper", "bipolar", "hook", "scissors", "clipper", "irrigator"]
-    - verb: ["grasp", "retract", "dissect", "coagulate", "clip", "cut", "aspirate", "irrigate", "pack", "null_verb"]
-    - target: ["gallbladder", "cystic_plate", "cystic_duct", "cystic_artery", "cystic_pedicle", "blood_vessel", "fluid", "abdominal_wall_cavity", "liver", "adhesion", "omentum", "peritoneum", "gut", "specimen_bag", "null_target"]
-    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float>}, ...]}
+# ============================================================================
+# GRAPH AGENT (SINGLE TIMESTEP)
+# ============================================================================
+graph_agent_single_system_prompt: |
+  # Task
+  You are an expert visceral surgeon analyzing a surgical scene graph at a specific timestep.
+  You have access to tools to explore nodes (anatomical structures/instruments) and their spatial relationships.
+  
+  # Scene Graph Structure
+  - Nodes represent segmented objects (instruments, anatomical structures)
+  - Each node has:
+    * Descriptor: Visual/semantic description
+    * Centroid: 3D center position
+    * Extent: 3D bounding box size
+  - Edges represent spatial relationships (overlap, proximity)
+  
+  # Available Tools
+  - inspect_node(node_id): View node descriptor and spatial properties
+  - list_neighbors(node_id): Find spatially connected nodes
+  - inspect_edge(node_id_1, node_id_2): Check relationship strength
+  
+  # Strategy
+  1. Start by inspecting a few nodes to understand the scene
+  2. Identify instrument nodes vs anatomical nodes from descriptors
+  3. Use edges/neighbors to find instrument-target interactions
+  4. Infer verbs from spatial relationships (overlap = grasp/clip, proximity = dissect/coagulate)
+  5. Output final triplet JSON
+  
+  # Rules
+  - Use tools systematically to gather evidence
+  - Only report triplets with strong graph evidence
+  - Ensure surgical coherence
 
-    OUTPUT CONSTRAINTS:
-    You may briefly reason first. Then, on a new line at the end, output ONLY the final JSON object.
-    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float 0.0-1.0>}, ...]}
-    - Keys MUST be exactly: instrument, verb, target, confidence. Values for I/V/T MUST be lowercase strings from VALID CATEGORIES.
-    - confidence MUST be a float from the tier ranges above, with variance between predictions
-    - Order triplets by confidence (highest first)
-    - Return {"triplets": []} if no triplets are clearly visible
-    - Wrap ONLY the JSON object in a single ```json fenced block, or return the bare JSON. No text outside the JSON.
-    EXAMPLES (valid):
-    - ```json
-      {"triplets": []}
-      ```
-    - ```json
-      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct","confidence":0.95}]}
-      ```
-    - ```json
-      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"gallbladder","confidence":0.9}, {"instrument":"hook","verb":"dissect","target":"cystic_plate","confidence":0.7}]}
-      ```
-    EXAMPLES (invalid):
-    - {"subject":"grasper","action":"grasp","object":"cystic_duct"}  # wrong keys
-    - {"instrument":"grasper","verb":"grasp","target":"cystic_duct"}  # missing confidence
-    - {"instrument":"grasper","verb":"grasp","target":"cystic_duct"}  # missing confidence
-  single_frame_mask_overlay: |
-    YOUR TASK: Identify instrument-verb-target triplets that are CURRENTLY ACTIVE and CLEARLY VISIBLE in this image.
-    
-    ⚠️ MANDATORY CONFIDENCE VARIANCE REQUIREMENT ⚠️
-    YOUR RESPONSE WILL BE REJECTED IF ALL CONFIDENCE VALUES ARE THE SAME!
-    
-    STEP 1: Assess EACH triplet's visibility/certainty level INDEPENDENTLY
-    STEP 2: Assign confidence from the appropriate tier based on that specific triplet's evidence quality
-    STEP 3: VERIFY that your confidence values span multiple tiers (unless only 1 triplet)
-    
-    ❌ UNACCEPTABLE: [0.92, 0.92, 0.92] or [0.92, 0.73, 0.92, 0.73]
-    ✅ ACCEPTABLE: [0.94, 0.76, 0.52] or [0.93, 0.67, 0.44, 0.21]
-    
-    CONFIDENCE TIER SYSTEM (assess each triplet independently):
-    Tier 1 (0.90-0.95): ALL components clearly visible AND action definitively happening AND no ambiguity
-    Tier 2 (0.70-0.80): Instrument/target clear BUT action partially obscured OR minor ambiguity about verb
-    Tier 3 (0.50-0.65): Instrument clear BUT target partially obscured OR action inferred from position
-    Tier 4 (0.30-0.45): Multiple interpretations possible OR significant occlusion but context suggests this
-    Tier 5 (0.10-0.25): Speculative interpretation OR minimal evidence BUT anatomically plausible
-    
-    CRITICAL RULES:
-    - ONLY report triplets where both the instrument and the action are visible
-    - Do NOT infer from procedure context; return {"triplets": []} if unsure
-    - REASON ABOUT COMBINATIONS: Verify that each instrument/verb/target combination is surgically plausible
-    - IMPORTANT: Values for "instrument", "verb", and "target" MUST be STRING LABELS from VALID CATEGORIES below. Never output numeric IDs
-    
-    VALID CATEGORIES:
-    - instrument: ["grasper", "bipolar", "hook", "scissors", "clipper", "irrigator"]
-    - verb: ["grasp", "retract", "dissect", "coagulate", "clip", "cut", "aspirate", "irrigate", "pack", "null_verb"]
-    - target: ["gallbladder", "cystic_plate", "cystic_duct", "cystic_artery", "cystic_pedicle", "blood_vessel", "fluid", "abdominal_wall_cavity", "liver", "adhesion", "omentum", "peritoneum", "gut", "specimen_bag", "null_target"]
-    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float>}, ...]}
+graph_agent_single_prompt_template: |
+  Identify all active surgical triplets (instrument-verb-target) at timestep t={timestep}.
+  
+  Use the tools to explore the scene graph and find evidence for triplets.
+  
+  Valid categories:
+  - instruments: grasper, bipolar, hook, scissors, clipper, irrigator
+  - verbs: grasp, retract, dissect, coagulate, clip, cut, aspirate, irrigate, pack, null_verb
+  - targets: gallbladder, cystic_plate, cystic_duct, cystic_artery, cystic_pedicle, blood_vessel, fluid, abdominal_wall_cavity, liver, adhesion, omentum, peritoneum, gut, specimen_bag, null_target
+  
+  Final output format: {{"triplets": [{{"instrument": "<str>", "verb": "<str>", "target": "<str>", "confidence": <float>}}, ...]}}
+  
+  Wrap JSON in ```json fenced block.
 
-    OUTPUT CONSTRAINTS:
-    You may briefly reason first. Then, on a new line at the end, output ONLY the final JSON object.
-    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float 0.0-1.0>}, ...]}
-    - Keys MUST be exactly: instrument, verb, target, confidence. Values for I/V/T MUST be lowercase strings from VALID CATEGORIES.
-    - confidence MUST be a float from the tier ranges above, with variance between predictions
-    - Order triplets by confidence (highest first)
-    - Return {"triplets": []} if no triplets are clearly visible
-    - Wrap ONLY the JSON object in a single ```json fenced block, or return the bare JSON. No text outside the JSON.
-    EXAMPLES (valid):
-    - ```json
-      {"triplets": []}
-      ```
-    - ```json
-      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct","confidence":0.95}]}
-      ```
-    EXAMPLES (invalid):
-    - {"subject":"grasper","action":"grasp","object":"cystic_duct"}  # wrong keys
-    - {"instrument":"grasper","verb":"grasp","target":"cystic_duct"}  # missing confidence
-  multiframe: |
-    YOUR TASK: Identify instrument-verb-target triplets that are ACTIVE at timestep t = {timestep}.
-    
-    ⚠️ MANDATORY CONFIDENCE VARIANCE REQUIREMENT ⚠️
-    YOUR RESPONSE WILL BE REJECTED IF ALL CONFIDENCE VALUES ARE THE SAME!
-    
-    STEP 1: Assess EACH triplet at timestep t INDEPENDENTLY based on visibility + temporal continuity
-    STEP 2: Assign confidence from the appropriate tier
-    STEP 3: VERIFY values span multiple tiers
-    
-    ❌ UNACCEPTABLE: [0.92, 0.92] or [0.73, 0.73, 0.73]
-    ✅ ACCEPTABLE: [0.94, 0.71, 0.48] or [0.91, 0.62]
-    
-    CONFIDENCE TIER SYSTEM (assess each triplet independently):
-    Tier 1 (0.90-0.95): Triplet clearly active at t AND temporal context strongly confirms continuity
-    Tier 2 (0.70-0.80): Active at t BUT temporal context shows action starting/ending OR minor discontinuity
-    Tier 3 (0.50-0.65): Likely active at t BUT temporal context ambiguous OR action inferred from nearby frames
-    Tier 4 (0.30-0.45): Uncertain at exact timestep t BUT temporal pattern suggests plausible
-    Tier 5 (0.10-0.25): Speculative based on temporal context OR visible before/after but unclear at t
-    
-    CRITICAL TEMPORAL FOCUS:
-    - Evaluate ONLY timestep t. Other frames are context only.
-    - If an instrument/verb/target is not active at t, do not include it even if it appears before/after.
-    - REASON ABOUT COMBINATIONS: Ensure instrument, verb, and target form a consistent action at t.
-    - IMPORTANT: Values for "instrument", "verb", and "target" MUST be STRING LABELS from VALID CATEGORIES below. Never output numeric IDs
-    
-    VALID CATEGORIES:
-    - instrument: ["grasper", "bipolar", "hook", "scissors", "clipper", "irrigator"]
-    - verb: ["grasp", "retract", "dissect", "coagulate", "clip", "cut", "aspirate", "irrigate", "pack", "null_verb"]
-    - target: ["gallbladder", "cystic_plate", "cystic_duct", "cystic_artery", "cystic_pedicle", "blood_vessel", "fluid", "abdominal_wall_cavity", "liver", "adhesion", "omentum", "peritoneum", "gut", "specimen_bag", "null_target"]
-    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float>}, ...]}
+# ============================================================================
+# GRAPH AGENT (DYNAMIC/TEMPORAL)
+# ============================================================================
+graph_agent_dynamic_system_prompt: |
+  # Task
+  You are an expert visceral surgeon analyzing a surgical scene graph over time.
+  You have access to tools to explore nodes and their evolution across timesteps.
+  
+  # Scene Graph Structure
+  - Nodes represent segmented objects tracked across time
+  - Each node has temporal descriptors and spatial properties
+  - Edges show spatial relationships at each timestep
+  - You can navigate across timesteps to understand action evolution
+  
+  # Available Tools
+  - inspect_node(node_id): View node descriptor (current timestep)
+  - list_neighbors(node_id): Find connected nodes (current timestep)
+  - inspect_edge(node_id_1, node_id_2): Check relationship (current timestep)
+  - inspect_node_at_timestep(node_id, timestep): View node at specific time
+  - list_neighbors_at_timestep(node_id, timestep): Find neighbors at time
+  - inspect_edge_at_timestep(node_id_1, node_id_2, timestep): Check edge at time
+  
+  # Strategy
+  1. Start at timestep 0 to understand initial scene
+  2. Navigate to target timestep to evaluate triplets
+  3. Use temporal context (before/after) to disambiguate actions
+  4. Identify sustained vs transient interactions
+  5. Output final triplet JSON for target timestep only
+  
+  # Rules
+  - Use temporal tools to gather evidence across time
+  - Evaluate triplets ONLY at the specified target timestep
+  - Use temporal evolution to increase confidence
+  - Ensure surgical coherence
 
-    OUTPUT CONSTRAINTS:
-    You may briefly reason first. Then, on a new line at the end, output ONLY the final JSON object.
-    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float 0.0-1.0>}, ...]}
-    - Keys MUST be exactly: instrument, verb, target, confidence. Values for I/V/T MUST be lowercase strings from VALID CATEGORIES.
-    - confidence MUST be a float from the tier ranges above, with variance between predictions
-    - Order triplets by confidence (highest first)
-    - Return {"triplets": []} if no triplets are active at t
-    - Wrap ONLY the JSON object in a single ```json fenced block, or return the bare JSON. No text outside the JSON.
-    EXAMPLES (valid):
-    - ```json
-      {"triplets": []}
-      ```
-    - ```json
-      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct","confidence":0.95}]}
-      ```
-    EXAMPLES (invalid):
-    - {"subject":"grasper","action":"grasp","object":"cystic_duct"}  # wrong keys
-    - {"instrument":"grasper","verb":"grasp","target":"cystic_duct"}  # missing confidence
-    - {"instrument":"grasper","verb":"grasp","target":"cystic_duct"}  # missing confidence
-  multiframe_mask_overlay: |
-    YOUR TASK: Identify instrument-verb-target triplets that are ACTIVE at timestep t = {timestep}.
-    
-    ⚠️ MANDATORY CONFIDENCE VARIANCE REQUIREMENT ⚠️
-    DO NOT output the same confidence value repeatedly!
-    
-    ❌ UNACCEPTABLE: [0.92, 0.92] or [0.73, 0.73, 0.73]
-    ✅ ACCEPTABLE: [0.94, 0.71, 0.48] or [0.91, 0.62]
-    
-    CONFIDENCE TIER SYSTEM (assess each triplet independently):
-    Tier 1 (0.90-0.95): Triplet clearly active at t AND temporal context strongly confirms continuity
-    Tier 2 (0.70-0.80): Active at t BUT temporal context shows action starting/ending OR minor discontinuity
-    Tier 3 (0.50-0.65): Likely active at t BUT temporal context ambiguous OR action inferred from nearby frames
-    Tier 4 (0.30-0.45): Uncertain at exact timestep t BUT temporal pattern suggests plausible
-    Tier 5 (0.10-0.25): Speculative based on temporal context OR visible before/after but unclear at t
-    
-    CRITICAL TEMPORAL FOCUS:
-    - Evaluate ONLY timestep t. Other frames are context only.
-    - If an instrument/verb/target is not active at t, do not include it even if it appears before/after.
-    - REASON ABOUT COMBINATIONS: Ensure instrument, verb, and target form a consistent action at t.
-    - IMPORTANT: Values for "instrument", "verb", and "target" MUST be STRING LABELS from VALID CATEGORIES below. Never output numeric IDs
-    
-    VALID CATEGORIES:
-    - instrument: ["grasper", "bipolar", "hook", "scissors", "clipper", "irrigator"]
-    - verb: ["grasp", "retract", "dissect", "coagulate", "clip", "cut", "aspirate", "irrigate", "pack", "null_verb"]
-    - target: ["gallbladder", "cystic_plate", "cystic_duct", "cystic_artery", "cystic_pedicle", "blood_vessel", "fluid", "abdominal_wall_cavity", "liver", "adhesion", "omentum", "peritoneum", "gut", "specimen_bag", "null_target"]
-    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float>}, ...]}
-
-    OUTPUT CONSTRAINTS:
-    You may briefly reason first. Then, on a new line at the end, output ONLY the final JSON object.
-    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float 0.0-1.0>}, ...]}
-    - Keys MUST be exactly: instrument, verb, target, confidence. Values for I/V/T MUST be lowercase strings from VALID CATEGORIES.
-    - confidence MUST be a float from the tier ranges above, with variance between predictions
-    - Order triplets by confidence (highest first)
-    - Return {"triplets": []} if no triplets are visible
-    - Wrap ONLY the JSON object in a single ```json fenced block, or return the bare JSON. No text outside the JSON.
-    EXAMPLES (valid):
-    - ```json
-      {"triplets": []}
-      ```
-    - ```json
-      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct","confidence":0.95}]}
-      ```
-    EXAMPLES (invalid):
-    - {"subject":"grasper","action":"grasp","object":"cystic_duct"}  # wrong keys
-    - {"instrument":"grasper","verb":"grasp","target":"cystic_duct"}  # missing confidence
-  static_descriptors: |
-    You are given a static scene with descriptors.
-    YOUR TASK: Identify instrument-verb-target triplets that are CURRENTLY ACTIVE and CLEARLY VISIBLE in this scene.
-    
-    ⚠️ MANDATORY CONFIDENCE VARIANCE ⚠️
-    Different descriptors have different clarity → Use different confidence values!
-    ❌ UNACCEPTABLE: [0.92, 0.92] ✅ ACCEPTABLE: [0.93, 0.68, 0.44]
-    
-    CONFIDENCE TIER SYSTEM (assess each triplet independently):
-    Tier 1 (0.90-0.95): Descriptors unambiguously describe all components AND action explicitly indicated
-    Tier 2 (0.70-0.80): Descriptors clearly identify components BUT action inferred from spatial relationships
-    Tier 3 (0.50-0.65): Descriptors partially match components OR action inferred from typical workflow
-    Tier 4 (0.30-0.45): Descriptors suggest multiple possible triplets OR incomplete info but plausible
-    Tier 5 (0.10-0.25): Descriptors provide minimal evidence OR highly speculative interpretation
-    
-    CRITICAL RULES:
-    - REASON ABOUT COMBINATIONS: Ensure instrument, verb, and target form a consistent action
-    - IMPORTANT: Values for "instrument", "verb", and "target" MUST be STRING LABELS from VALID CATEGORIES below. Never output numeric IDs
-    
-    VALID CATEGORIES:
-    - instrument: ["grasper", "bipolar", "hook", "scissors", "clipper", "irrigator"]
-    - verb: ["grasp", "retract", "dissect", "coagulate", "clip", "cut", "aspirate", "irrigate", "pack", "null_verb"]
-    - target: ["gallbladder", "cystic_plate", "cystic_duct", "cystic_artery", "cystic_pedicle", "blood_vessel", "fluid", "abdominal_wall_cavity", "liver", "adhesion", "omentum", "peritoneum", "gut", "specimen_bag", "null_target"]
-    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float>}, ...]}
-
-    OUTPUT CONSTRAINTS:
-    You may briefly reason first. Then, on a new line at the end, output ONLY the final JSON object.
-    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float 0.0-1.0>}, ...]}
-    - Keys MUST be exactly: instrument, verb, target, confidence. Values for I/V/T MUST be lowercase strings from VALID CATEGORIES.
-    - confidence MUST be a float from the tier ranges above, with variance between predictions
-    - Order triplets by confidence (highest first)
-    - Select the most plausible triplet(s) supported by the graph evidence
-    - Wrap ONLY the JSON object in a single ```json fenced block, or return the bare JSON. No text outside the JSON.
-    EXAMPLES (valid):
-    - ```json
-      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct","confidence":0.95}]}
-      ```
-    EXAMPLES (invalid):
-    - {"subject":"grasper","action":"grasp","object":"cystic_duct"}  # wrong keys
-    - {"instrument":"grasper","verb":"grasp","target":"cystic_duct"}  # missing confidence
-  static_graph: |
-    You are given a static scene graph.
-    YOUR TASK: Identify instrument-verb-target triplets that are CURRENTLY ACTIVE and CLEARLY VISIBLE in this graph.
-    
-    ⚠️ MANDATORY CONFIDENCE VARIANCE ⚠️
-    Different edges have different overlap scores → Use different confidence values!
-    ❌ UNACCEPTABLE: [0.92, 0.92] ✅ ACCEPTABLE: [0.93, 0.71, 0.49]
-    
-    CONFIDENCE TIER SYSTEM (assess each triplet independently):
-    Tier 1 (0.90-0.95): Strong edge connection (overlap>0.7) AND descriptors unambiguously identify triplet components
-    Tier 2 (0.70-0.80): Moderate edge connection (overlap 0.4-0.7) OR descriptors clearly match but action inferred from spatial proximity
-    Tier 3 (0.50-0.65): Weak edge connection (overlap<0.4) OR descriptors partially ambiguous but graph structure supports interpretation
-    Tier 4 (0.30-0.45): No direct edge BUT close centroid distance suggests interaction OR descriptors allow multiple interpretations
-    Tier 5 (0.10-0.25): Minimal graph evidence OR highly speculative based on surgical context alone
-    
-    VARIANCE REQUIREMENTS:
-    - NEVER assign the same confidence to all triplets in a single response
-    - If predicting multiple triplets, they MUST span at least 2 different tiers unless only 1 triplet is predicted
-    - Use the FULL range within each tier (e.g., use 0.92, 0.73, 0.54, not just 0.95, 0.75, 0.55)
-    
-    VALID CATEGORIES:
-    - instrument: ["grasper", "bipolar", "hook", "scissors", "clipper", "irrigator"]
-    - verb: ["grasp", "retract", "dissect", "coagulate", "clip", "cut", "aspirate", "irrigate", "pack", "null_verb"]
-    - target: ["gallbladder", "cystic_plate", "cystic_duct", "cystic_artery", "cystic_pedicle", "blood_vessel", "fluid", "abdominal_wall_cavity", "liver", "adhesion", "omentum", "peritoneum", "gut", "specimen_bag", "null_target"]
-    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float>}, ...]}
-
-    OUTPUT CONSTRAINTS:
-    You may briefly reason first. Then, on a new line at the end, output ONLY the final JSON object.
-    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float 0.0-1.0>}, ...]}
-    - Keys MUST be exactly: instrument, verb, target, confidence. Values for I/V/T MUST be lowercase strings from VALID CATEGORIES.
-    - confidence MUST be a float from the tier ranges above, with variance between predictions
-    - Order triplets by confidence (highest first)
-    - Select the most plausible triplet(s) supported by the graph evidence
-    - Wrap ONLY the JSON object in a single ```json fenced block, or return the bare JSON. No text outside the JSON.
-    EXAMPLES (valid):
-    - ```json
-      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct","confidence":0.95}]}
-      ```
-    EXAMPLES (invalid):
-    - {"subject":"grasper","action":"grasp","object":"cystic_duct"}  # wrong keys
-    - {"instrument":"grasper","verb":"grasp","target":"cystic_duct"}  # missing confidence
-  dynamic_descriptors: |
-    You are given a dynamic scene with descriptors over time.
-    YOUR TASK: Determine which instrument-verb-target triplets are active using descriptors. Answer ONLY for the specified timestep t, other timesteps are context only.
-    
-    ⚠️ MANDATORY CONFIDENCE VARIANCE ⚠️
-    Different descriptors at t have different clarity → Use different confidence values!
-    ❌ UNACCEPTABLE: [0.92, 0.92] ✅ ACCEPTABLE: [0.93, 0.68, 0.42]
-    
-    CONFIDENCE TIER SYSTEM (assess each triplet independently):
-    Tier 1 (0.90-0.95): Descriptors at t unambiguously identify triplet AND temporal evolution shows clear continuity
-    Tier 2 (0.70-0.80): Descriptors at t clearly match triplet BUT temporal context shows action transition
-    Tier 3 (0.50-0.65): Descriptors at t partially match OR action strongly inferred from temporal trajectory
-    Tier 4 (0.30-0.45): Descriptors at t ambiguous OR temporal context suggests action but descriptors don't confirm
-    Tier 5 (0.10-0.25): Minimal descriptor evidence at t OR highly speculative based on temporal pattern
-    
-    TIMESTEPS:
-    - Evaluate ONLY the specified timestep t.
-    - REASON ABOUT COMBINATIONS: Ensure instrument, verb, and target form a consistent action at t per the temporal scene evidence
-    
-    VALID CATEGORIES:
-    - instrument: ["grasper", "bipolar", "hook", "scissors", "clipper", "irrigator"]
-    - verb: ["grasp", "retract", "dissect", "coagulate", "clip", "cut", "aspirate", "irrigate", "pack", "null_verb"]
-    - target: ["gallbladder", "cystic_plate", "cystic_duct", "cystic_artery", "cystic_pedicle", "blood_vessel", "fluid", "abdominal_wall_cavity", "liver", "adhesion", "omentum", "peritoneum", "gut", "specimen_bag", "null_target"]
-    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float>}, ...]}
-
-    OUTPUT CONSTRAINTS:
-    You may briefly reason first. Then, on a new line at the end, output ONLY the final JSON object.
-    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float 0.0-1.0>}, ...]}
-    - Keys MUST be exactly: instrument, verb, target, confidence. Values for I/V/T MUST be lowercase strings from VALID CATEGORIES.
-    - confidence MUST be a float from the tier ranges above, with variance between predictions
-    - No extra fields; no IDs; no nested objects; if unsure, select the most plausible triplet(s) supported by temporal scene evidence; avoid empty unless no instrument-action-target is present.
-    - Wrap ONLY the JSON object in a single ```json fenced block, or return the bare JSON. No text outside the JSON.
-    EXAMPLES (valid):
-    - ```json
-      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct","confidence":0.95}]}
-      ```
-    EXAMPLES (invalid):
-    - {"subject":"grasper","action":"grasp","object":"cystic_duct"}  # wrong keys
-    - {"instrument":"grasper","verb":"grasp","target":"cystic_duct"}  # missing confidence
-  dynamic_graph: |
-    You are given a dynamic scene graph over time.
-    YOUR TASK: Evaluate ONLY timestep t = {timestep}. Use the temporal evolution to disambiguate, but output triplets active at t.
-    
-    ⚠️ MANDATORY CONFIDENCE VARIANCE ⚠️
-    Different edges at t have different overlap scores → Use different confidence values!
-    ❌ UNACCEPTABLE: [0.92, 0.92] ✅ ACCEPTABLE: [0.94, 0.72, 0.51]
-    
-    CONFIDENCE TIER SYSTEM (assess each triplet independently):
-    Tier 1 (0.90-0.95): Strong edge at t (overlap>0.7) AND descriptors unambiguous AND temporal trajectory confirms sustained action
-    Tier 2 (0.70-0.80): Moderate edge at t (overlap 0.4-0.7) OR temporal context shows action starting/ending at t
-    Tier 3 (0.50-0.65): Weak edge at t (overlap<0.4) BUT temporal pattern strongly suggests interaction OR descriptors partially ambiguous
-    Tier 4 (0.30-0.45): No direct edge at t BUT close centroids AND temporal evolution suggests transient interaction
-    Tier 5 (0.10-0.25): Minimal graph evidence at t OR speculative based on temporal trends without strong structural support
-    
-    VARIANCE REQUIREMENTS:
-    - NEVER assign the same confidence to all triplets in a single response
-    - If predicting multiple triplets, they MUST span at least 2 different tiers unless only 1 triplet is predicted
-    - Use the FULL range within each tier (e.g., use 0.92, 0.73, 0.54, not just 0.95, 0.75, 0.55)
-    - Consider MULTIPLE GROUND TRUTH possibilities: if evidence supports multiple valid triplet interpretations, assign higher confidence to most supported and lower to alternatives
-    
-    VALID CATEGORIES:
-    - instrument: ["grasper", "bipolar", "hook", "scissors", "clipper", "irrigator"]
-    - verb: ["grasp", "retract", "dissect", "coagulate", "clip", "cut", "aspirate", "irrigate", "pack", "null_verb"]
-    - target: ["gallbladder", "cystic_plate", "cystic_duct", "cystic_artery", "cystic_pedicle", "blood_vessel", "fluid", "abdominal_wall_cavity", "liver", "adhesion", "omentum", "peritoneum", "gut", "specimen_bag", "null_target"]
-    ANSWER FORMAT: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float>}, ...]}
-
-    OUTPUT CONSTRAINTS:
-    You may briefly reason first. Then, on a new line at the end, output ONLY the final JSON object.
-    - JSON OBJECT ONLY with this schema: {"triplets": [{"instrument": "<string>", "verb": "<string>", "target": "<string>", "confidence": <float 0.0-1.0>}, ...]}
-    - Keys MUST be exactly: instrument, verb, target, confidence. Values for I/V/T MUST be lowercase strings from VALID CATEGORIES.
-    - confidence MUST be a float from the tier ranges above, with variance between predictions
-    - No extra fields; no IDs; no nested objects; if unsure, select the most plausible triplet(s) supported by temporal graph evidence; avoid empty unless no instrument-action-target is present.
-    - Wrap ONLY the JSON object in a single ```json fenced block, or return the bare JSON. No text outside the JSON.
-    EXAMPLES (valid):
-    - ```json
-      {"triplets": [{"instrument":"grasper","verb":"grasp","target":"cystic_duct","confidence":0.95}]}
-      ```
-    EXAMPLES (invalid):
-    - {"subject":"grasper","action":"grasp","object":"cystic_duct"}  # wrong keys
-    - {"instrument":"grasper","verb":"grasp","target":"cystic_duct"}  # missing confidence
-
-
+graph_agent_dynamic_prompt_template: |
+  Identify all active surgical triplets (instrument-verb-target) at timestep t={timestep}.
+  
+  You can explore the full temporal scene graph (t=0 to t=T-1).
+  Use temporal tools to understand action evolution, but output triplets ONLY for t={timestep}.
+  
+  Valid categories:
+  - instruments: grasper, bipolar, hook, scissors, clipper, irrigator
+  - verbs: grasp, retract, dissect, coagulate, clip, cut, aspirate, irrigate, pack, null_verb
+  - targets: gallbladder, cystic_plate, cystic_duct, cystic_artery, cystic_pedicle, blood_vessel, fluid, abdominal_wall_cavity, liver, adhesion, omentum, peritoneum, gut, specimen_bag, null_target
+  
+  Final output format: {{"triplets": [{{"instrument": "<str>", "verb": "<str>", "target": "<str>", "confidence": <float>}}, ...]}}
+  
+  Wrap JSON in ```json fenced block.

@@ -1,17 +1,17 @@
 checkpoint_subdir: autoencoder
-latent_patch_feat_subdir: qwen_patch_features_dim3
-latent_instance_feat_subdir: qwen_instance_features_dim3
-latent_cat_feat_subdir: qwen_cat_features_dim6
+latent_patch_feat_subdir: qwen_patch_features_dim3_global
+latent_instance_feat_subdir: qwen_instance_features_dim3_global
+latent_cat_feat_subdir: qwen_cat_features_dim6_global
 
-epochs: 100
+epochs: 200
 lr: 1e-4
-batch_size: 256
+batch_size: 8192
 latent_dim: 3
-full_dim: 3584
+full_dim: 16384  # 4096 * 4 (main + 3 deepstack layers concatenated)
 
 patch_feat_subdir: ${feature_extraction.patch_feat_subdir}
 instance_feat_subdir: ${feature_extraction.instance_feat_subdir}
 
 # Global autoencoder mode: train one AE across all clips instead of per-clip
-global_mode: false
+global_mode: true
 global_checkpoint_dir: global_autoencoder

@@ -16,9 +16,8 @@ from autoencoder.model_qwen import QwenAutoencoder
 
 
 def train(
-    clip_path: str,
-    checkpoint_subdir: str,
-    lf_dir_names: List[str] = ['qwen_patch_features', 'qwen_instance_features'],
+    data_dirs: List[Path],
+    checkpoint_dir: Path,
     epochs: int = 100,
     lr: float = 1e-4,
     batch_size: int = 256,
@@ -29,14 +28,8 @@ def train(
 ) -> None:
     """Train Qwen feature autoencoder.
 
-    Parameters mirror the command-line options so this can be called programmatically.
-    Unused parameters (e.g., cos_weight, eval_after) are included for API compatibility.
     """
-    data_dirs = [
-        Path(clip_path) / i for i in lf_dir_names
-    ]
-    ae_dir = Path(clip_path) / checkpoint_subdir
-    ae_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     dataset = Autoencoder_dataset(data_dirs)
     train_size = int(0.9 * len(dataset))
@@ -63,7 +56,7 @@ def train(
 
     model = QwenAutoencoder(input_dim=full_dim, latent_dim=latent_dim).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-    tb = SummaryWriter(ae_dir)
+    tb = SummaryWriter(checkpoint_dir)
 
     global_step = 0
     best_val = float('inf')
@@ -97,10 +90,10 @@ def train(
         tb.add_scalar('val/loss', val_loss, epoch)
         if val_loss < best_val:
             best_val = val_loss
-            torch.save(model.state_dict(), ae_dir / 'best_ckpt.pth')
+            torch.save(model.state_dict(), checkpoint_dir / 'best_ckpt.pth')
 
         if (epoch + 1) % 10 == 0:
-            torch.save(model.state_dict(), ae_dir / f"{epoch+1}_ckpt.pth")
+            torch.save(model.state_dict(), checkpoint_dir / f"{epoch+1}_ckpt.pth")
 
 
 def main() -> None:

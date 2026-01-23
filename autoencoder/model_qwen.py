@@ -22,9 +22,6 @@ class QwenAutoencoder(nn.Module):
 
     def __init__(self, input_dim: int = 3584, latent_dim: int = 3) -> None:
         super().__init__()
-        if input_dim != 3584 or latent_dim != 256:
-            # Still build generically, but warn in case of accidental mismatch
-            pass
 
         # Encoder with BN + GeLU between linear layers (except after final layer)
         encoder_layers = [
