@@ -244,8 +244,9 @@ def merge_instances_across_views(
         union(i, j)
     
     # Assign merged IDs based on connected components
+    # Use 0-indexed IDs for contiguous instance numbering (-1 = background, 0 to N for instances)
     component_to_merged_id = {}
-    next_merged_id = 1
+    next_merged_id = 0
     
     for i in range(n_instances):
         component = find(i)
@@ -488,7 +489,7 @@ def process_clip_cotracker(clip: DictConfig, cfg: DictConfig):
         containment_radius=cfg.preprocessing.instance_merge_containment_radius,
     )
     
-    logger.info(f"Merge complete: {merged_instance_ids.shape[0]} Gaussians, {len(np.unique(merged_instance_ids[merged_instance_ids > 0]))} unique instances (excluding background)")
+    logger.info(f"Merge complete: {merged_instance_ids.shape[0]} Gaussians, {len(np.unique(merged_instance_ids[merged_instance_ids >= 0]))} unique instances (excluding background)")
     
     # Save merged instance IDs (one ID per Gaussian, joint for all views)
     merged_path = cotracker_dir / "merged_instance_ids.npy"

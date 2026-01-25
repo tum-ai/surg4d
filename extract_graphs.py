@@ -348,6 +348,26 @@ def spectral_cluster_gaussians(gaussians: GaussianModel, cfg: DictConfig):
     return clusters
 
 
+def load_precomputed_instance_clusters(clip: DictConfig, cfg: DictConfig) -> np.ndarray:
+    """Load precomputed merged instance assignments from CoTracker preprocessing.
+    
+    Args:
+        clip: Clip configuration
+        cfg: Full hydra configuration
+        
+    Returns:
+        clusters: (N_gaussians,) array of instance IDs, -1 for background/unassigned
+    """
+    clip_dir = Path(cfg.preprocessed_root) / clip.name
+    merged_ids_path = clip_dir / "cotracker" / "merged_instance_ids.npy"
+    
+    clusters = np.load(merged_ids_path)
+    logger.info(f"Loaded precomputed instance clusters from {merged_ids_path}")
+    logger.info(f"  {len(np.unique(clusters[clusters >= 0]))} unique instances, {(clusters < 0).sum()} background Gaussians")
+    
+    return clusters
+
+
 def filter_clusters(clusters, cfg: DictConfig):
     i = 0
     for cluster_id in np.unique(clusters):
@@ -913,13 +933,17 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
         clusters = cluster_gaussians(gaussians, cfg=cfg)
     elif cfg.graph_extraction.cluster_method == "spectral":
         clusters = spectral_cluster_gaussians(gaussians, cfg=cfg)
+    elif cfg.graph_extraction.cluster_method == "precomputed":
+        clusters = load_precomputed_instance_clusters(clip, cfg)
     else:
         raise ValueError(f"Invalid cluster method: {cfg.graph_extraction.cluster_method}")
     logger.info(f"Clustered {len(np.unique(clusters))} clusters")
 
-    logger.info(f"Filtering clusters...")
-    filter_clusters(clusters, cfg)
-    logger.info(f"Filtered {len(np.unique(clusters))} clusters")
+    # Skip cluster filtering for precomputed - already filtered during preprocessing
+    if cfg.graph_extraction.cluster_method != "precomputed":
+        logger.info(f"Filtering clusters...")
+        filter_clusters(clusters, cfg)
+        logger.info(f"Filtered {len(np.unique(clusters))} clusters")
 
     # # Optional: mask-based cluster filtering (coverage or IoU)
     # mf = getattr(cfg.graph_extraction, "mask_filtering", None)
