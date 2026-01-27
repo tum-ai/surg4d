@@ -6,6 +6,8 @@ use_discrete_lang_f: ${splat.use_discrete_lang_f}
 config_path: ${splat.config_path}
 dynamic_language: ${splat.dynamic_language}
 latent_cat_feat_subdir: ${splat.latent_cat_feat_subdir}
+num_lang_features: ${splat.num_lang_features}
+lang_feature_dim: ${splat.lang_feature_dim}
 load_stage: fine-lang
 iteration: -1
 
@@ -18,7 +20,7 @@ global_autoencoder_checkpoint_dir: ${autoencoder.global_checkpoint_dir}
 
 # gaussian filtering before clustering
 # relevance is defined as opacity * ||language_feature||_2 in latent space
-relevance_threshold: 0.10
+relevance_threshold: 0.00
 
 # clustering
 cluster_method: hdbscan # one of: [spectral, hdbscan]

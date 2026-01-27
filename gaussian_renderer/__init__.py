@@ -91,7 +91,17 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         # import pdb; pdb.set_trace()
         language_feature_precomp = pc.get_language_feature
         if os.getenv("nonormalized",'f') == 'f':
-            language_feature_precomp = language_feature_precomp/ (language_feature_precomp.norm(dim=-1, keepdim=True) + 1e-9)
+            # Normalize each language feature independently
+            num_lang_features = int(os.getenv("num_lang_features", 2))
+            lang_feature_dim = int(os.getenv("lang_feature_dim", 3))
+            normalized_features = []
+            for i in range(num_lang_features):
+                start_idx = i * lang_feature_dim
+                end_idx = start_idx + lang_feature_dim
+                feat = language_feature_precomp[:, start_idx:end_idx]
+                feat = feat / (feat.norm(dim=-1, keepdim=True) + 1e-9)
+                normalized_features.append(feat)
+            language_feature_precomp = torch.cat(normalized_features, dim=-1)
         # language_feature_precomp = torch.sigmoid(language_feature_precomp)
     else:
         # language_feature_precomp = torch.zeros((1,), dtype=opacity.dtype, device=opacity.device)
@@ -350,7 +360,17 @@ def render_opacity(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.
         # import pdb; pdb.set_trace()
         language_feature_precomp = pc.get_language_feature
         if os.getenv("nonormalized",'f') == 'f':
-            language_feature_precomp = language_feature_precomp/ (language_feature_precomp.norm(dim=-1, keepdim=True) + 1e-9)
+            # Normalize each language feature independently
+            num_lang_features = int(os.getenv("num_lang_features", 2))
+            lang_feature_dim = int(os.getenv("lang_feature_dim", 3))
+            normalized_features = []
+            for i in range(num_lang_features):
+                start_idx = i * lang_feature_dim
+                end_idx = start_idx + lang_feature_dim
+                feat = language_feature_precomp[:, start_idx:end_idx]
+                feat = feat / (feat.norm(dim=-1, keepdim=True) + 1e-9)
+                normalized_features.append(feat)
+            language_feature_precomp = torch.cat(normalized_features, dim=-1)
         # language_feature_precomp = torch.sigmoid(language_feature_precomp)
     else:
         # language_feature_precomp = torch.zeros((1,), dtype=opacity.dtype, device=opacity.device)

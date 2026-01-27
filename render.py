@@ -52,7 +52,7 @@ def multithread_write(image_list, path):
 
 to8b = lambda x: (255 * np.clip(x.cpu().numpy(), 0, 1)).astype(np.uint8)
 to8b_np = lambda x: (255 * x).astype(np.uint8)
-from typing import Literal
+from typing import Literal, Optional
 
 
 def pca_compress(rendering):
@@ -82,18 +82,36 @@ def render_set(
     pipeline,
     background,
     cam_type,
-    output_channel: Literal["rgb", "lang"],
+    output_channel: Literal["rgb", "lang", "lang_0", "lang_1"],
     lf_path,
     data_type,
     args,
+    lang_feature_idx: Optional[int] = None,  # index of language feature to render (0=patch, 1=instance, etc.)
 ):
+    """
+    Render the scene for a specific output channel.
+    
+    Args:
+        output_channel: "rgb", "lang" (all features), or "lang_0", "lang_1" etc for specific features
+        lang_feature_idx: If output_channel starts with "lang_", this specifies which feature (0-indexed)
+    """
     ONLY_EVAL = os.getenv("ONLY_EVAL", "f")
     if ONLY_EVAL == "t":
         print("Only eval mode, no load ground truth feature.")
+    
+    # Determine output channel key for render function
     if output_channel == "rgb":
         output_channel_key = "render"
     else:
         output_channel_key = "language_feature_image"
+    
+    # Parse lang_feature_idx from output_channel if not provided
+    if output_channel.startswith("lang_") and output_channel != "lang":
+        try:
+            lang_feature_idx = int(output_channel.split("_")[1])
+        except (IndexError, ValueError):
+            lang_feature_idx = None
+    
     save_name = f"{name}_{output_channel}"
     render_path = os.path.join(
         model_path, save_name, "ours_{}".format(iteration), "renders"
@@ -153,16 +171,28 @@ def render_set(
                 gt_nonorm_list.append(gt)
                 if data_type != "dynerf" or name != "video":
                     gt = (gt + 1.0) / 2
-            if rendering.shape[0] > 3:
-                # Rendering and comparing instance features
+            
+            # Extract specific language feature if requested
+            lang_feature_dim = int(os.getenv("lang_feature_dim", 3))
+            num_lang_features = int(os.getenv("num_lang_features", 2))
+            
+            if lang_feature_idx is not None and 0 <= lang_feature_idx < num_lang_features:
+                # Extract specific language feature by index
+                start_idx = lang_feature_idx * lang_feature_dim
+                end_idx = start_idx + lang_feature_dim
+                rendering = rendering[start_idx:end_idx, :, :]
+                if gt is not None and ONLY_EVAL == "f":
+                    gt = gt[start_idx:end_idx, :, :]
+            elif rendering.shape[0] > 3:
+                # Legacy behavior: take last 3 channels (instance features)
                 rendering = rendering[-3:, :, :]
                 if ONLY_EVAL == "t":
                     gt = None
                 else:
-                    gt = gt[-3:, :, :]
+                    gt = gt[-3:, :, :] if gt is not None else None
         gt_list.append(gt)
         # Normalize rendering from [-1, 1] to [0, 1] for visualization (same as GT)
-        if output_channel == "lang":
+        if output_channel.startswith("lang"):
             rendering_viz = (rendering + 1.0) / 2
         else:
             rendering_viz = rendering
@@ -237,7 +267,7 @@ def render_sets(
     skip_train: bool,
     skip_test: bool,
     skip_video: bool,
-    mode: Literal["rgb", "lang"],
+    mode: str,  # "rgb", "lang", "lang_0", "lang_1", or "lang_all" for all features independently
     args,
 ):
     with torch.no_grad():
@@ -253,52 +283,61 @@ def render_sets(
         bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-        if not skip_train:
-            render_set(
-                dataset.model_path,
-                "train",
-                scene.loaded_iter,
-                scene.getTrainCameras(),
-                gaussians,
-                pipeline,
-                background,
-                cam_type,
-                mode,
-                dataset.lf_path,
-                scene.dataset_type,
-                args,
-            )
-        if not skip_video:
-            render_set(
-                dataset.model_path,
-                "video",
-                scene.loaded_iter,
-                scene.getVideoCameras(),
-                gaussians,
-                pipeline,
-                background,
-                cam_type,
-                mode,
-                dataset.lf_path,
-                scene.dataset_type,
-                args,
-            )
+        # Determine which modes to render
+        if mode == "lang_all":
+            # Render each language feature independently
+            num_lang_features = int(os.getenv("num_lang_features", 2))
+            modes_to_render = [f"lang_{i}" for i in range(num_lang_features)]
+        else:
+            modes_to_render = [mode]
 
-        if not skip_test:
-            render_set(
-                dataset.model_path,
-                "test",
-                scene.loaded_iter,
-                scene.getTestCameras(),
-                gaussians,
-                pipeline,
-                background,
-                cam_type,
-                mode,
-                dataset.lf_path,
-                scene.dataset_type,
-                args,
-            )
+        for render_mode in modes_to_render:
+            if not skip_train:
+                render_set(
+                    dataset.model_path,
+                    "train",
+                    scene.loaded_iter,
+                    scene.getTrainCameras(),
+                    gaussians,
+                    pipeline,
+                    background,
+                    cam_type,
+                    render_mode,
+                    dataset.lf_path,
+                    scene.dataset_type,
+                    args,
+                )
+            if not skip_video:
+                render_set(
+                    dataset.model_path,
+                    "video",
+                    scene.loaded_iter,
+                    scene.getVideoCameras(),
+                    gaussians,
+                    pipeline,
+                    background,
+                    cam_type,
+                    render_mode,
+                    dataset.lf_path,
+                    scene.dataset_type,
+                    args,
+                )
+
+            if not skip_test:
+                render_set(
+                    dataset.model_path,
+                    "test",
+                    scene.loaded_iter,
+                    scene.getTestCameras(),
+                    gaussians,
+                    pipeline,
+                    background,
+                    cam_type,
+                    render_mode,
+                    dataset.lf_path,
+                    scene.dataset_type,
+                    args,
+                )
 
         # if not args.skip_new_view:
         #     render_new_view_set(dataset.model_path, "video", scene.loaded_iter, scene.getVideoCameras(), gaussians, pipeline, background,cam_type,mode,dataset.lf_path,scene.dataset_type,args)
@@ -317,7 +356,8 @@ if __name__ == "__main__":
     parser.add_argument("--skip_video", action="store_true")
     # parser.add_argument("--skip_new_view", action="store_true")
     parser.add_argument("--configs", type=str)
-    parser.add_argument("--mode", choices=["rgb", "lang"], default="rgb")
+    parser.add_argument("--mode", type=str, default="rgb",
+                        help="Render mode: rgb, lang (all features), lang_0, lang_1, ..., or lang_all (renders each feature separately)")
     parser.add_argument("--novideo", type=int, default=0)
     parser.add_argument("--noimage", type=int, default=0)
     parser.add_argument("--nonpy", type=int, default=0)
