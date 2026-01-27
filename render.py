@@ -161,8 +161,13 @@ def render_set(
                 else:
                     gt = gt[-3:, :, :]
         gt_list.append(gt)
-        tosave_images_rendering.append(rendering)
-        render_images.append(to8b(rendering).transpose(1, 2, 0))
+        # Normalize rendering from [-1, 1] to [0, 1] for visualization (same as GT)
+        if output_channel == "lang":
+            rendering_viz = (rendering + 1.0) / 2
+        else:
+            rendering_viz = rendering
+        tosave_images_rendering.append(rendering_viz)
+        render_images.append(to8b(rendering_viz).transpose(1, 2, 0))
 
         if data_type != "dynerf" and name == "video":
             if ONLY_EVAL == "f":
