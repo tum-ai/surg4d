@@ -1,10 +1,10 @@
 defaults:
-  - clips: final_dataset_first
+  - clips: final_dataset
   - preprocessing: qwen3
   - feature_extraction: qwen3
   - autoencoder: qwen3_global
   - splat: no_densify
-  - graph_extraction: precomputed_qwen3
+  - graph_extraction: vanilla_qwen3
   - eval: default
   - compute_metrics: default
   - _self_
@@ -14,16 +14,16 @@ defaults:
 skip_preprocessing: true
 skip_feature_extraction: true
 skip_autoencoder: true
-skip_splat: true
-skip_graph_extraction: true
+skip_splat: false
+skip_graph_extraction: false
 skip_eval: false
 skip_compute_metrics: false
 
 cholec80_root: data/cholec80
 cholecseg8k_root: data/cholecseg8k
 cholect50_root: data/cholect50
-preprocessed_root: data/preprocessed/qwen3_da3_subsampled_assigncluster
-output_root: output/qwen3_da3_cotracker
+preprocessed_root: data/preprocessed/qwen3_da3_subsampled
+output_root: output/qwen3_da3_newsplatting
 
 whole_pipeline_clips_sequentially: false
 
