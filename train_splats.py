@@ -26,6 +26,8 @@ def train_splat(clip: DictConfig, cfg: DictConfig):
     # Set up environment variables
     os.environ["language_feature_hiddendim"] = str(cfg.splat.language_feature_hiddendim)
     os.environ["use_discrete_lang_f"] = cfg.splat.use_discrete_lang_f
+    os.environ["num_lang_features"] = str(cfg.splat.num_lang_features)
+    os.environ["lang_feature_dim"] = str(cfg.splat.lang_feature_dim)
 
     # Experiment name is just the clip directory name
     exp_name = clip.name

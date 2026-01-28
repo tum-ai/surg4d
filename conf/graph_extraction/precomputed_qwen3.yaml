@@ -1,4 +1,4 @@
-graph_output_subdir: graph
+graph_output_subdir: graph_precomputed
 
 # gaussian model params
 language_feature_hiddendim: ${splat.language_feature_hiddendim}
@@ -20,37 +20,37 @@ global_autoencoder_checkpoint_dir: ${autoencoder.global_checkpoint_dir}
 
 # gaussian filtering before clustering
 # relevance is defined as opacity * ||language_feature||_2 in latent space
-relevance_threshold: 0.1
+relevance_threshold: 0.00
 
 # clustering
-cluster_method: hdbscan # one of: [spectral, hdbscan]
+cluster_method: precomputed # one of: [spectral, hdbscan, precomputed]
 
 # hdbscan clustering
 # "custom metric" does cos dist on lang part and l2 on pos part
 # "vanilla metric" concats both and does whatever metric is set
-custom_cluster_metric: false # ! does not run on camp due to too little RAM
-clustering_weights:
-  position: 1.0
-  instance: 2.0
-custom_metric_hdbscan_args:
-  metric: precomputed
-  min_cluster_size: 150
-  min_samples: 150
-  cluster_selection_method: leaf # "eom" is default
-vanilla_metric_hdbscan_args:
-  metric: euclidean
-  min_cluster_size: 150
-  min_samples: 150
-  cluster_selection_method: leaf # "eom" is default
+# custom_cluster_metric: false # ! does not run on camp due to too little RAM
+# clustering_weights:
+#   position: 1.0
+#   instance: 2.0
+# custom_metric_hdbscan_args:
+#   metric: precomputed
+#   min_cluster_size: 150
+#   min_samples: 150
+#   cluster_selection_method: leaf # "eom" is default
+# vanilla_metric_hdbscan_args:
+#   metric: euclidean
+#   min_cluster_size: 150
+#   min_samples: 150
+  # cluster_selection_method: leaf # "eom" is default
 
 # spectral clustering
-spectral_clustering:
-  knn_graph_k: 5
-  spectral_embedding_dim: 8
-  hdbscan_args:
-    metric: euclidean
-    min_cluster_size: 150
-    min_samples: 150
+# spectral_clustering:
+#   knn_graph_k: 5
+#   spectral_embedding_dim: 8
+#   hdbscan_args:
+#     metric: euclidean
+#     min_cluster_size: 150
+#     min_samples: 150
 
 # cluster filtering after clustering
 min_gaussians_per_cluster: 150
@@ -63,6 +63,7 @@ min_features_per_cluster: 4
 decode_batch_size: 1024
 
 # graph
+n_timesteps_filtering: 3
 n_timesteps: 20
 graph_edge_threshold: 0.05 # edge if bhattacharyya coefficient >= threshold
 

@@ -63,8 +63,27 @@ class Deformation(nn.Module):
         self.rotations_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 4))
         self.opacity_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 1))
         self.shs_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 16*3))
-        language_feature_hiddendim = int(os.getenv("language_feature_hiddendim",3))
         
+        # Multiple independent language feature heads
+        self.num_lang_features = int(os.getenv("num_lang_features", 2))  # default: patch + instance
+        self.lang_feature_dim = int(os.getenv("lang_feature_dim", 3))   # dimension of each feature
+        language_feature_hiddendim = int(os.getenv("language_feature_hiddendim", 6))  # total dim for backward compat
+        
+        # Create independent deformation head for each language feature
+        # Each head takes its own feature + time positional encoding as input
+        self.lang_deforms = nn.ModuleList([
+            nn.Sequential(
+                nn.ReLU(),
+                nn.Linear(self.args.timebase_pe*2+1+self.lang_feature_dim, self.W),
+                nn.ReLU(),
+                nn.Linear(self.W, self.W),
+                nn.ReLU(),
+                nn.Linear(self.W, self.lang_feature_dim)
+            )
+            for _ in range(self.num_lang_features)
+        ])
+        
+        # Legacy single head for backward compatibility (used with use_discrete_lang_f)
         self.lang_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.args.timebase_pe*2+1+language_feature_hiddendim,self.W),nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, language_feature_hiddendim))
         self.discrete_coff_generator = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, int(os.getenv("centers_num",3))))
         
@@ -76,14 +95,18 @@ class Deformation(nn.Module):
             self.rotations_alpha = nn.Parameter(torch.zeros(1))
             self.opacity_alpha = nn.Parameter(torch.zeros(1))
             self.shs_alpha = nn.Parameter(torch.zeros(1))
-            self.lang_alpha = nn.Parameter(torch.zeros(1))
+            # Independent alpha for each language feature
+            self.lang_alphas = nn.ParameterList([nn.Parameter(torch.zeros(1)) for _ in range(self.num_lang_features)])
+            self.lang_alpha = nn.Parameter(torch.zeros(1))  # legacy for discrete mode
         else:
             self.register_buffer('pos_alpha', torch.ones(1))
             self.register_buffer('scales_alpha', torch.ones(1))
             self.register_buffer('rotations_alpha', torch.ones(1))
             self.register_buffer('opacity_alpha', torch.ones(1))
             self.register_buffer('shs_alpha', torch.ones(1))
-            self.register_buffer('lang_alpha', torch.ones(1))
+            # Independent alpha for each language feature
+            self.lang_alphas = nn.ParameterList([nn.Parameter(torch.ones(1)) for _ in range(self.num_lang_features)])
+            self.register_buffer('lang_alpha', torch.ones(1))  # legacy for discrete mode
     def query_time(self, rays_pts_emb, scales_emb, rotations_emb, time_feature, time_emb):
 
         if self.no_grid:
@@ -171,6 +194,7 @@ class Deformation(nn.Module):
             shs = shs_emb*mask.unsqueeze(-1) + dshs
         
         if os.getenv('use_discrete_lang_f','f') == 't' and init_centers == False:
+            # Legacy discrete language feature mode (single head, full dim)
             lang_feature = lang_emb[:,:int(os.getenv("language_feature_hiddendim",3)*int(os.getenv("centers_num",3)))]
             lang_feature = lang_feature.view(lang_feature.shape[0], int(os.getenv("centers_num",3)), -1)
             lang_feature = lang_feature / (torch.norm(lang_feature, dim=-1, keepdim=True))
@@ -181,20 +205,47 @@ class Deformation(nn.Module):
         else:
             coff = None
             assert (init_centers and self.args.no_dlang)==False , " Dlang must be enabled when initialized centers"
-            language_dim = int(os.getenv("language_feature_hiddendim",3))
  
             if self.args.no_dlang:
-                lang_feature = lang_emb[:,:language_dim]
+                # No deformation: just pass through (but still normalize each feature independently)
+                lang_features_out = []
+                for i in range(self.num_lang_features):
+                    start_idx = i * self.lang_feature_dim
+                    end_idx = start_idx + self.lang_feature_dim
+                    feat = lang_emb[:, start_idx:end_idx]
+                    feat = feat / (feat.norm(dim=-1, keepdim=True) + 1e-9)
+                    lang_features_out.append(feat)
+                lang_feature = torch.cat(lang_features_out, dim=-1)
             else:
-                if os.getenv("use_tribute_dlang","f") == "t":
-                    dlang = self.lang_alpha * self.lang_deform(hidden)
-                else:
-                    dlang = self.lang_alpha * self.lang_deform(torch.concat((lang_emb,time_pos_emb),dim=1))
-                if os.getenv("no_resnet",'f') == 't':
-                    lang_feature = dlang
-                else:
-                    lang_feature = lang_emb[:,:language_dim]*mask + dlang
-                lang_feature = lang_feature/ (lang_feature.norm(dim=-1, keepdim=True) + 1e-9)
+                # Process each language feature independently through its own head
+                lang_features_out = []
+                for i in range(self.num_lang_features):
+                    start_idx = i * self.lang_feature_dim
+                    end_idx = start_idx + self.lang_feature_dim
+                    feat_in = lang_emb[:, start_idx:end_idx]
+                    
+                    if os.getenv("use_tribute_dlang","f") == "t":
+                        # Use hidden features only (no lang input to MLP)
+                        dlang_i = self.lang_alphas[i] * self.lang_deforms[i](
+                            torch.cat([torch.zeros_like(feat_in), time_pos_emb], dim=1)
+                        )
+                    else:
+                        # Use feature + time positional encoding as input
+                        dlang_i = self.lang_alphas[i] * self.lang_deforms[i](
+                            torch.cat([feat_in, time_pos_emb], dim=1)
+                        )
+                    
+                    if os.getenv("no_resnet",'f') == 't':
+                        feat_out = dlang_i
+                    else:
+                        feat_out = feat_in * mask + dlang_i
+                    
+                    # Normalize this feature independently
+                    feat_out = feat_out / (feat_out.norm(dim=-1, keepdim=True) + 1e-9)
+                    lang_features_out.append(feat_out)
+                
+                # Concatenate all features for output (for rasterizer compatibility)
+                lang_feature = torch.cat(lang_features_out, dim=-1)
 
         return pts, scales, rotations, opacity, shs, lang_feature, coff
     def get_mlp_parameters(self):

@@ -38,3 +38,7 @@ min_component_area: 5 # minimum area of a component to be considered an instance
 
 # CoTracker3 settings
 cotracker_grid_size: 32 # control point grid size (grid_size x grid_size)
+
+# Instance merging settings (across views)
+instance_merge_containment_threshold: 0.5 # minimum containment ratio to merge instances across views
+instance_merge_containment_radius: 1.5 # multiplier for avg neighbor distance to determine containment

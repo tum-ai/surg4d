@@ -67,6 +67,8 @@ def load_gaussian_model(
         cfg.graph_extraction.language_feature_hiddendim
     )
     os.environ["use_discrete_lang_f"] = cfg.graph_extraction.use_discrete_lang_f
+    os.environ["num_lang_features"] = str(cfg.graph_extraction.num_lang_features)
+    os.environ["lang_feature_dim"] = str(cfg.graph_extraction.lang_feature_dim)
 
     clip_dir = Path(cfg.preprocessed_root) / clip.name
     model_path = Path(cfg.output_root) / clip.name
@@ -213,11 +215,14 @@ def deform_at_timestep(gaussians: GaussianModel, timestep: float):
         timestep (float): The timestep to extract features at
 
     Returns:
-        tuple: (positions, language_patch, language_instance) as numpy arrays
+        tuple: (positions, language_features_list) as numpy arrays
             - positions: (N, 3)
-            - language_patch: (N, 3)
-            - language_instance: (N, 3)
+            - language_features_list: list of (N, lang_feature_dim) arrays, one per feature type
+              For backward compat with 2 features, returns (positions, lang_patch, lang_instance)
     """
+    num_lang_features = int(os.environ.get("num_lang_features", 2))
+    lang_feature_dim = int(os.environ.get("lang_feature_dim", 3))
+    
     with torch.no_grad():
         means3D = gaussians.get_xyz
         scales = gaussians._scaling
@@ -234,12 +239,19 @@ def deform_at_timestep(gaussians: GaussianModel, timestep: float):
             dtype=means3D.dtype,
         )
 
-        # Normalize language feature
-        lang = lang / (lang.norm(dim=-1, keepdim=True) + 1e-9)
+        # Normalize each language feature independently before deformation (matching renderer)
+        normalized_features = []
+        for i in range(num_lang_features):
+            start_idx = i * lang_feature_dim
+            end_idx = start_idx + lang_feature_dim
+            feat = lang[:, start_idx:end_idx]
+            feat = feat / (feat.norm(dim=-1, keepdim=True) + 1e-9)
+            normalized_features.append(feat)
+        lang_normalized = torch.cat(normalized_features, dim=-1)
 
         # Apply deformation to all Gaussians (same as renderer)
         means3D_final, _, _, _, _, lang_final, _ = gaussians._deformation(
-            means3D, scales, rotations, opacity, shs, lang, time
+            means3D, scales, rotations, opacity, shs, lang_normalized, time
         )
         
         # Replace positions for control-point-driven Gaussians with precomputed positions
@@ -263,13 +275,23 @@ def deform_at_timestep(gaussians: GaussianModel, timestep: float):
             means3D_final[gaussians._is_control_point_driven] = control_point_positions_full[gaussians._is_control_point_driven].detach()
 
         positions = means3D_final.detach().cpu().numpy()
-        lang_patch = lang_final[:, :3].detach().cpu().numpy()
-        lang_instance = lang_final[:, 3:].detach().cpu().numpy()
-        # Normalize with epsilon to prevent NaN from zero-norm vectors
-        lang_patch /= (np.linalg.norm(lang_patch, axis=-1, keepdims=True) + 1e-9)
-        lang_instance /= (np.linalg.norm(lang_instance, axis=-1, keepdims=True) + 1e-9)
+        
+        # Extract each language feature and normalize independently
+        # (deformation network already normalizes, but this ensures unit norm for decoder)
+        lang_features = []
+        for i in range(num_lang_features):
+            start_idx = i * lang_feature_dim
+            end_idx = start_idx + lang_feature_dim
+            feat = lang_final[:, start_idx:end_idx].detach().cpu().numpy()
+            # Normalize with epsilon to prevent NaN from zero-norm vectors
+            feat = feat / (np.linalg.norm(feat, axis=-1, keepdims=True) + 1e-9)
+            lang_features.append(feat)
 
-    return positions, lang_patch, lang_instance
+    # For backward compatibility with code expecting (positions, lang_patch, lang_instance)
+    if num_lang_features == 2:
+        return positions, lang_features[0], lang_features[1]
+    else:
+        return positions, *lang_features
 
 
 def cluster_distances(
@@ -345,6 +367,26 @@ def spectral_cluster_gaussians(gaussians: GaussianModel, cfg: DictConfig):
         spectral_embedding_dim=cfg.graph_extraction.spectral_clustering.spectral_embedding_dim,
         hdbscan_args=cfg.graph_extraction.spectral_clustering.hdbscan_args,
     )
+    return clusters
+
+
+def load_precomputed_instance_clusters(clip: DictConfig, cfg: DictConfig) -> np.ndarray:
+    """Load precomputed merged instance assignments from CoTracker preprocessing.
+    
+    Args:
+        clip: Clip configuration
+        cfg: Full hydra configuration
+        
+    Returns:
+        clusters: (N_gaussians,) array of instance IDs, -1 for background/unassigned
+    """
+    clip_dir = Path(cfg.preprocessed_root) / clip.name
+    merged_ids_path = clip_dir / "cotracker" / "merged_instance_ids.npy"
+    
+    clusters = np.load(merged_ids_path)
+    logger.info(f"Loaded precomputed instance clusters from {merged_ids_path}")
+    logger.info(f"  {len(np.unique(clusters[clusters >= 0]))} unique instances, {(clusters < 0).sum()} background Gaussians")
+    
     return clusters
 
 
@@ -913,13 +955,17 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
         clusters = cluster_gaussians(gaussians, cfg=cfg)
     elif cfg.graph_extraction.cluster_method == "spectral":
         clusters = spectral_cluster_gaussians(gaussians, cfg=cfg)
+    elif cfg.graph_extraction.cluster_method == "precomputed":
+        clusters = load_precomputed_instance_clusters(clip, cfg)
     else:
         raise ValueError(f"Invalid cluster method: {cfg.graph_extraction.cluster_method}")
     logger.info(f"Clustered {len(np.unique(clusters))} clusters")
 
-    logger.info(f"Filtering clusters...")
-    filter_clusters(clusters, cfg)
-    logger.info(f"Filtered {len(np.unique(clusters))} clusters")
+    # Skip cluster filtering for precomputed - already filtered during preprocessing
+    if cfg.graph_extraction.cluster_method != "precomputed":
+        logger.info(f"Filtering clusters...")
+        filter_clusters(clusters, cfg)
+        logger.info(f"Filtered {len(np.unique(clusters))} clusters")
 
     # # Optional: mask-based cluster filtering (coverage or IoU)
     # mf = getattr(cfg.graph_extraction, "mask_filtering", None)

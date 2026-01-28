@@ -436,6 +436,7 @@ def compute_gaussian_control_point_associations(
             - indices: (N_pixels, K) indices of associated control points
             - weights: (N_pixels, K) IDW weights
             - pixel_to_gaussian_map: (H, W) mapping from pixel to Gaussian index
+            - instance_ids: (N_pixels,) instance ID per Gaussian (-1 for background if no mask)
     """
     device = control_points_2d_init.device
     
@@ -602,6 +603,8 @@ def compute_gaussian_control_point_associations(
         y_coords_torch = torch.clamp(y_coords_torch, 0, H - 1)
         x_coords_torch = torch.clamp(x_coords_torch, 0, W - 1)
         pixel_instance_ids = instance_mask_torch[y_coords_torch, x_coords_torch]  # (N_pixels,)
+        # Store for returning
+        gaussian_instance_ids = pixel_instance_ids
         
         # Filter: only allow associations within same instance
         # Get instance IDs of K nearest control points for each pixel
@@ -627,6 +630,9 @@ def compute_gaussian_control_point_associations(
         sorted_distances, sorted_idx = torch.sort(distances, dim=1)
         indices = torch.gather(indices, 1, sorted_idx)
         distances = sorted_distances
+    else:
+        # No instance mask: assign all Gaussians to background (-1)
+        gaussian_instance_ids = torch.full((N_pixels,), -1, dtype=torch.long, device=device)
     
     # Compute IDW weights on GPU
     eps = 1e-8
@@ -660,5 +666,6 @@ def compute_gaussian_control_point_associations(
         "weights": weights_torch,  # (N_pixels, K)
         "pixel_to_gaussian_map": pixel_to_gaussian_map,  # (H_original, W_original)
         "valid_pixel_coords": pixel_coords_torch_final,  # (N_pixels, 2) in original image space
+        "instance_ids": gaussian_instance_ids,  # (N_pixels,) instance ID per Gaussian
     }
 

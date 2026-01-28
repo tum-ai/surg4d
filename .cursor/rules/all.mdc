@@ -11,3 +11,6 @@ alwaysApply: true
 - Never introduce default / fallback values for hydra config entries. Hydra must be single source of truth. Always assume config values you need exist and create them if possible.
 - We have a multistep pipeline in which each step only accesses config values from `clips` or its own step! If you need to access values from previous steps "wire them through" using hydra variable resolution.
 - Never import modules anywhere but at the top of the file!
+
+# Agent Rules
+- Don't write markdown reports if not explicitly asked for it.

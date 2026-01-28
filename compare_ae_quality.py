@@ -23,6 +23,9 @@ from llm.qwen_utils import (
 )
 from autoencoder.model_qwen import QwenAutoencoder
 
+# Random seed for reproducible permutation
+PERMUTATION_SEED = 42
+
 
 # ============================================================================
 # CONFIGURATION - Edit these values as needed
@@ -33,10 +36,10 @@ SYSTEM_PROMPT = "You are a helpful assistant."
 USER_PROMPT = "Describe what you see in detail. Use bullet points."
 
 # Output directory for results
-OUTPUT_DIR = "output/ae_global_vs_local"
+OUTPUT_DIR = "output/tmp_check_feats"
 
 # Preprocessed data root directory
-PREPROCESSED_ROOT = "data/preprocessed/qwen3_da3_subsampled"
+PREPROCESSED_ROOT = "data/preprocessed/qwen3_da3_subsampled_assigncluster"
 
 # Clip-specific autoencoder checkpoint subdirectory (relative to clip dir)
 CLIP_AE_CHECKPOINT_SUBDIR = "autoencoder_me"
@@ -101,12 +104,24 @@ def reconstruct_features(
         return reconstructed.cpu().numpy()
 
 
+def permute_features(features: np.ndarray, seed: int = PERMUTATION_SEED) -> np.ndarray:
+    """Randomly permute feature tokens along the first axis.
+    
+    This ablation tests whether positional encodings matter for custom vision features.
+    If the model relies on positional info, permuted features should produce worse/different outputs.
+    """
+    rng = np.random.default_rng(seed)
+    perm_indices = rng.permutation(features.shape[0])
+    return features[perm_indices]
+
+
 def generate_markdown_report(
     clip_name: str,
     mid_frame: Image.Image,
     mid_offset: int,
     mid_frame_num: int,
     gt_answer: str,
+    gt_permuted_answer: str,
     clip_ae_answer: str,
     global_ae_answer: str,
     output_path: Path,
@@ -130,6 +145,14 @@ def generate_markdown_report(
 # Ground Truth Features Answer
 
 {gt_answer}
+
+---
+
+# Ground Truth Features (Randomly Permuted) Answer
+
+*Ablation: tokens randomly shuffled to test if positional encoding matters*
+
+{gt_permuted_answer}
 
 ---
 
@@ -214,6 +237,19 @@ def main(cfg: DictConfig):
         )
         print(f"GT answer: {gt_answer[:200]}...")
 
+        # Generate answer with permuted GT features (ablation)
+        print("Generating answer with permuted GT features...")
+        gt_permuted = permute_features(gt_features)
+        gt_permuted_answer = ask_qwen_about_image_features(
+            image_features=torch.from_numpy(gt_permuted),
+            prompt=USER_PROMPT,
+            model=model,
+            processor=processor,
+            system_prompt=SYSTEM_PROMPT,
+            qwen_version=QWEN_VERSION,
+        )
+        print(f"GT permuted answer: {gt_permuted_answer[:200]}...")
+
         # Load clip-specific autoencoder
         clip_ae_path = clip_dir / CLIP_AE_CHECKPOINT_SUBDIR / "best_ckpt.pth"
         if not clip_ae_path.exists():
@@ -262,6 +298,7 @@ def main(cfg: DictConfig):
             mid_offset=mid_offset,
             mid_frame_num=mid_frame_num,
             gt_answer=gt_answer,
+            gt_permuted_answer=gt_permuted_answer,
             clip_ae_answer=clip_ae_answer,
             global_ae_answer=global_ae_answer,
             output_path=output_dir,
