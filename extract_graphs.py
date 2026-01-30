@@ -1,9 +1,10 @@
 from sklearn.cluster import HDBSCAN
-from sklearn.metrics.pairwise import pairwise_distances
+from pynndescent import NNDescent
+import scipy.sparse as sp
+from scipy.linalg import eig, eigh
 import torch
 import argparse
 import numpy as np
-import torchvision
 from pathlib import Path
 import logging
 import mmcv
@@ -13,42 +14,46 @@ import hydra
 import os
 from omegaconf import DictConfig
 from tqdm import tqdm
-from typing import List, Optional, Tuple
 import gc
-import copy
 
-from scene.cameras import Camera
 from utils.params_utils import merge_hparams
 from arguments import ModelParams, PipelineParams, ModelHiddenParams
-from cluster_utils import (
-    store_palette,
-    clusters_to_rgb,
-    build_graph,
-    ng_jordan_weiss_spectral_clustering,
-)
 from scene import GaussianModel, Scene
-from gaussian_renderer import render as gs_render
-from gaussian_renderer import render_opacity as gs_render_opacity
-from utils.sh_utils import RGB2SH
 from autoencoder.model_qwen import QwenAutoencoder
 from rerun_utils import (
     log_points_through_time,
     log_graph_structure_through_time,
 )
-
 from utils.gaussian_loading_utils import get_latest_model_iteration
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 def get_autoencoder_path(clip: DictConfig, cfg: DictConfig) -> Path:
-    """Get autoencoder checkpoint path (global or per-clip based on config)."""
     if cfg.graph_extraction.use_global_autoencoder:
-        return Path(cfg.preprocessed_root) / cfg.graph_extraction.global_autoencoder_checkpoint_dir / "best_ckpt.pth"
+        ae_path = (
+            Path(cfg.preprocessed_root)
+            / cfg.graph_extraction.global_autoencoder_checkpoint_dir
+            / "best_ckpt.pth"
+        )
     else:
         clip_dir = Path(cfg.preprocessed_root) / clip.name
-        return clip_dir / cfg.graph_extraction.checkpoint_subdir / "best_ckpt.pth"
+        ae_path = clip_dir / cfg.graph_extraction.checkpoint_subdir / "best_ckpt.pth"
+    return ae_path
+
+
+def get_autoencoder(clip: DictConfig, cfg: DictConfig) -> QwenAutoencoder:
+    """Get autoencoder (global or per-clip based on config)."""
+    ae_path = get_autoencoder_path(clip, cfg)
+    ae = QwenAutoencoder(
+        input_dim=cfg.graph_extraction.full_dim,
+        latent_dim=cfg.graph_extraction.latent_dim,
+    ).to("cuda")
+    ae.load_state_dict(torch.load(ae_path, map_location="cuda"))
+    ae.eval()
+    return ae
 
 
 def load_gaussian_model(
@@ -179,32 +184,25 @@ def filter_gaussians(gaussians: GaussianModel, mask: torch.Tensor):
         mask (torch.Tensor): The mask to filter the gaussians. Shape (n_gaussians,)
     """
     n_gaussians = len(mask)
-    
+
     for prop in dir(gaussians):
         # Skip @property decorated attributes
         if isinstance(getattr(type(gaussians), prop, None), property):
             continue
-        
+
         attribute = getattr(gaussians, prop)
         a_type = type(attribute)
         if a_type == torch.Tensor or a_type == torch.nn.Parameter:
             if attribute.shape[0] == n_gaussians:
                 setattr(gaussians, prop, attribute[mask])
-                logger.info(f"Filtered {prop} with shape {attribute.shape}")
-                logger.info(f"New shape of {prop}: {getattr(gaussians, prop).shape}")
             # Handle _control_point_positions_precomputed which has shape (T, N, 3)
             elif attribute.ndim == 3 and attribute.shape[1] == n_gaussians:
                 setattr(gaussians, prop, attribute[:, mask, :])
-                logger.info(f"Filtered {prop} along dim 1 with shape {attribute.shape}")
-                logger.info(f"New shape of {prop}: {getattr(gaussians, prop).shape}")
 
-
-def normalize_indep_dim(x):
-    return (x - x.mean(axis=0)) / x.std(axis=0)
-
-
-def normalize_dep_dim(x):
-    return (x - x.mean()) / x.std()
+    n_gaussians_new = mask.sum()
+    print(
+        f"[filter_gaussians] from {n_gaussians} to {n_gaussians_new} gaussians ({n_gaussians - n_gaussians_new} filtered - {n_gaussians_new / n_gaussians * 100:.2f}% left)"
+    )
 
 
 def deform_at_timestep(gaussians: GaussianModel, timestep: float):
@@ -222,7 +220,7 @@ def deform_at_timestep(gaussians: GaussianModel, timestep: float):
     """
     num_lang_features = int(os.environ.get("num_lang_features", 2))
     lang_feature_dim = int(os.environ.get("lang_feature_dim", 3))
-    
+
     with torch.no_grad():
         means3D = gaussians.get_xyz
         scales = gaussians._scaling
@@ -253,29 +251,41 @@ def deform_at_timestep(gaussians: GaussianModel, timestep: float):
         means3D_final, _, _, _, _, lang_final, _ = gaussians._deformation(
             means3D, scales, rotations, opacity, shs, lang_normalized, time
         )
-        
+
         # Replace positions for control-point-driven Gaussians with precomputed positions
         # (same logic as in gaussian_renderer/__init__.py)
-        if gaussians._is_control_point_driven is not None and gaussians._control_point_positions_precomputed is not None:
+        if (
+            gaussians._is_control_point_driven is not None
+            and gaussians._control_point_positions_precomputed is not None
+        ):
             # Convert normalized time (0-1) to frame index
             time_value = time[0, 0].item()
             frame_idx = int(time_value * (gaussians._num_frames - 1))
             frame_idx = max(0, min(frame_idx, gaussians._num_frames - 1))
-            
+
             # Get precomputed positions for this frame
-            control_point_positions_full = gaussians._control_point_positions_precomputed[frame_idx]  # (N_gaussians, 3)
-            
+            control_point_positions_full = (
+                gaussians._control_point_positions_precomputed[frame_idx]
+            )  # (N_gaussians, 3)
+
             # Ensure shapes match
-            assert control_point_positions_full.shape[0] == means3D_final.shape[0], \
-                f"Mismatch: control_point_positions_full has {control_point_positions_full.shape[0]} positions, " \
+            assert control_point_positions_full.shape[0] == means3D_final.shape[0], (
+                f"Mismatch: control_point_positions_full has {control_point_positions_full.shape[0]} positions, "
                 f"but means3D_final has {means3D_final.shape[0]} Gaussians"
-            
+            )
+
             # Replace means3D_final for control-point-driven Gaussians with precomputed positions
-            means3D_final = means3D_final.clone()  # Clone to avoid in-place modification
-            means3D_final[gaussians._is_control_point_driven] = control_point_positions_full[gaussians._is_control_point_driven].detach()
+            means3D_final = (
+                means3D_final.clone()
+            )  # Clone to avoid in-place modification
+            means3D_final[gaussians._is_control_point_driven] = (
+                control_point_positions_full[
+                    gaussians._is_control_point_driven
+                ].detach()
+            )
 
         positions = means3D_final.detach().cpu().numpy()
-        
+
         # Extract each language feature and normalize independently
         # (deformation network already normalizes, but this ensures unit norm for decoder)
         lang_features = []
@@ -294,392 +304,305 @@ def deform_at_timestep(gaussians: GaussianModel, timestep: float):
         return positions, *lang_features
 
 
-def cluster_distances(
-    norm_lf_at_timestep: List[np.ndarray],
-    positions_at_timestep: List[np.ndarray],
-    cfg: DictConfig,
-):
-    dist_matrix = 0
-    for norm_lf in norm_lf_at_timestep:
-        d_lf = 1 - (norm_lf @ norm_lf.T)
-        d_lf = (d_lf - d_lf.min()) / (d_lf.max() - d_lf.min())
-        dist_matrix = (
-            dist_matrix + d_lf * cfg.graph_extraction.clustering_weights.instance
-        )
-
-    for positions in positions_at_timestep:
-        d_pos = pairwise_distances(positions, positions, metric="euclidean")
-        d_pos = (d_pos - d_pos.min()) / (d_pos.max() - d_pos.min())
-        dist_matrix = (
-            dist_matrix + d_pos * cfg.graph_extraction.clustering_weights.position
-        )
-
-    return dist_matrix
-
-
-def cluster_gaussians(gaussians: GaussianModel, cfg: DictConfig):
-    deformed_data = [deform_at_timestep(gaussians, t) for t in [0.0, 0.5, 1.0]]
-    if cfg.graph_extraction.custom_cluster_metric:
-        dist_matrix = cluster_distances(
-            norm_lf_at_timestep=[i[2] for i in deformed_data],
-            positions_at_timestep=[i[0] for i in deformed_data],
-            cfg=cfg,
-        )
-        clusters = HDBSCAN(
-            **cfg.graph_extraction.custom_metric_hdbscan_args
-        ).fit_predict(dist_matrix)
+def laplacian_sym(A):
+    if sp.isspmatrix(A):
+        D_diag = np.asarray(A.sum(axis=0)).ravel()
+        D_pow_neg_half_diag = np.zeros_like(D_diag)
+        nonzero = D_diag != 0
+        D_pow_neg_half_diag[nonzero] = D_diag[nonzero] ** -0.5
+        D_pow_neg_half = sp.diags(D_pow_neg_half_diag, format="csr")
+        normalized_A = D_pow_neg_half @ A @ D_pow_neg_half
+        normalized_L = sp.eye(A.shape[0], format="csr") - normalized_A
     else:
-        # pos
-        # Doing this for a few timesteps only, tradeoff with runtime
+        D_diag = np.sum(A, axis=0)
+        D_pow_neg_half_diag = np.zeros_like(D_diag)
+        nonzero = D_diag != 0
+        D_pow_neg_half_diag[nonzero] = D_diag[nonzero] ** -0.5
+        D_pow_neg_half = np.diag(D_pow_neg_half_diag)
+        normalized_A = D_pow_neg_half @ A @ D_pow_neg_half
+        normalized_L = np.eye(A.shape[0]) - normalized_A
+    return normalized_L
 
-        timesteps = np.linspace(0, 1, cfg.graph_extraction.n_timesteps_filtering, dtype=np.float32)
-        deformed_data = [deform_at_timestep(gaussians, t) for t in timesteps]
 
-        pos_through_time = np.concatenate([normalize_dep_dim(i[0]) for i in deformed_data], axis=-1)
-        # Only taking the features for the first timestep, assuming they are roughly constant per instance
-        instance_features = normalize_dep_dim(deformed_data[0][2])
-        clustering_feats = np.concatenate(
-            [
-                cfg.graph_extraction.clustering_weights.position * (pos_through_time / (3 * len(timesteps))),
-                cfg.graph_extraction.clustering_weights.instance * (instance_features / 3),
-            ],
-            axis=-1,
+def spectral_embeddings(L, d, normalize_rows: bool, use_symmetric_eigensolver: bool):
+    """Spectral embeddings.
+
+    Args:
+        L: Laplacian matrix (n x n)
+        d: dimension of embeddings (number of eigenvectors to keep), if set to None, cutoff at largest eigengap
+        normalize_rows: Normalize rows of embedding
+        use_symmetric_eigensolver: Use symmetric eigensolver
+
+    Returns:
+        _type_: _description_
+    """
+    n = L.shape[0]
+
+    if sp.isspmatrix(L):
+        # ncv = number of Lanczos vectors, must be > k and <= n
+        # larger ncv = more robust but slower
+        ncv = min(n, max(2 * d + 1, 40))
+        if use_symmetric_eigensolver:
+            eigenvalues, U = sp.linalg.eigsh(L, k=d, which="SA", ncv=ncv)
+        else:
+            eigenvalues, U = sp.linalg.eigs(L, k=d, which="SR", ncv=ncv)
+    else:
+        if use_symmetric_eigensolver:
+            eigenvalues, U = eigh(L, subset_by_index=[0, d - 1])
+        else:
+            eigenvalues, eigenvectors = eig(L)
+            U = eigenvectors[:, :d]
+        assert np.allclose(eigenvalues[0], 0), (
+            f"smallest eigenvalue is not 0 but {np.array(eigenvalues[0]).round(6)} with eigenvector {np.array(eigenvectors[0]).round(6)}"
         )
-        clusters = HDBSCAN(
-            **cfg.graph_extraction.vanilla_metric_hdbscan_args
-        ).fit_predict(clustering_feats)
+        assert len(eigenvalues) < 2 or not np.allclose(eigenvalues[1], 0), (
+            "second smallest eigenvalue is 0 -> graph is not connected"
+        )
 
+    # normalize rows if required
+    if normalize_rows:
+        norms = np.linalg.norm(U, axis=1, keepdims=True)
+        norms = np.maximum(norms, 1e-12)
+        T = U / norms
+    else:
+        T = U
+
+    return T
+
+
+def ng_jordan_weiss_spectral_clustering(
+    A, spectral_embedding_dim: int, hdbscan_args: dict
+):
+    """Spectral clustering with symmetric, normalized Laplacian.
+    Heuristically approximates normalized cut (not principled like Shi-Malik),
+    but is faster because it uses a symmetric eigensolver.
+
+    Noise points are left as -1 for external assignment (e.g., via k-NN).
+    Handles disconnected graphs by clustering each connected component separately.
+
+    (Naming here follows: https://www.tml.cs.uni-tuebingen.de/team/luxburg/publications/Luxburg07_tutorial.pdf)
+
+    Args:
+        A: Adjacency matrix (n x n)
+        spectral_embedding_dim: Number of eigenvectors for embedding
+        hdbscan_args: Arguments for HDBSCAN clustering
+
+    Returns:
+        clusters: Cluster assignments (n,), -1 for noise
+    """
+    n_samples = A.shape[0]
+    n_components, component_labels = sp.csgraph.connected_components(A, directed=False)
+
+    # print component stats
+    comp_sizes = np.bincount(component_labels)
+    print(
+        f"[spectral] {n_samples} samples, {n_components} components, min_cluster_size={hdbscan_args.min_cluster_size}"
+    )
+    print(f"[spectral] Largest 10 components: {sorted(comp_sizes, reverse=True)[:10]}")
+    print(
+        f"[spectral] Components >= min_cluster_size: {(comp_sizes >= hdbscan_args.min_cluster_size).sum()}"
+    )
+
+    # if graph connected, cluster and return
+    if n_components == 1:
+        L = laplacian_sym(A)
+        T = spectral_embeddings(
+            L,
+            d=spectral_embedding_dim,
+            normalize_rows=True,
+            use_symmetric_eigensolver=True,
+        )
+        clusters = HDBSCAN(**hdbscan_args).fit_predict(T)
+        hdbscan_noise = (clusters == -1).sum()
+        print(
+            f"[spectral] Noise: {hdbscan_noise} total, {0} disconnected, {hdbscan_noise} HDBSCAN"
+        )
+        return clusters
+
+    # if disconnected graph, cluster each component separately
+    clusters = np.full(n_samples, -1, dtype=np.int32)
+    cluster_offset = 0
+    disconnected_noise = 0
+    hdbscan_noise = 0
+    for comp_id in range(n_components):
+        comp_mask = component_labels == comp_id
+        comp_size = comp_mask.sum()
+
+        # leave component as noise if too small
+        if (
+            comp_size < hdbscan_args.min_cluster_size
+            or comp_size <= spectral_embedding_dim + 1
+        ):
+            disconnected_noise += comp_size
+            continue
+
+        # subgraph
+        comp_indices = np.where(comp_mask)[0]
+        A_sub = A[comp_indices][:, comp_indices]
+
+        # cluster
+        L_sub = laplacian_sym(A_sub)
+        d = min(spectral_embedding_dim, comp_size - 1)
+        T_sub = spectral_embeddings(
+            L_sub, d=d, normalize_rows=True, use_symmetric_eigensolver=True
+        )
+        comp_clusters = HDBSCAN(**hdbscan_args).fit_predict(T_sub)
+
+        # count hdbscan noise
+        hdbscan_noise += (comp_clusters == -1).sum()
+
+        # assign offsetted cluster ids to original indices
+        valid_mask = comp_clusters >= 0
+        clusters[comp_indices[valid_mask]] = comp_clusters[valid_mask] + cluster_offset
+        cluster_offset += comp_clusters.max() + 1 if valid_mask.any() else 0
+
+    total_noise = (clusters == -1).sum()
+    print(
+        f"[spectral] Noise: {total_noise} total, {disconnected_noise} disconnected, {hdbscan_noise} HDBSCAN"
+    )
     return clusters
 
 
+def build_graph(
+    positions: np.ndarray,
+    normalized_lf: np.ndarray,
+    k: int,
+    weight_pos: float,
+    weight_lf: float,
+    sigma_pos_factor: float,
+    sigma_lf_factor: float,
+):
+    """Build a weighted, symmetric knn graph
+
+    Returns:
+        graph: Sparse adjacency matrix (n x n)
+        nnd: NNDescent index for additional queries
+    """
+    n_samples = positions.shape[0]
+    k = min(k, n_samples - 1)
+
+    # mutual knn graph with gaussian rbf similarity
+    nnd = NNDescent(
+        positions.astype(np.float32),
+        metric="euclidean",
+        n_neighbors=k + 1,  # +1 because it includes self
+        n_jobs=-1,
+        low_memory=True,
+    )
+    knn_indices, knn_dists = nnd.neighbor_graph
+    rows = np.repeat(np.arange(n_samples), k + 1)
+    cols = knn_indices.ravel()
+    print(f"[build_graph] knn_dists min {knn_dists.min()}, max {knn_dists.max()}, mean {knn_dists.mean()}, std {knn_dists.std()}")
+    sigma_pos = sigma_pos_factor * knn_dists.mean()
+    knn_dists_rbf = np.exp(-(knn_dists**2) / (2 * sigma_pos**2))
+    knn_position = sp.csr_matrix(
+        (knn_dists_rbf.ravel(), (rows, cols)), shape=(n_samples, n_samples)
+    )
+    knn_position = knn_position.maximum(knn_position.T)  # symmetrize to mutual nn
+
+    # cosine similarity graph
+    new_rows, new_cols = knn_position.nonzero()  # recompute after symmetrization
+    lf_cos_sim = (normalized_lf[new_rows] * normalized_lf[new_cols]).sum(axis=-1)
+    lf_cos_sim = np.clip(
+        (lf_cos_sim + 1) / 2, 0, 1
+    )  # we need range [0, 1] so degree matrix does not get negative entries
+    lf_cos_dist = 1 - lf_cos_sim # we want distances in [0, 1] for rbf kernel
+    print(f"[build_graph] lf_cos_dist min {lf_cos_dist.min()}, max {lf_cos_dist.max()}, mean {lf_cos_dist.mean()}, std {lf_cos_dist.std()}")
+    sigma_lf = sigma_lf_factor * lf_cos_dist.mean()
+    lf_cos_dist_rbf = np.exp(-(lf_cos_dist**2) / (2 * sigma_lf**2))
+    knn_language = sp.csr_matrix(
+        (lf_cos_dist_rbf, (new_rows, new_cols)), shape=(n_samples, n_samples)
+    )
+
+    print(
+        f"[build_graph] pos min {knn_position.data.min()}, max {knn_position.data.max()}, mean {knn_position.data.mean()}, std {knn_position.data.std()}"
+    )
+    print(
+        f"[build_graph] lfs min {knn_language.data.min()}, max {knn_language.data.max()}, mean {knn_language.data.mean()}, std {knn_language.data.std()}"
+    )
+
+    graph = weight_pos * knn_position + weight_lf * knn_language
+    return graph, nnd
+
+
 def spectral_cluster_gaussians(gaussians: GaussianModel, cfg: DictConfig):
-    # TODO potentially do through time
-    pos, _, lf_instance = deform_at_timestep(gaussians, 0.0)
-    graph = build_graph(
-        positions=pos,
-        normalized_lf=lf_instance,
+    deformed_data = [
+        deform_at_timestep(gaussians, t)
+        for t in np.linspace(0, 1, cfg.graph_extraction.spectral_clustering.pos_timesteps, dtype=np.float32)
+    ]
+    pos_through_time = np.concatenate([i[0] for i in deformed_data], axis=-1)
+    lf = deformed_data[0][2]
+    graph, nnd = build_graph(
+        positions=pos_through_time,
+        normalized_lf=lf,
         k=cfg.graph_extraction.spectral_clustering.knn_graph_k,
-        weight_pos=cfg.graph_extraction.clustering_weights.position,
-        weight_lf=cfg.graph_extraction.clustering_weights.instance,
+        weight_pos=cfg.graph_extraction.spectral_clustering.weight_pos,
+        weight_lf=cfg.graph_extraction.spectral_clustering.weight_lf,
+        sigma_pos_factor=cfg.graph_extraction.spectral_clustering.rbf_sigma_pos_factor,
+        sigma_lf_factor=cfg.graph_extraction.spectral_clustering.rbf_sigma_lf_factor,
     )
     clusters = ng_jordan_weiss_spectral_clustering(
         graph,
         spectral_embedding_dim=cfg.graph_extraction.spectral_clustering.spectral_embedding_dim,
         hdbscan_args=cfg.graph_extraction.spectral_clustering.hdbscan_args,
     )
+
+    # # Assign noise points to nearest clustered neighbor via extended k-NN query
+    # noise_mask = clusters == -1
+    # n_noise = noise_mask.sum()
+    # if n_noise > 0:
+    #     print(f"[spectral] Assigning {n_noise} noise points to nearest clusters...")
+        
+    #     noise_positions = pos_through_time[noise_mask]
+    #     query_k = min(cfg.graph_extraction.spectral_clustering.noise_assignment_k, pos_through_time.shape[0] - 1)
+    #     neighbor_indices, _ = nnd.query(noise_positions.astype(np.float32), k=query_k)
+        
+    #     noise_indices = np.where(noise_mask)[0]
+    #     for i, noise_idx in enumerate(noise_indices):
+    #         for j in range(query_k):
+    #             neighbor = neighbor_indices[i, j]
+    #             if clusters[neighbor] >= 0:
+    #                 clusters[noise_idx] = clusters[neighbor]
+    #                 break
+        
+    #     remaining_noise = (clusters == -1).sum()
+    #     print(f"[spectral] {remaining_noise} points still unassigned")
+
+    # print(
+    #     f"[spectral] total clusters: {len(np.unique(clusters[clusters >= 0]))} (excluding noise)"
+    # )
     return clusters
+
+
+def clusters_to_rgb(clusters: np.ndarray) -> np.ndarray:
+    """compute colors for clusters (n_gaussians, 3) in range(0,1)"""
+    unique = np.unique(clusters)
+    assert np.all(unique == np.arange(len(unique))), "Cluster ids must be contiguous"
+    pal = np.random.rand(len(unique), 3)
+    return pal[clusters]
 
 
 def load_precomputed_instance_clusters(clip: DictConfig, cfg: DictConfig) -> np.ndarray:
     """Load precomputed merged instance assignments from CoTracker preprocessing.
-    
+
     Args:
         clip: Clip configuration
         cfg: Full hydra configuration
-        
+
     Returns:
         clusters: (N_gaussians,) array of instance IDs, -1 for background/unassigned
     """
     clip_dir = Path(cfg.preprocessed_root) / clip.name
     merged_ids_path = clip_dir / "cotracker" / "merged_instance_ids.npy"
-    
+
     clusters = np.load(merged_ids_path)
-    logger.info(f"Loaded precomputed instance clusters from {merged_ids_path}")
-    logger.info(f"  {len(np.unique(clusters[clusters >= 0]))} unique instances, {(clusters < 0).sum()} background Gaussians")
-    
+
+    n_noise = (clusters == -1).sum()
+    print(f"[precomputed] unassigned noise: {n_noise}")
+    print(
+        f"[precomputed] total clusters: {len(np.unique(clusters[clusters >= 0]))} (excluding noise)"
+    )
     return clusters
-
-
-def filter_clusters(clusters, cfg: DictConfig):
-    i = 0
-    for cluster_id in np.unique(clusters):
-        cluster_mask = clusters == cluster_id
-        if cluster_id >= 0:
-            # filter clusters
-            if cluster_mask.sum() < cfg.graph_extraction.min_gaussians_per_cluster:
-                clusters[cluster_mask] = -1
-                logger.info(
-                    f"\tFiltered because cluster contained <{cfg.graph_extraction.min_gaussians_per_cluster} gaussians"
-                )
-                continue
-
-            # restore contiguousness of cluster ids
-            clusters[cluster_mask] = i
-            i += 1
-
-
-def set_cluster_colors(gaussians: GaussianModel, clusters: np.ndarray):
-    colors = torch.zeros_like(gaussians._features_dc)  # outliers black
-    cluster_colors, palette = clusters_to_rgb(clusters)
-    sh_dc = RGB2SH(cluster_colors)  # (N,3)
-    colors[:, 0, :] = torch.tensor(sh_dc, device=colors.device, dtype=colors.dtype)
-    gaussians._features_dc.data = colors  # constant part becomes cluster color
-    gaussians._features_rest.data = torch.zeros_like(
-        gaussians._features_rest
-    )  # higher order coefficients (handle view dependence) become 0
-
-    return palette
-
-
-def render(
-    cam: Camera,
-    timestep: float,
-    gaussians: GaussianModel,
-    pipe: PipelineParams,
-    scene: Scene,
-    args: argparse.Namespace,
-    dataset: ModelParams,
-):
-    cam.time = timestep
-    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
-    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
-    pkg = gs_render(
-        cam,
-        gaussians,
-        pipe,
-        background,
-        None,
-        stage=args.load_stage,
-        cam_type=scene.dataset_type,
-        args=args,
-    )
-    img = torch.clamp(pkg["render"], 0.0, 1.0)
-    return img
-
-
-def render_and_save_all(
-    gaussians: GaussianModel,
-    pipe: PipelineParams,
-    scene: Scene,
-    args: argparse.Namespace,
-    dataset: ModelParams,
-    out: Path,
-    cfg: DictConfig,
-):
-    save_dir = out / "c_renders"
-    save_dir.mkdir(parents=True, exist_ok=True)
-
-    # pick random views
-    test_cams = scene.getVideoCameras()  # test + train
-    random_idx = random.sample(
-        range(len(test_cams)), cfg.graph_extraction.n_render_views
-    )
-    cams = [test_cams[i] for i in random_idx]
-
-    # evenly spaced timesteps
-    timesteps = np.linspace(0, 1, cfg.graph_extraction.n_timesteps, dtype=np.float32)
-
-    # render and save
-    for i, cam in enumerate(cams):
-        cam_dir = save_dir / f"cam_{i:02d}"
-        cam_dir.mkdir(parents=True, exist_ok=True)
-        for j, timestep in enumerate(timesteps):
-            img = render(cam, timestep, gaussians, pipe, scene, args, dataset)
-            torchvision.utils.save_image(img, cam_dir / f"timestep_{j:02d}.png")
-
-
-def compute_iou(mask_a: np.ndarray, mask_b: np.ndarray) -> float:
-    """IoU = |A ∩ B| / |A ∪ B| for boolean masks of same shape."""
-    inter = np.logical_and(mask_a, mask_b).sum()
-    union = np.logical_or(mask_a, mask_b).sum()
-    if union == 0:
-        return 0.0
-    return float(inter) / float(union)
-
-
-def compute_mask_coverage(cluster_mask: np.ndarray, instance_mask: np.ndarray) -> float:
-    """Coverage = |cluster ∩ instance| / |instance|, clipped at 1.0.
-
-    Both masks are expected to be the same shape as they originate from the same frame.
-    """
-    inter = np.logical_and(cluster_mask, instance_mask).sum()
-    denom = instance_mask.sum()
-    if denom == 0:
-        return 0.0
-    ratio = float(inter) / float(denom)
-    return min(ratio, 1.0)
-
-
-# Instance mask paths are mapped deterministically from frame indices: frame_{idx:06d}.npy
-
-
-def _render_cluster_binary_mask(
-    gaussians: GaussianModel,
-    cluster_mask_tensor: torch.Tensor,
-    cam: Camera,
-    pipe: PipelineParams,
-    args: argparse.Namespace,
-    dataset: ModelParams,
-) -> np.ndarray:
-    """Render a single cluster to a binary mask via opacity rendering (>0)."""
-    # Use a shallow copy to avoid PyTorch tensor deepcopy limitations while
-    # allowing us to swap tensor attributes on the copy only.
-    g_copy: GaussianModel = copy.copy(gaussians)
-    filter_gaussians(g_copy, cluster_mask_tensor)
-
-    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
-    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
-    pkg = gs_render_opacity(
-        cam,
-        g_copy,
-        pipe,
-        background,
-        None,
-        stage=args.load_stage,
-        cam_type=None,
-        args=args,
-    )
-    # render_opacity returns a tensor directly (C,H,W). Not a dict.
-    img = torch.clamp(pkg, 0.0, 1.0)
-    mask = (img.sum(dim=0) > 0).detach().cpu().numpy()
-    return mask
-
-
-def filter_clusters_by_masks(
-    gaussians: GaussianModel,
-    clusters: np.ndarray,
-    scene: Scene,
-    args: argparse.Namespace,
-    dataset: ModelParams,
-    pipe: PipelineParams,
-    cfg: DictConfig,
-    clip: DictConfig,
-) -> np.ndarray:
-    """Filter clusters by comparing rendered cluster masks to instance masks.
-
-    Metric is controlled by cfg.graph_extraction.mask_filtering.metric (coverage|iou).
-    Threshold by cfg.graph_extraction.mask_filtering.threshold.
-    """
-    unique_ids = [cid for cid in np.unique(clusters) if cid >= 0]
-    if len(unique_ids) == 0:
-        return clusters
-
-    clip_dir = Path(cfg.preprocessed_root) / clip.name
-    mask_subdir = cfg.graph_extraction.mask_filtering.mask_subdir
-    mask_dir = clip_dir / mask_subdir
-    if not mask_dir.exists():
-        logger.warning(
-            f"Instance mask directory not found: {mask_dir}; skipping mask-based filtering."
-        )
-        return clusters
-
-    video_cams = scene.getVideoCameras()
-    total_views = len(video_cams)
-    if total_views == 0:
-        logger.warning("No video cameras available; skipping mask-based filtering.")
-        return clusters
-
-    n_timesteps = int(cfg.graph_extraction.n_timesteps)
-    timesteps = np.linspace(0, 1, n_timesteps, dtype=np.float32)
-
-    cams_and_maskpaths: List[Tuple[Camera, Optional[Path]]] = []
-    for t in timesteps:
-        idx = int(round(t * max(0, total_views - 1)))
-        cam = video_cams[idx]
-        # Expect standard naming: frame_{idx:06d}.npy
-        mask_path = mask_dir / f"frame_{idx:06d}.npy"
-        if not mask_path.exists():
-            logger.warning(
-                f"Missing instance mask for frame index {idx:06d} at {mask_path}; skipping mask-based filtering."
-            )
-            return clusters
-        cams_and_maskpaths.append((cam, mask_path))
-
-    metric = str(cfg.graph_extraction.mask_filtering.metric).lower()
-    threshold = float(cfg.graph_extraction.mask_filtering.threshold)
-    min_area = int(cfg.graph_extraction.mask_filtering.min_component_area)
-
-    keep_cluster: dict[int, bool] = {}
-    for cid in unique_ids:
-        cid_mask = torch.tensor(clusters == cid, device="cuda")
-        consistent = True
-        matched_instance_id: Optional[int] = None
-
-        for cam, mask_path in cams_and_maskpaths:
-            cluster_mask = _render_cluster_binary_mask(
-                gaussians, cid_mask, cam, pipe, args, dataset
-            )
-            if cluster_mask.sum() == 0:
-                consistent = False
-                break
-
-            # Load instance masks from .npy: expect 2D labelmap or 3D stack
-            if not mask_path.exists():
-                consistent = False
-                break
-            arr = np.load(str(mask_path), allow_pickle=True)
-            if arr.dtype == object:
-                try:
-                    obj = arr.item()
-                    if isinstance(obj, dict):
-                        if "masks" in obj:
-                            arr = obj["masks"]
-                        elif "instances" in obj:
-                            arr = obj["instances"]
-                except Exception:
-                    pass
-
-            instance_masks: List[np.ndarray] = []
-            if arr.ndim == 2:
-                labels = arr
-                for v in np.unique(labels):
-                    if v == 0:
-                        continue
-                    m = labels == v
-                    if m.sum() >= min_area:
-                        instance_masks.append(m)
-            elif arr.ndim == 3:
-                axis = int(np.argmin(arr.shape))
-                if axis == 0:
-                    it = [arr[i] for i in range(arr.shape[0])]
-                elif axis == 2:
-                    it = [arr[..., i] for i in range(arr.shape[2])]
-                else:
-                    it = [arr[:, i, :] for i in range(arr.shape[1])]
-                for a in it:
-                    m = a > 0
-                    if m.sum() >= min_area:
-                        instance_masks.append(m)
-            if not instance_masks:
-                consistent = False
-                break
-
-            if metric == "iou":
-                scores = [compute_iou(cluster_mask, m) for m in instance_masks]
-            else:
-                scores = [
-                    compute_mask_coverage(cluster_mask, m) for m in instance_masks
-                ]
-
-            best_idx = int(np.argmax(scores)) if scores else -1
-            best_score = scores[best_idx] if best_idx >= 0 else 0.0
-            if best_score < threshold:
-                consistent = False
-                break
-
-            if matched_instance_id is None:
-                matched_instance_id = best_idx
-            elif matched_instance_id != best_idx:
-                consistent = False
-                break
-
-        keep_cluster[cid] = consistent
-
-    # Remap kept clusters to contiguous ids, filtered to -1
-    new_id_map: dict[int, int] = {}
-    next_id = 0
-    for cid in sorted(unique_ids):
-        if keep_cluster.get(cid, False):
-            new_id_map[cid] = next_id
-            next_id += 1
-        else:
-            new_id_map[cid] = -1
-
-    new_clusters = clusters.copy()
-    for i, c in enumerate(new_clusters):
-        new_clusters[i] = new_id_map.get(c, -1)
-
-    return new_clusters
 
 
 def bhattacharyya_coefficient(mu1, Sigma1, mu2, Sigma2):
@@ -714,17 +637,8 @@ def bhattacharyya_coefficient(mu1, Sigma1, mu2, Sigma2):
     return np.exp(-DB)  # Bhattacharyya coefficient
 
 
-def decode_qwen(lfs: torch.Tensor, cfg: DictConfig, clip: DictConfig) -> np.ndarray:
+def decode_qwen(ae: QwenAutoencoder, lfs: torch.Tensor, cfg: DictConfig) -> np.ndarray:
     BATCH_SIZE = cfg.graph_extraction.decode_batch_size
-
-    ae_path = get_autoencoder_path(clip, cfg)
-
-    ae = QwenAutoencoder(
-        input_dim=cfg.graph_extraction.full_dim,
-        latent_dim=cfg.graph_extraction.latent_dim,
-    ).to("cuda")
-    ae.load_state_dict(torch.load(ae_path, map_location="cuda"))
-    ae.eval()
 
     decoded_lfs = []
     with torch.no_grad():
@@ -737,9 +651,9 @@ def decode_qwen(lfs: torch.Tensor, cfg: DictConfig, clip: DictConfig) -> np.ndar
 
 
 def clusterwise_qwen_feats(
+    ae: QwenAutoencoder,
     clusters: np.ndarray,
     cfg: DictConfig,
-    clip: DictConfig,
     patch_lf: np.ndarray = None,
 ) -> dict[int, np.ndarray]:
     """Extract qwen features from each cluster by sub-clustering its Qwen features.
@@ -748,8 +662,7 @@ def clusterwise_qwen_feats(
         gaussians (GaussianModel): Gaussian model.
         clusters (np.ndarray): Cluster ids.
         cfg (DictConfig): Hydra configuration.
-        clip (DictConfig): Clip configuration.
-        lang_features (np.ndarray): Language features to use. If None, use static features from gaussians.
+        patch_lf (np.ndarray): Language features to use. If None, use static features from gaussians.
 
     Returns:
         Dict[int, np.ndarray]: map of cluster id to torch tensor of shape (n_feats, 3584)
@@ -769,9 +682,9 @@ def clusterwise_qwen_feats(
             replace=True,
         )
         feats = decode_qwen(
+            ae,
             torch.tensor(cluster_lfs[indices], device="cuda", dtype=torch.float32),
             cfg,
-            clip,
         )
         cluster_feats[cluster_id] = feats
 
@@ -817,93 +730,12 @@ def timestep_graph(positions, clusters, cfg: DictConfig):
                 means[i], covs[i], means[j], covs[j]
             )
 
-    A = np.where(bhattacharyya_coeffs >= cfg.graph_extraction.graph_edge_threshold, bhattacharyya_coeffs, 0)
+    A = np.where(
+        bhattacharyya_coeffs >= cfg.graph_extraction.graph_edge_threshold,
+        bhattacharyya_coeffs,
+        0,
+    )
     return A, bhattacharyya_coeffs
-
-
-def splat_spatial_grounding_feats(
-    gaussians: GaussianModel, cfg: DictConfig, timesteps: List[float], clip: DictConfig
-):
-    """Sample qwen feats throughout the whole scene.
-
-    Args:
-        gaussians (GaussianModel): Gaussian model.
-        cfg (DictConfig): Hydra configuration.
-        timesteps (List[float]): Timesteps to extract features at.
-
-    Returns:
-        tuple[np.ndarray, np.ndarray]: Tuple of numpy array of shape (T, n_feats, 3584) and numpy array of shape (n_feats)
-            - feats: numpy array of shape (T, n_feats, 3584)
-            - indices: numpy array of shape (n_splat_points) into the whole splat
-    """
-    patch_feats = [deform_at_timestep(gaussians, t)[1] for t in timesteps]
-    # indices = np.random.choice(
-    #     gaussians.get_xyz.shape[0],
-    #     cfg.graph_extraction.spatial_grounding.n_splat_points,
-    #     replace=False,
-    # )
-    # Select top-k most opaque gaussians (deterministic) instead of random sampling
-    k = int(cfg.graph_extraction.spatial_grounding.n_splat_points)
-    total = int(gaussians.get_xyz.shape[0])
-    k = min(k, total)
-    # get_opacity is (N,1) or (N,), pick as 1D numpy array
-    opac = gaussians.get_opacity.squeeze().detach().cpu().numpy()
-    order = np.argsort(opac)  # ascending
-    indices = order[-k:][::-1]  # top-k descending
-
-    patch_feats = [i[indices] for i in patch_feats]
-    decoded_patch_feats = [
-        decode_qwen(torch.tensor(i, device="cuda", dtype=torch.float32), cfg, clip)
-        for i in patch_feats
-    ]
-    return np.stack(decoded_patch_feats), indices
-
-
-def cluster_spatial_grounding_feats(
-    gaussians: GaussianModel,
-    cfg: DictConfig,
-    timesteps: List[float],
-    clip: DictConfig,
-    clusters: np.ndarray,
-):
-    """Extract cluster-level spatial grounding features and their indices.
-
-    Args:
-        gaussians (GaussianModel): Gaussian model.
-        cfg (DictConfig): Hydra configuration.
-        timesteps (List[float]): Timesteps to extract features at.
-        clip (DictConfig): Clip configuration.
-        clusters (np.ndarray): Cluster ids.
-
-    Returns:
-        tuple[dict[str, np.ndarray], dict[str, np.ndarray]]: Tuple of dictionaries
-        - feat_dict: Map of cluster id to numpy array of shape (T, n_feats, 3584)
-        - indices_dict: Map of cluster id to numpy array of shape (n_feats) (ATTENTION: indices are into cluster gaussians, not the whole splat)
-    """
-    lf_patch_through_time = [deform_at_timestep(gaussians, t)[1] for t in timesteps]
-    feat_dict, indices_dict = {}, {}
-    for cluster_id in np.unique(clusters):
-        cluster_mask = clusters == cluster_id
-        indices = np.random.choice(
-            np.arange(cluster_mask.sum()),
-            min(
-                cluster_mask.sum(),
-                cfg.graph_extraction.spatial_grounding.n_cluster_points,
-            ),
-            replace=False,
-        )
-        indices_dict[str(cluster_id)] = indices
-        cluster_feats = []
-        for t in range(len(timesteps)):
-            feats = lf_patch_through_time[t][cluster_mask][indices]
-            feats = decode_qwen(
-                torch.tensor(feats, device="cuda", dtype=torch.float32), cfg, clip
-            )
-            cluster_feats.append(feats)
-        cluster_feats = np.stack(cluster_feats)
-        feat_dict[str(cluster_id)] = cluster_feats
-
-    return feat_dict, indices_dict
 
 
 def extract_graph(clip: DictConfig, cfg: DictConfig):
@@ -913,110 +745,65 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
         clip (DictConfig): Clip configuration
         cfg (DictConfig): Full hydra configuration
     """
-    # Set deterministic seeds
+    # make deterministic
     random.seed(cfg.graph_extraction.random_seed)
     np.random.seed(cfg.graph_extraction.random_seed)
     torch.manual_seed(cfg.graph_extraction.random_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(cfg.graph_extraction.random_seed)
 
-    # Load model
+    # load gaussians and autoencoder
+    logger.info(f"Loading gaussians and autoencoder...")
     gaussians, scene, dataset, args, pipeline = load_gaussian_model(clip, cfg)
+    ae = get_autoencoder(clip, cfg)
 
-    # Optional: gaussian filtering before clustering
-    # with torch.no_grad():
-        # opacity = gaussians.get_opacity.squeeze()  # (N,)
-        # lang = gaussians.get_language_feature      # (N, D_latent)
-        # lang_norm = lang.norm(dim=-1)              # (N,)
-        # relevance = opacity * lang_norm
-        # mask = relevance >= cfg.graph_extraction.relevance_threshold
-        # n_kept = mask.sum().item()
-        # n_total = mask.shape[0]
-        # logger.info(f"Relevance filtering: {n_kept}/{n_total} Gaussians pass threshold {cfg.graph_extraction.relevance_threshold}")
-        # logger.info(f"  opacity range: [{opacity.min().item():.4f}, {opacity.max().item():.4f}]")
-        # logger.info(f"  lang_norm range: [{lang_norm.min().item():.4f}, {lang_norm.max().item():.4f}]")
-        # logger.info(f"  relevance range: [{relevance.min().item():.4f}, {relevance.max().item():.4f}]")
-        # if n_kept == 0:
-        #     logger.warning("No Gaussians pass relevance threshold, skipping initial filtering!")
-        # else:
-        #     filter_gaussians(gaussians, mask)
+    # pre-clustering filtering
+    logger.info(f"Pre-clustering filtering...")
+    opacities = gaussians.get_opacity.squeeze()
+    mask = opacities >= cfg.graph_extraction.precluster_opacity_threshold
+    filter_gaussians(gaussians, mask)
 
-        # # Alternative filtering: Create a random mask, keeping percentage of Gaussians
-        # # TODO: if actually using this, parameter should go into config!
-        # p_gaussians = 0.3
-        # n_gaussians = gaussians._control_point_positions_precomputed.shape[1] # shape is T, N_gaussians, 3
-        # mask = torch.zeros(n_gaussians, dtype=torch.bool)
-        # random_indices = torch.randperm(n_gaussians)[:int(n_gaussians * p_gaussians)]
-        # mask[random_indices] = True
-        # print(f"shape of first mask: {mask.shape}")
-        # filter_gaussians(gaussians, mask)
-
-    logger.info(f"Clustering with {cfg.graph_extraction.cluster_method} method")
-    # Cluster, filter clusters, optional mask-based filtering, then drop -1s
-    if cfg.graph_extraction.cluster_method == "hdbscan":
-        clusters = cluster_gaussians(gaussians, cfg=cfg)
-    elif cfg.graph_extraction.cluster_method == "spectral":
+    # clustering
+    logger.info(f"Clustering with {cfg.graph_extraction.cluster_method} method...")
+    assert cfg.graph_extraction.cluster_method in ["spectral", "precomputed"]
+    if cfg.graph_extraction.cluster_method == "spectral":
         clusters = spectral_cluster_gaussians(gaussians, cfg=cfg)
-    elif cfg.graph_extraction.cluster_method == "precomputed":
+    if cfg.graph_extraction.cluster_method == "precomputed":
         clusters = load_precomputed_instance_clusters(clip, cfg)
-    else:
-        raise ValueError(f"Invalid cluster method: {cfg.graph_extraction.cluster_method}")
-    logger.info(f"Clustered {len(np.unique(clusters))} clusters")
 
-    # Skip cluster filtering for precomputed - already filtered during preprocessing
-    if cfg.graph_extraction.cluster_method != "precomputed":
-        logger.info(f"Filtering clusters...")
-        filter_clusters(clusters, cfg)
-        logger.info(f"Filtered {len(np.unique(clusters))} clusters")
-
-    # # Optional: mask-based cluster filtering (coverage or IoU)
-    # mf = getattr(cfg.graph_extraction, "mask_filtering", None)
-    # if mf and bool(mf.get("enabled", False)):
-    #     logger.info(
-    #         "Applying mask-based cluster filtering (%s, threshold=%.3f)",
-    #         mf.metric,
-    #         mf.threshold,
-    #     )
-    #     clusters = filter_clusters_by_masks(
-    #         gaussians=gaussians,
-    #         clusters=clusters,
-    #         scene=scene,
-    #         args=args,
-    #         dataset=dataset,
-    #         pipe=pipeline,
-    #         cfg=cfg,
-    #         clip=clip,
-    #     )
-
+    # post-clustering filtering
+    logger.info(f"Post-clustering filtering...")
     cluster_mask = clusters >= 0
     filter_gaussians(gaussians, cluster_mask)
     clusters = clusters[cluster_mask]
-    cluster_colors, palette = clusters_to_rgb(clusters)
 
-    # Cluster features
+    # cluster properties
+    logger.info(f"Computing cluster features...")
     timesteps = np.linspace(0, 1, cfg.graph_extraction.n_timesteps)
     deformed_data = [deform_at_timestep(gaussians, t) for t in timesteps]
     pos_through_time = np.stack([i[0] for i in deformed_data])
     lf_patch_through_time = np.stack([i[1] for i in deformed_data])
     lf_instance_through_time = np.stack([i[2] for i in deformed_data])
-
-    logger.info(f"Decoding Qwen features...")
-    selected_decoded_lf_through_time = [
-        clusterwise_qwen_feats(
-            clusters,
-            cfg,
-            clip,
-            patch_lf=lf_patch_through_time[t_idx],
-        )
-        for t_idx in range(len(timesteps))
-    ]
-
     (
         cluster_pos_through_time,
         cluster_center_through_time,
         cluster_extent_through_time,
     ) = properties_through_time(pos_through_time, clusters)
 
+    # cluster qwen features
+    logger.info(f"Decoding Qwen features...")
+    selected_decoded_lf_through_time = [
+        clusterwise_qwen_feats(
+            ae,
+            clusters,
+            cfg,
+            patch_lf=lf_patch_through_time[t_idx],
+        )
+        for t_idx in range(len(timesteps))
+    ]
+
+    # graph structure
     logger.info(f"Building graphs...")
-    # Graph
     graph_results = [
         timestep_graph(pos_through_time[i], clusters, cfg)
         for i in range(len(timesteps))
@@ -1024,41 +811,19 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
     graphs = np.stack([g[0] for g in graph_results])
     bhattacharyya_coeffs = np.stack([g[1] for g in graph_results])
 
+    # save outputs
     logger.info(f"Saving outputs...")
-
-    # Save outputs
     model_path = Path(cfg.output_root) / clip.name
     out = Path(model_path) / cfg.graph_extraction.graph_output_subdir
-
     out.mkdir(parents=True, exist_ok=True)
-    if cfg.graph_extraction.store_verbose:
-        render_and_save_all(
-            gaussians, pipeline, scene, args, dataset, out, cfg
-        )  # renders of cluster coloring
-        store_palette(
-            palette, out / "c_palette.png"
-        )  # palette of renders (color position corresponds to cluster id)
-
-        # Save language features (either canonical or through time, but not both)
-        np.save(
-            out / "patch_latents_through_time.npy", lf_patch_through_time
-        )  # patch latents through time (timesteps, n_filtered_gaussians, lang_dim)
-        np.save(
-            out / "instance_latents_through_time.npy", lf_instance_through_time
-        )  # instance latents through time (timesteps, n_filtered_gaussians, lang_dim)
-
-        np.save(out / "opacities.npy", gaussians._opacity.detach().cpu().numpy())
-        np.save(out / "colors.npy", gaussians.get_features.detach().cpu().numpy())
-
     cluster_feats_dict = {}
     for cluster_id in selected_decoded_lf_through_time[0].keys():
         cluster_feats_dict[str(cluster_id)] = np.stack(
             [lf_dict[cluster_id] for lf_dict in selected_decoded_lf_through_time]
-        )  # shape: (timesteps, n_feats, 3584)
+        )
     np.savez(
         out / "c_qwen_feats.npz", **cluster_feats_dict
     )  # qwen features per cluster through time (cluster_id -> (timesteps, n_feats, 3584))
-
     np.save(
         out / "c_centroids.npy", cluster_pos_through_time
     )  # cluster centroids through time (timesteps, n_clusters, 3)
@@ -1074,34 +839,14 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
     np.save(
         out / "bhattacharyya_coeffs.npy", bhattacharyya_coeffs
     )  # dense bhattacharyya coefficients through time (timesteps, n_clusters, n_clusters)
-
-    # save stuff for spatial grounding
-    splat_feats, splat_indices = splat_spatial_grounding_feats(
-        gaussians, cfg, timesteps, clip
-    )
-    np.save(
-        out / "splat_spatial_grounding_feats.npy", splat_feats
-    )  # (T, n_splat_points, 3584)
-    np.save(
-        out / "splat_spatial_grounding_indices.npy", splat_indices
-    )  # (n_splat_points,)
-
-    cluster_feats, cluster_indices = cluster_spatial_grounding_feats(
-        gaussians, cfg, timesteps, clip, clusters
-    )
-    np.savez(
-        out / "cluster_spatial_grounding_feats.npz", **cluster_feats
-    )  # (cluster_id -> (T, n_feats, 3584))
-    np.savez(
-        out / "cluster_spatial_grounding_indices.npz", **cluster_indices
-    )  # (cluster_id -> (n_feats,)) (ATTENTION: indices are into cluster gaussians, not the whole splat)
     np.save(out / "positions.npy", pos_through_time)  # (T, n_filtered_gaussians, 3)
     np.save(out / "clusters.npy", clusters)  # (n_filtered_gaussians,)
 
+    # rerun visualization
     logger.info(f"Visualizing to rerun...")
-    # Visualize to rerun
     rr.init("clusters")
-    rr.save(out / "visualization.rrd")  # save to file for offline viewing
+    rr.save(out / "visualization.rrd")
+    cluster_colors = clusters_to_rgb(clusters)
     log_points_through_time(
         gaussians=gaussians,
         clusters=clusters,
@@ -1119,7 +864,8 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
         graphs_through_time=graphs,
     )
 
-    # Clean up GPU memory - this is critical before evaluate_clip tries to load Qwen
+    # memory cleanup
+    logger.info(f"Cleaning up memory...")
     del gaussians
     del scene
     del dataset
@@ -1131,14 +877,6 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
 
 @hydra.main(config_path="conf", config_name="config.yaml", version_base="1.3")
 def main(cfg: DictConfig):
-    """Main graph extraction loop for all clips."""
-    # Deterministic Torch/CUDA setup
-    torch.manual_seed(42)
-    np.random.seed(42)
-    random.seed(42)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(42)
-
     for clip in tqdm(cfg.clips, desc="Extracting graphs", unit="clip"):
         extract_graph(clip, cfg)
 

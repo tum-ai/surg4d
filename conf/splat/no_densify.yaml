@@ -22,7 +22,7 @@ dynamic_color: false
 coarse_base_iterations: 0
 coarse_lang_iterations: 1
 fine_base_iterations: 1000
-fine_lang_iterations: 1000
+fine_lang_iterations: 10000
 
 # settings for simplifying coarse training for high quality initial depth map
 # TODO: fix this later, only for debugging
@@ -39,7 +39,7 @@ progressive_window:
 # each stage starts at 0 iterations and the lang stages consider these lists
 # ATTENTION: it's crucial to save the last iteration of fine lang here!
 test_iterations: [100, 10000] # when to compute val metrics (logged to tensorboard)
-save_iterations: [1000] # when to save model checkpoints to disk (for rendering, graph extraction, etc.)
+save_iterations: [10000] # when to save model checkpoints to disk (for rendering, graph extraction, etc.)
 checkpoint_iterations: [] # when to save full checkpoints (with optimizer states for resuming)
 
 render_outputs:
