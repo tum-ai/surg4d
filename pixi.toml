@@ -18,6 +18,11 @@ setup = { depends-on = ["install-simple-knn", "install-rasterization", "install-
 [activation.env]
 # some cuda extensions need to link against pytorch
 LD_LIBRARY_PATH = "$PIXI_PROJECT_ROOT/.pixi/envs/default/lib/python3.10/site-packages/torch/lib:$LD_LIBRARY_PATH"
+# LIBRARY_PATH needed for Triton to find libcuda.so at compile time
+LIBRARY_PATH = "$PIXI_PROJECT_ROOT/.pixi/envs/default/lib/stubs:$PIXI_PROJECT_ROOT/.pixi/envs/default/lib:$LIBRARY_PATH"
+# C_INCLUDE_PATH needed for Triton JIT to find crypt.h and other headers
+C_INCLUDE_PATH = "$PIXI_PROJECT_ROOT/.pixi/envs/default/include:$C_INCLUDE_PATH"
+CPATH = "$PIXI_PROJECT_ROOT/.pixi/envs/default/include:$CPATH"
 # ignore ~/.local packages in case someone accidentally installed stuff with system python
 PYTHONNOUSERSITE = "1"
 # CUDA_DEVICE_ORDER ensures GPU numbering matches nvidia-smi
@@ -28,6 +33,7 @@ TOKENIZERS_PARALLELISM="false"
 python = "==3.10"
 cuda-toolkit = "12.4.*"
 cuda-version = "==12.4"
+cuda-driver-dev = "12.4.*"  # provides libcuda stub for Triton JIT compilation
 libxcrypt = "*"
 colmap = ">=3.9.1,<4"
 
