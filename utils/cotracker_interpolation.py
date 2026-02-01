@@ -5,13 +5,14 @@ import torch
 import numpy as np
 from typing import Tuple, Optional
 from loguru import logger
+import rerun as rr
 
 
 def interpolate_gaussian_positions_from_control_points(
     control_points_3d: torch.Tensor,
     control_point_indices: torch.Tensor,
     control_point_weights: torch.Tensor,
-    control_point_validity: Optional[torch.Tensor] = None,
+    save_dir: Optional[str] = None,
 ) -> torch.Tensor:
     """
     Interpolate Gaussian 3D positions from control points using IDW weights.
@@ -20,7 +21,6 @@ def interpolate_gaussian_positions_from_control_points(
         control_points_3d: (T, N_control_points, 3) 3D control point positions
         control_point_indices: (N_gaussians, K) indices of associated control points
         control_point_weights: (N_gaussians, K) IDW weights
-        control_point_validity: Optional (T, N_control_points) boolean mask for valid points
     
     Returns:
         gaussian_positions: (T, N_gaussians, 3) interpolated Gaussian positions
@@ -37,21 +37,47 @@ def interpolate_gaussian_positions_from_control_points(
     
     # Use advanced indexing: control_points_3d[t, indices] for each t
     control_points_selected = control_points_3d[:, control_point_indices]  # (T, N_gaussians, K, 3)
-    
-    # Handle invalid control points (if validity mask provided)
-    if control_point_validity is not None:
-        validity_selected = control_point_validity[:, control_point_indices]  # (T, N_gaussians, K)
-        # Set weights to 0 for invalid points and renormalize
-        weights_expanded = control_point_weights.unsqueeze(0).expand(T, -1, -1)  # (T, N_gaussians, K)
-        weights_expanded = weights_expanded * validity_selected.float()
-        weights_sum = weights_expanded.sum(dim=2, keepdim=True) + 1e-8
-        weights_expanded = weights_expanded / weights_sum
-    else:
-        weights_expanded = control_point_weights.unsqueeze(0).expand(T, -1, -1)  # (T, N_gaussians, K)
+    weights_expanded = control_point_weights.unsqueeze(0).expand(T, -1, -1)  # (T, N_gaussians, K)
     
     # Weighted sum: (T, N_gaussians, K, 3) * (T, N_gaussians, K, 1) -> (T, N_gaussians, 3)
     gaussian_positions = (control_points_selected * weights_expanded.unsqueeze(-1)).sum(dim=2)
-    
+
+    # Generate X% random indices of the total number of gaussians
+    n_samples = int(N_gaussians * 0.1)
+    random_indices = torch.randint(0, N_gaussians, (n_samples,), device=device)
+    sampled_gaussians = gaussian_positions[:, random_indices, :] # (T, N_sampled_gaussians, 3)
+
+    # Get the control points for each sampled Gaussian
+    sampled_control_point_indices = control_point_indices[random_indices, :] # (N_sampled_gaussians, K)
+    sampled_control_points = control_points_3d[:, sampled_control_point_indices] # (T, N_sampled_gaussians, K, 3)
+    # Collapse n samples and k into T, control_points, 3
+    sampled_control_points = sampled_control_points.view(T, -1, 3)
+
+    # Generate # samples random colors
+    colors_gaussians = torch.rand(n_samples, 3, device=device) # (N_sampled_gaussians, 3)
+    colors_control_points = colors_gaussians.repeat_interleave(K, dim=0) # (N_sampled_gaussians * K, 3)
+
+    # Make sure everything is on cpu and numpy
+    sampled_gaussians = sampled_gaussians.cpu().numpy()
+    sampled_control_points = sampled_control_points.cpu().numpy()
+    colors_gaussians = colors_gaussians.cpu().numpy()
+    colors_control_points = colors_control_points.cpu().numpy()
+
+    rr.init("cotracker_interpolation")
+    rr.save(save_dir / "cotracker_interpolation.rrd")
+    for t in range(T):
+        rr.set_time_sequence("frame", t)
+        rr.log("world/sampled_gaussians", rr.Points3D(
+            positions=sampled_gaussians[t],
+            colors=colors_gaussians,
+            radii=0.003,
+        ))
+        rr.log("world/sampled_control_points", rr.Points3D(
+            positions=sampled_control_points[t],
+            colors=colors_control_points,
+            radii=0.003,
+        ))
+
     return gaussian_positions
 
 
@@ -59,7 +85,7 @@ def precompute_control_point_positions(
     control_points_3d: torch.Tensor,
     control_point_indices: torch.Tensor,
     control_point_weights: torch.Tensor,
-    control_point_validity: Optional[torch.Tensor] = None,
+    save_dir: Optional[str] = None,
 ) -> torch.Tensor:
     """
     Precompute Gaussian positions for all timesteps.
@@ -70,7 +96,6 @@ def precompute_control_point_positions(
         control_points_3d: (T, N_control_points, 3) 3D control point positions (torch.Tensor)
         control_point_indices: (N_gaussians, K) indices of associated control points (torch.Tensor)
         control_point_weights: (N_gaussians, K) IDW weights (torch.Tensor)
-        control_point_validity: Optional (T, N_control_points) boolean mask (torch.Tensor)
     
     Returns:
         gaussian_positions: (T, N_gaussians, 3) interpolated positions (torch.Tensor)
@@ -79,18 +104,13 @@ def precompute_control_point_positions(
     control_points_3d_torch = control_points_3d.float()
     control_point_indices_torch = control_point_indices.long()
     control_point_weights_torch = control_point_weights.float()
-    
-    if control_point_validity is not None:
-        control_point_validity_torch = control_point_validity.bool()
-    else:
-        control_point_validity_torch = None
         
     # Compute positions
     positions = interpolate_gaussian_positions_from_control_points(
         control_points_3d_torch,
         control_point_indices_torch,
         control_point_weights_torch,
-        control_point_validity_torch,
+        save_dir,
     )
     
     return positions

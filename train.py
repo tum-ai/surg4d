@@ -935,7 +935,7 @@ def training(
         + opt.fine_base_iterations
         + opt.fine_lang_iterations
     )
-    tb_writer = prepare_output_and_logger(os.path.join(expname))
+    tb_writer = prepare_output_and_logger(os.path.join(expname), timestamp)
     logger.info(f"Model Path:{args.model_path}")
     gaussians = GaussianModel(dataset.sh_degree, hyper)
     dataset.model_path = args.model_path
@@ -1068,7 +1068,7 @@ def training(
             )
 
 
-def prepare_output_and_logger(expname):
+def prepare_output_and_logger(expname, timestamp=None):
     if not args.model_path:
         unique_str = expname
 
@@ -1079,10 +1079,17 @@ def prepare_output_and_logger(expname):
     with open(os.path.join(args.model_path, "cfg_args"), "w") as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
 
-    # Create Tensorboard writer
+    # Create Tensorboard writer with timestamped log directory to avoid run name conflicts
     tb_writer = None
     if TENSORBOARD_FOUND:
-        tb_writer = SummaryWriter(args.model_path)
+        if timestamp is None:
+            import time
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+        # Create a subdirectory with timestamp for TensorBoard logs
+        tb_log_dir = os.path.join(args.model_path, "tensorboard_logs", timestamp)
+        os.makedirs(tb_log_dir, exist_ok=True)
+        tb_writer = SummaryWriter(tb_log_dir)
+        logger.info("TensorBoard log directory: {}".format(tb_log_dir))
     else:
         logger.info("Tensorboard not available: not logging progress")
     return tb_writer
@@ -1170,17 +1177,6 @@ def training_report(
                                 image[None],
                                 global_step=iteration,
                             )
-                            if iteration == testing_iterations[0]:
-                                tb_writer.add_images(
-                                    stage
-                                    + "/"
-                                    + config["name"]
-                                    + "_view_{}/ground_truth".format(
-                                        viewpoint.image_name
-                                    ),
-                                    gt_image[None],
-                                    global_step=iteration,
-                                )
                     except:
                         pass
                     l1_test += l1_loss(image, gt_image).mean().double()
@@ -1197,17 +1193,16 @@ def training_report(
                 if os.getenv("wandb", "f") == "t":
                     wandb.log({"psnr_test": psnr_test})
                 # print("sh feature",scene.gaussians.get_features.shape)
-                if tb_writer:
-                    tb_writer.add_scalar(
-                        stage + "/" + config["name"] + "/loss_viewpoint - l1_loss",
-                        l1_test,
-                        iteration,
-                    )
-                    tb_writer.add_scalar(
-                        stage + "/" + config["name"] + "/loss_viewpoint - psnr",
-                        psnr_test,
-                        iteration,
-                    )
+                tb_writer.add_scalar(
+                    stage + "/" + config["name"] + "/loss_viewpoint - l1_loss",
+                    l1_test,
+                    iteration,
+                )
+                tb_writer.add_scalar(
+                    stage + "/" + config["name"] + "/loss_viewpoint - psnr",
+                    psnr_test,
+                    iteration,
+                )
 
         if tb_writer:
             tb_writer.add_histogram(

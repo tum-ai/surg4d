@@ -18,7 +18,7 @@ import re
 from depth_anything_3.api import DepthAnything3
 
 from cholec_utils import get_clip_seg8k, parse_cholecseg8k_instance_mask
-from da3_utils import da3_to_multi_view_colmap, log_da3_rerun
+from da3_utils import da3_to_multi_view_colmap, log_da3_rerun, filter_prediction_edge_artifacts
 from scene.colmap_loader import read_points3D_binary
 from scene.dataset_readers import storePly
 
@@ -398,6 +398,15 @@ def da3(clip: DictConfig, cfg: DictConfig):
         process_res_method="upper_bound_resize",
     )
 
+    # Apply edge filtering to prediction at processed resolution (if configured)
+    edge_gradient_threshold = cfg.preprocessing.get("da3_edge_gradient_threshold", None)
+    if edge_gradient_threshold is not None:
+        logger.info(f"Applying depth edge filtering with threshold: {edge_gradient_threshold}")
+        prediction = filter_prediction_edge_artifacts(
+            prediction,
+            gradient_threshold=edge_gradient_threshold,
+        )
+
     # dump to colmap with pc consisting of multi-frame depth projection (first, middle, last)
     colmap_dir = clip_dir / "sparse" / "0"
     colmap_dir.mkdir(parents=True, exist_ok=True)
@@ -424,22 +433,35 @@ def da3(clip: DictConfig, cfg: DictConfig):
     )
     logger.info(f"Point counts per view: {dict(zip(init_frame_indices, view_point_counts))}")
 
-    # store depth maps and confidence mapsin original resolution
+    # Store depth maps at both processed and original resolution
+    # Processed resolution: used by point cloud and cotracker (guarantees consistency)
+    # Original resolution: available for other downstream uses like depth loss supervision for rendered depths in original resolution
     depth_dir = clip_dir / cfg.preprocessing.depth_subdir
     depth_dir.mkdir(parents=True, exist_ok=True)
+    depth_processed_dir = clip_dir / cfg.preprocessing.depth_processed_subdir
+    depth_processed_dir.mkdir(parents=True, exist_ok=True)
     confidence_dir = clip_dir / cfg.preprocessing.confidence_subdir
     confidence_dir.mkdir(parents=True, exist_ok=True)
+    
     num_frames = len(prediction.depth)
     for frame_idx in range(num_frames):
         depth_proc = prediction.depth[frame_idx]
+        
+        # Save at processed resolution (for point cloud / cotracker consistency)
+        depth_processed_path = depth_processed_dir / f"{frame_idx:06d}.npy"
+        np.save(depth_processed_path, depth_proc)
+        
+        # Save at original resolution (for other uses)
         depth_orig = cv2.resize(
-            depth_proc, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR
+            depth_proc, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST
         )
         depth_path = depth_dir / f"{frame_idx:06d}.npy"
         np.save(depth_path, depth_orig)
+        
+        # Save confidence at original resolution
         confidence_proc = prediction.conf[frame_idx]
         confidence_orig = cv2.resize(
-            confidence_proc, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR
+            confidence_proc, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST
         )
         confidence_path = confidence_dir / f"{frame_idx:06d}.npy"
         np.save(confidence_path, confidence_orig)

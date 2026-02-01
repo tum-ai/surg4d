@@ -1,6 +1,7 @@
 semantic_mask_subdir: semantic_masks
 instance_mask_subdir: instance_masks
 depth_subdir: depth
+depth_processed_subdir: depth_processed  # depth at DA3 processed resolution (for point cloud consistency)
 confidence_subdir: confidence
 
 # spatial label preprocessing
@@ -29,6 +30,7 @@ da3_conf_thresh_percentile: 0.0
 da3_pc_pixel_stride: 3 # stride for subsampling point cloud pixels (e.g., 3 = every 3rd pixel = 1/9 points)
 # TODO: fix bug: setting this != 1 messes with the graph extraction
 da3_densify_ratio: 1 # densification ratio: multiply points by this factor (copies with noise)
+da3_edge_gradient_threshold: 0.1 # absolute gradient threshold in meters per pixel for filtering edge floaters. Set to null to disable.
 
 verbose_output: false # keep intermediate output files (mostly vipe)
 pc_ply_visualization_filename: pointcloud_viz.ply # set to None to disable
@@ -37,7 +39,8 @@ pc_ply_visualization_filename: pointcloud_viz.ply # set to None to disable
 min_component_area: 5 # minimum area of a component to be considered an instance
 
 # CoTracker3 settings
-cotracker_grid_size: 32 # control point grid size (grid_size x grid_size)
+cotracker_n_points_per_frame: 4096 # number of random control points per query frame
+cotracker_depth_jump_threshold: 0.1 # absolute depth change threshold in meters for killing points that jump between surfaces. Set to null to disable.
 
 # Instance merging settings (across views)
 instance_merge_containment_threshold: 0.5 # minimum containment ratio to merge instances across views

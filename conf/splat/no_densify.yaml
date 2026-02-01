@@ -4,7 +4,7 @@ config_path: arguments/cholecseg8k/default.py
 depth_loss_weight: 1.0
 
 # CoTracker3 control point settings
-cotracker_k_neighbors: 1  # number of nearest control points per Gaussian
+cotracker_k_neighbors: 3 # number of nearest control points per Gaussian
 cotracker_idw_power: 2.0  # power parameter for inverse distance weighting
 # TODO: usage not implemented yet
 cotracker_spawn_threshold_pct: 0.1  # spawn new Gaussians when pixels are >X% of image width/height from control points
@@ -16,7 +16,7 @@ dynamic_color: true
 # coarse iterations cut by 10x because we're only overfitting the feature heads on a single frame
 coarse_base_iterations: 0
 coarse_lang_iterations: 1
-fine_base_iterations: 1000
+fine_base_iterations: 10000
 fine_lang_iterations: 10000
 
 # settings for simplifying coarse training for high quality initial depth map
@@ -33,7 +33,7 @@ progressive_window:
 
 # each stage starts at 0 iterations and the lang stages consider these lists
 # ATTENTION: it's crucial to save the last iteration of fine lang here!
-test_iterations: [100, 10000] # when to compute val metrics (logged to tensorboard)
+test_iterations: [499, 999, 1499, 1999, 2999, 4999, 8999, 9999] # when to compute val metrics (logged to tensorboard)
 save_iterations: [10000] # when to save model checkpoints to disk (for rendering, graph extraction, etc.)
 checkpoint_iterations: [] # when to save full checkpoints (with optimizer states for resuming)
 

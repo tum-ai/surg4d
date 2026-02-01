@@ -4,9 +4,88 @@ import rerun as rr
 from PIL import Image
 from pathlib import Path
 from typing import List
+import cv2
 
 from depth_anything_3.utils.export.glb import _depths_to_world_points_with_colors
 from depth_anything_3.utils.export.colmap import _create_xyf
+from depth_anything_3.specs import Prediction
+
+
+def filter_depth_edge_artifacts(
+    depth: np.ndarray,
+    gradient_threshold: float = 0.05,
+    kernel_size: int = 3,
+) -> np.ndarray:
+    """
+    Filter edge floaters in depth maps by masking pixels with high depth gradients.
+    
+    Edge floaters occur when depth changes drastically at object boundaries, causing
+    intermediate depth values between foreground and background. This function detects
+    such regions by computing depth gradients and masking pixels where the absolute
+    gradient exceeds a threshold.
+    
+    Args:
+        depth: Depth map of shape (H, W) in meters (DA3 metric output)
+        gradient_threshold: Absolute gradient threshold in meters per pixel.
+            Pixels with gradient above this are masked. Default 0.05 means
+            depth changes > 5cm per pixel are filtered.
+        kernel_size: Size of Sobel kernel for gradient computation (must be 1, 3, 5, or 7)
+    
+    Returns:
+        Filtered depth map of same shape, with edge artifacts set to 0 (invalid)
+    """
+    if depth.ndim != 2:
+        raise ValueError(f"Expected 2D depth map, got shape {depth.shape}")
+    
+    # Compute depth gradients using Sobel operators (meters per pixel)
+    grad_x = cv2.Sobel(depth, cv2.CV_64F, 1, 0, ksize=kernel_size)
+    grad_y = cv2.Sobel(depth, cv2.CV_64F, 0, 1, ksize=kernel_size)
+    grad_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+    
+    # Mask pixels where absolute gradient exceeds threshold
+    # These are likely edge floaters (sharp depth discontinuities)
+    valid_mask = grad_magnitude <= gradient_threshold
+    
+    # Preserve original valid depth pixels (depth > 0)
+    valid_mask = valid_mask & (depth > 0)
+    
+    # Apply mask: set invalid pixels to 0
+    filtered_depth = depth.copy()
+    filtered_depth[~valid_mask] = 0.0
+    
+    return filtered_depth
+
+
+def filter_prediction_edge_artifacts(
+    prediction: Prediction,
+    gradient_threshold: float,
+) -> Prediction:
+    """
+    Filter edge artifacts from a DA3 prediction object by modifying depth maps in-place.
+    
+    This function applies edge filtering to all depth maps in the prediction at processed
+    resolution. The filtered prediction can then be used for point cloud generation and
+    saving to disk (where it will just be resized).
+    
+    Args:
+        prediction: DA3 Prediction object with depth maps at processed resolution
+        gradient_threshold: Relative gradient threshold for filtering edge floaters
+    
+    Returns:
+        The same prediction object with filtered depth maps (modified in-place)
+    """
+    num_frames = len(prediction.depth)
+    
+    for frame_idx in range(num_frames):
+        depth_2d = prediction.depth[frame_idx]  # (H, W)
+        depth_filtered = filter_depth_edge_artifacts(
+            depth_2d,
+            gradient_threshold=gradient_threshold,
+        )
+        # Modify in-place
+        prediction.depth[frame_idx] = depth_filtered
+    
+    return prediction
 
 
 def da3_to_multi_view_colmap(

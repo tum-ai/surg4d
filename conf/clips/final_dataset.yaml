@@ -1,8 +1,8 @@
-# - name: video01_00240
-#   video_id: 1
-#   first_frame: 240
-#   last_frame: 320
-#   frame_stride: 1
+- name: video01_00240
+  video_id: 1
+  first_frame: 240
+  last_frame: 320
+  frame_stride: 1
 
 - name: video01_15019
   video_id: 1
@@ -16,11 +16,11 @@
   last_frame: 28660
   frame_stride: 1
 
-# - name: video12_19500
-#   video_id: 12
-#   first_frame: 19500
-#   last_frame: 19580
-#   frame_stride: 1
+- name: video12_19500
+  video_id: 12
+  first_frame: 19500
+  last_frame: 19580
+  frame_stride: 1
 
 - name: video12_19660
   video_id: 12
@@ -46,11 +46,11 @@
   last_frame: 1643
   frame_stride: 1
 
-# - name: video17_01803
-#   video_id: 17
-#   first_frame: 1803
-#   last_frame: 1883
-#   frame_stride: 1
+- name: video17_01803
+  video_id: 17
+  first_frame: 1803
+  last_frame: 1883
+  frame_stride: 1
 
 - name: video18_00979
   video_id: 18

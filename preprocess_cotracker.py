@@ -285,6 +285,7 @@ def process_clip_cotracker(clip: DictConfig, cfg: DictConfig):
     clip_dir = Path(cfg.preprocessed_root) / clip.name
     images_dir = clip_dir / "images"
     depth_dir = clip_dir / cfg.preprocessing.depth_subdir
+    depth_processed_dir = clip_dir / cfg.preprocessing.depth_processed_subdir
     instance_mask_dir = clip_dir / cfg.preprocessing.instance_mask_subdir
     
     # Output directory for CoTracker data
@@ -295,8 +296,8 @@ def process_clip_cotracker(clip: DictConfig, cfg: DictConfig):
         logger.error(f"Images directory not found: {images_dir}")
         return
     
-    if not depth_dir.exists():
-        logger.error(f"Depth directory not found: {depth_dir}")
+    if not depth_processed_dir.exists():
+        logger.error(f"Processed depth directory not found: {depth_processed_dir}")
         return
     
     logger.info(f"Processing CoTracker3 for clip: {clip.name}")
@@ -323,35 +324,32 @@ def process_clip_cotracker(clip: DictConfig, cfg: DictConfig):
     logger.info("Running CoTracker3...")
     control_points_2d, visibility = track_control_points(
         image_files,
-        grid_size=cfg.preprocessing.cotracker_grid_size,
+        n_points_per_frame=cfg.preprocessing.cotracker_n_points_per_frame,
         save_dir=cotracker_dir,
     )
-    # shape of control points: (T, N_grid, 2) where N_grid = grid_size * grid_size
+    # shape of control points: (T, N_total, 2) where N_total = n_points_per_frame * 3
     # shape of visibility: (T, N_grid), those are boolean values!
     
     # Lift control points to 3D using DA3 depth and camera parameters
     logger.info("Lifting control points to 3D...")
     colmap_dir = clip_dir / "sparse" / "0"
-    control_points_3d, control_point_validity = lift_control_points_to_3d(
+    depth_jump_threshold = cfg.preprocessing.cotracker_depth_jump_threshold
+    control_points_3d, control_points_2d = lift_control_points_to_3d(
         control_points_2d,
         visibility,
-        depth_dir,
+        depth_processed_dir,
         colmap_dir,
         image_files,
-        grid_size=cfg.preprocessing.cotracker_grid_size,
+        depth_jump_threshold=depth_jump_threshold,
         save_dir=cotracker_dir,
     )
-    # control_points_3d: (T, N_grid, 3)
-    # control_point_validity: (T, N_grid) boolean
+    # control_points_3d: (T, N_valid, 3) - only permanently valid points
+    # control_points_2d: (T, N_valid, 2) - filtered to match
     
     # Save control point trajectories
     control_points_3d_path = cotracker_dir / "control_points_3d.pth"
     torch.save(control_points_3d.cpu(), control_points_3d_path)
     logger.info(f"Saved control points 3D: {control_points_3d_path}")
-    
-    validity_path = cotracker_dir / "control_point_validity.pth"
-    torch.save(control_point_validity.cpu(), validity_path)
-    logger.info(f"Saved control point validity: {validity_path}")
     
     # Compute Gaussian-to-control-point associations for multiple init frames
     # Use first, middle, and last frames (matching preprocess.py multi-frame initialization)
@@ -372,11 +370,13 @@ def process_clip_cotracker(clip: DictConfig, cfg: DictConfig):
         logger.info(f"Computing associations for frame {init_frame_idx}...")
         associations = compute_gaussian_control_point_associations(
             control_points_2d[init_frame_idx],
-            depth_dir,
+            control_points_3d[init_frame_idx],
+            depth_processed_dir,
+            colmap_dir,
+            image_files,
             init_frame_idx,
             instance_masks[init_frame_idx] if instance_masks is not None else None,
             k_neighbors=cfg.splat.cotracker_k_neighbors,
-            grid_size=cfg.preprocessing.cotracker_grid_size,
             idw_power=cfg.splat.cotracker_idw_power,
             pixel_stride=cfg.preprocessing.da3_pc_pixel_stride,
             confidence_dir=confidence_dir,
@@ -423,14 +423,14 @@ def process_clip_cotracker(clip: DictConfig, cfg: DictConfig):
     logger.info(f"Saved associations: {indices_path}, {weights_path}")
     
     # Precompute Gaussian positions for all timesteps
-    # control_points_3d stores 3D world coordinates
+    # control_points_3d stores 3D world coordinates (only valid points)
     logger.info("Precomputing Gaussian positions...")
     
     gaussian_positions = precompute_control_point_positions(
         control_points_3d,
         combined_indices,
         combined_weights,
-        control_point_validity,
+        save_dir=cotracker_dir,
     )
     
     positions_path = cotracker_dir / "gaussian_positions_precomputed.pth"

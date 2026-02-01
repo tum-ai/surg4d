@@ -142,20 +142,26 @@ def load_colmap_camera_parameters(
 
 def track_control_points(
     image_files: list,
-    grid_size: int = 32,
+    n_points_per_frame: int = 1024,
     save_dir: Path = None,
+    seed: int = 42,
 ) -> torch.Tensor:
     """
-    Track control points across video using CoTracker3.
+    Track control points across video using CoTracker3 with random point sampling.
+    
+    Uses random 2D points instead of a grid to ensure diversity across query frames,
+    which is important when the camera moves slowly or stays static.
     
     Args:
         image_files: List of image file paths
-        grid_size: Size of control point grid (grid_size x grid_size)
+        n_points_per_frame: Number of random points to sample per query frame
         save_dir: Directory to save visualizations
+        seed: Random seed for reproducibility
     
     Returns:
-        control_points_2d: (T, N_grid, 2) tensor of 2D pixel coordinates on GPU
-            where N_grid = grid_size * grid_size
+        control_points_2d: (T, N_total, 2) tensor of 2D pixel coordinates on GPU
+            where N_total = n_points_per_frame * number of random tracking point initializations
+        visibility: (T, N_total) boolean tensor
     """
     # Initialize CoTracker3 predictor
     predictor = CoTrackerPredictor(checkpoint="checkpoints/cotracker3_scaled_offline.pth")
@@ -174,195 +180,350 @@ def track_control_points(
         for img in images
     ], dim=0).unsqueeze(0).to("cuda")  # (B, T, C, H, W)
 
-    print(f"shape of images_torch: {images_torch.shape}")
+    logger.info(f"Image tensor shape: {images_torch.shape}")
     n_frames = images_torch.shape[1]
+    H, W = images_torch.shape[3], images_torch.shape[4]
+    
+    # Query frames: beginning, middle, end
+    query_frames = [0, n_frames // 2, n_frames - 1]
+    
+    # Set random seed for reproducibility
+    torch.manual_seed(seed)
+    
+    all_tracks = []
+    all_visibility = []
     
     with torch.no_grad():
-        # each track: (B, T, N, 2) - (batch, time, points, xy)
-        # each visibility: (B, T, N) - (batch, time, points)
-        tracks_beginning, visibility_beginning = predictor(images_torch, grid_size=grid_size, grid_query_frame=0, backward_tracking=False)
-        tracks_end, visibility_end = predictor(images_torch, grid_size=grid_size, grid_query_frame=n_frames - 1, backward_tracking=True)
-        tracks_middle, visibility_middle = predictor(images_torch, grid_size=grid_size, grid_query_frame=(n_frames // 2), backward_tracking=True)
-        tracks = torch.cat([tracks_beginning, tracks_middle, tracks_end], dim=2)
-        visibility = torch.cat([visibility_beginning, visibility_middle, visibility_end], dim=2)
-
-    print(f"shape of tracks: {tracks.shape}")
+        for query_frame in query_frames:
+            # Generate random 2D points for this query frame
+            # queries shape: (B, N, 3) where each query is (frame_idx, x, y)
+            random_x = torch.rand(n_points_per_frame) * (W - 1)  # x in [0, W-1]
+            random_y = torch.rand(n_points_per_frame) * (H - 1)  # y in [0, H-1]
+            # Create tensor of filled N times with the query frame
+            frame_indices = torch.full((n_points_per_frame,), query_frame, dtype=torch.float32)
+            # Construct queries where each query is (frame_idx, x, y)
+            queries = torch.stack([frame_indices, random_x, random_y], dim=-1)  # (N, 3)
+            queries = queries.unsqueeze(0).to("cuda")  # (1, N, 3)
+            
+            # Track with backward_tracking for middle and end frames
+            backward = query_frame > 0
+            tracks, visibility = predictor(images_torch, queries=queries, backward_tracking=backward)
+            # tracks: (B, T, N, 2), visibility: (B, T, N)
+            
+            all_tracks.append(tracks)
+            all_visibility.append(visibility)
+            
+            logger.info(f"Query frame {query_frame}: tracked {n_points_per_frame} random points")
+    
+    # Concatenate all tracks along the points dimension
+    tracks = torch.cat(all_tracks, dim=2)  # (B, T, N_total, 2)
+    visibility = torch.cat(all_visibility, dim=2)  # (B, T, N_total)
+    
+    logger.info(f"Total tracks shape: {tracks.shape}")
 
     # Visualize
     visualizer = Visualizer(save_dir=save_dir, pad_value=25)
-    visualizer.visualize(video= images_torch * 255.0, tracks=tracks, visibility=visibility, filename="cotracker3_visualization_max")
+    visualizer.visualize(video=images_torch * 255.0, tracks=tracks, visibility=visibility, filename="cotracker3_visualization_random")
     
     return tracks.squeeze(0), visibility.squeeze(0)
 
 
+# TODO: refactor this, way too much happening here
 def lift_control_points_to_3d(
     control_points_2d: torch.Tensor,
     visibility: torch.Tensor,
-    depth_dir: Path,
+    depth_processed_dir: Path,
     colmap_dir: Path,
     image_files: List[Path],
-    grid_size: int = 32,
+    depth_jump_threshold: float,
     save_dir: Path = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Lift 2D control points to 3D world coordinates using DA3 depth maps and camera parameters.
     
+    Features camera-aware depth propagation (while accounting for camera motion), depth jump detection
+    (kills points that jump between surfaces due to 2D tracking errors), and color forwarding (propagates last valid color
+    for occluded points).
+    
+    Only returns points that are valid (have depth > 0) at ALL timesteps after forward/backward filling.
+    Points that are killed or never observed are filtered out entirely.
+    
     Args:
-        control_points_2d: (T, N_grid, 2) 2D pixel coordinates (torch.Tensor on GPU)
-        visibility: (T, N_grid) boolean array indicating visible/occluded tracked points
-        depth_dir: Directory containing depth maps (*.npy files)
+        control_points_2d: (T, N_points, 2) 2D pixel coordinates (torch.Tensor on GPU)
+        visibility: (T, N_points) boolean array indicating visible/occluded tracked points
+        depth_processed_dir: Directory containing depth maps at processed resolution of the depth model (*.npy files)
         colmap_dir: Directory containing sparse/0/ Colmap data with camera parameters
         image_files: List of image file paths (sorted by frame number)
-        grid_size: Size of control point grid
+        depth_jump_threshold: Absolute depth change threshold (meters) for killing points that jump
+                              between surfaces. Set to None to disable.
         save_dir: Directory to save visualizations
     
     Returns:
-        control_points_3d: (T, N_grid, 3) 3D coordinates in world space
-        validity: (T, N_grid) boolean array indicating valid points
+        control_points_3d: (T, N_valid, 3) 3D coordinates in world space (only permanently valid points)
+        control_points_2d: (T, N_valid, 2) 2D coordinates filtered to match valid 3D points
     """
     T, N_grid, _ = control_points_2d.shape
     
-    # Load depth maps
-    depth_files = sorted(depth_dir.glob("*.npy"))
+    # Load depth maps (already at processed resolution), used by the depth model
+    depth_files = sorted(depth_processed_dir.glob("*.npy"))
     assert len(depth_files) == T, f"Mismatch: {len(depth_files)} depth files, {T} frames"
     
     # Load camera parameters
     intrinsics_list, c2w_list = load_colmap_camera_parameters(colmap_dir, image_files)
     assert len(intrinsics_list) == T, f"Mismatch: {len(intrinsics_list)} camera parameters, {T} frames"
     
-    control_points_3d = torch.zeros((T, N_grid, 3), device="cuda", dtype=torch.float32)
-    validity = torch.zeros((T, N_grid), device="cuda", dtype=torch.bool)
+    # Pre-convert camera parameters to tensors for efficient access
+    K_tensors = [torch.from_numpy(K).float().to("cuda") for K in intrinsics_list]
+    c2w_tensors = [torch.from_numpy(c2w).float().to("cuda") for c2w in c2w_list]
+    # Compute w2c (world-to-camera) matrices for reprojection
+    w2c_tensors = [torch.inverse(c2w) for c2w in c2w_tensors]
     
     logger.info(f"Lifting {N_grid} control points to 3D world coordinates for {T} frames...")
     
-    # Pre-load all depth maps and sample depths for visible points
-    # We'll forward-fill depths for occluded points
+    # Get original image resolution (CoTracker coordinates are in original resolution)
+    first_image = Image.open(image_files[0])
+    orig_W, orig_H = first_image.size
+    
+    # Get processed resolution from depth maps (already at processed resolution)
+    depth_map_0 = np.load(str(depth_files[0]))
+    processed_H, processed_W = depth_map_0.shape
+    
+    # Compute scale factors from original to processed resolution
+    scale_x = processed_W / orig_W
+    scale_y = processed_H / orig_H
+    logger.info(f"Resolution: original ({orig_W}x{orig_H}) -> processed ({processed_W}x{processed_H}), scale=({scale_x:.3f}, {scale_y:.3f})")
+    
+    # Pre-load all depth maps
+    depth_maps = []
+    for t in range(T):
+        depth_map = np.load(str(depth_files[t]))
+        depth_maps.append(torch.from_numpy(depth_map).to("cuda"))
+    
+    # Pre-load all images for color sampling
+    images = []
+    for t in range(T):
+        img = np.array(Image.open(image_files[t]))
+        images.append(img)
+    
+    # Sample depths at control point locations for all frames
     all_depths = torch.zeros((T, N_grid), device="cuda", dtype=torch.float32)
     visibility_torch = visibility.to("cuda")  # (T, N_grid)
     
     logger.info("Sampling depths for all frames...")
     for t in range(T):
-        depth_map = np.load(str(depth_files[t]))  # (H, W)
-        depth_map_torch = torch.from_numpy(depth_map).to("cuda")
+        depth_map_torch = depth_maps[t]
         H, W = depth_map_torch.shape
         
-        # Get 2D positions for this frame
+        # Get 2D positions for this frame (in original resolution)
         points_2d = control_points_2d[t]  # (N_grid, 2)
         
-        # Sample depth at control point locations (nearest neighbor)
-        x_coords = torch.clamp(points_2d[:, 0].int(), 0, W - 1)
-        y_coords = torch.clamp(points_2d[:, 1].int(), 0, H - 1)
-        depths = depth_map_torch[y_coords, x_coords]  # (N_grid,) yielding depth for each control point
+        # Scale control point coordinates from original to processed resolution
+        points_2d_scaled_x = points_2d[:, 0] * scale_x
+        points_2d_scaled_y = points_2d[:, 1] * scale_y
+        
+        # Sample depth at control point locations (nearest neighbor) in processed resolution
+        x_coords = torch.clamp(points_2d_scaled_x.int(), 0, W - 1)
+        y_coords = torch.clamp(points_2d_scaled_y.int(), 0, H - 1)
+        depths = depth_map_torch[y_coords, x_coords]  # (N_grid,)
         
         # Only use depth if point is visible and depth is valid
         visible_and_valid = visibility_torch[t] & (depths > 0)
-        all_depths[t] = torch.where(visible_and_valid, depths, 0.0) # if 2d control point is occluded, this will zero out the depth
+        all_depths[t] = torch.where(visible_and_valid, depths, 0.0)
     
-    # Forward-fill and backward-fill depths: for each control point, propagate depth from nearest visible frame
-    # Strategy: 
-    #   1. Forward-fill: propagate from past to future (handles points visible early, occluded later)
-    #   2. Backward-fill: propagate from future to past (handles points occluded early, visible later)
-    logger.info("Forward-filling and backward-filling depths for invalid points...")
-    filled_depths = all_depths.clone()  # (T, N_grid) containing depths at each timestep for each control point
-    
-    # Create mask of valid frames (visible AND depth > 0)
-    valid_mask = visibility_torch & (all_depths > 0)  # (T, N_grid)
-    
-    # Forward-fill: for each point, propagate last valid depth forward
-    last_valid_depths = torch.zeros(N_grid, device="cuda", dtype=torch.float32)  # (N_grid,)
-    has_valid_depth_forward = torch.zeros(N_grid, device="cuda", dtype=torch.bool)  # (N_grid,)
-    
-    # Loop to investigate each point across frames, no filling yet
-    for t in range(T):
-        # Update last valid depth for points that are valid at this frame
-        valid_at_t = valid_mask[t]  # (N_grid,)
-        # Receives either its depth if valid or the last valid depth if not valid
-        # Note that the last valid start out at 0 but by updating it this way forward in time, it will eventually contain the last valid depth for each point
-        last_valid_depths = torch.where(valid_at_t, all_depths[t], last_valid_depths)
-        # This is needed to track whether each point has been valid up until timestep t
-        has_valid_depth_forward = has_valid_depth_forward | valid_at_t # element-wise OR operation
-        
-        # For points without valid depth, use last valid depth if available
-        needs_fill = ~valid_at_t  # No valid depth at this frame (N_grid,)
-        filled_depths[t] = torch.where(
-            needs_fill & has_valid_depth_forward,
-            last_valid_depths,
-            filled_depths[t]  # Keep original (valid depth or 0 if never seen valid)
-        )
-    
-    # Backward-fill: for points that still have 0 depth (never had valid depth before current frame),
-    # propagate from the first valid depth in the future
-    next_valid_depths = torch.zeros(N_grid, device="cuda", dtype=torch.float32)  # (N_grid,)
-    has_valid_depth_backward = torch.zeros(N_grid, device="cuda", dtype=torch.bool)  # (N_grid,)
-    
-    for t in range(T - 1, -1, -1):  # Iterate backwards
-        # Update next valid depth for points that are valid at this frame
-        valid_at_t = valid_mask[t]  # (N_grid,)
-        next_valid_depths = torch.where(valid_at_t, all_depths[t], next_valid_depths)
-        has_valid_depth_backward = has_valid_depth_backward | valid_at_t
-        
-        # For points that still have 0 depth after forward-fill, use next valid depth
-        still_needs_fill = filled_depths[t] == 0  # (N_grid,)
-        filled_depths[t] = torch.where(
-            still_needs_fill & has_valid_depth_backward,
-            next_valid_depths,
-            filled_depths[t]
-        )
-    
-    if save_dir is not None:
-        rr.init("cotracker3_visualization")
-        rr.save(save_dir / "cotracker3_visualization.rrd")
-
-    for t in range(T):
-        depth_map = np.load(str(depth_files[t]))  # (H, W) - reload for visualization
-        depth_map_torch = torch.from_numpy(depth_map).to("cuda")
-        H, W = depth_map_torch.shape
-        
-        # Get 2D positions for this frame
-        points_2d = control_points_2d[t]  # (N_grid, 2)
-        
-        # Use filled depths
-        depths = filled_depths[t]  # (N_grid,)
-        
-        # Mark valid points (non-zero depth)
-        valid_mask = depths > 0
-        validity[t] = valid_mask.to(torch.bool)
-        
-        # 3D unprojection using camera parameters
-        K = torch.from_numpy(intrinsics_list[t]).float().to("cuda")  # (3, 3)
-        c2w = torch.from_numpy(c2w_list[t]).float().to("cuda")  # (4, 4)
-        
-        # Extract intrinsic parameters
+    # Helper functions for 3D operations
+    def unproject_to_world(points_2d: torch.Tensor, depths: torch.Tensor, K: torch.Tensor, c2w: torch.Tensor) -> torch.Tensor:
+        """Unproject 2D points to 3D world coordinates."""
         fx, fy = K[0, 0], K[1, 1]
         cx, cy = K[0, 2], K[1, 2]
         
-        # Convert pixel coordinates to camera space
-        u_coords = points_2d[:, 0].float().to("cuda")  # (N_grid,)
-        v_coords = points_2d[:, 1].float().to("cuda")  # (N_grid,)
+        u_coords = points_2d[:, 0].float()
+        v_coords = points_2d[:, 1].float()
         
         x_cam = (u_coords - cx) / fx * depths
         y_cam = (v_coords - cy) / fy * depths
         z_cam = depths
         
-        # Stack to (N_grid, 3) camera coordinates
-        points_cam = torch.stack([x_cam, y_cam, z_cam], dim=-1)  # (N_grid, 3)
+        points_cam = torch.stack([x_cam, y_cam, z_cam], dim=-1)
+        R = c2w[:3, :3]
+        trans = c2w[:3, 3]
+        points_world = points_cam @ R.T + trans
+        return points_world
+    
+    def project_to_depth(world_points: torch.Tensor, w2c: torch.Tensor) -> torch.Tensor:
+        """Project world points to camera and return depths (z in camera space)."""
+        R = w2c[:3, :3]
+        trans = w2c[:3, 3]
+        points_cam = world_points @ R.T + trans
+        return points_cam[:, 2]  # Return z (depth)
+    
+    # Initialize storage for camera-aware propagation
+    # Store world positions instead of raw depths for correct reprojection
+    #  Using the raw depth values would be wrong if the camera moves inbetween frames
+    last_valid_world_pos = torch.zeros((N_grid, 3), device="cuda", dtype=torch.float32)
+    last_valid_colors = torch.zeros((N_grid, 3), device="cuda", dtype=torch.uint8)
+    has_valid_forward = torch.zeros(N_grid, device="cuda", dtype=torch.bool)
+
+    # We want to kill points that have large depth jumps between frames; otherwise, tracked points with minimal errors
+    #  that slip onto another surface (especially the tool), will be incorrectly lifted onto that (tool) surface.
+    #  We observe that this causes a flickering of those points along the z axis, switching back and forth between surfaces.
+    killed_points = torch.zeros(N_grid, device="cuda", dtype=torch.bool)
+    
+    # Output arrays
+    filled_depths = torch.zeros((T, N_grid), device="cuda", dtype=torch.float32)
+    filled_colors = torch.zeros((T, N_grid, 3), device="cuda", dtype=torch.uint8)
+    was_filled = torch.zeros((T, N_grid), device="cuda", dtype=torch.bool)  # Track which were forward/backward filled
+    
+    # Create initial valid mask (visible AND depth > 0)
+    valid_mask = visibility_torch & (all_depths > 0)  # (T, N_grid)
+    
+    logger.info("Forward-filling with camera-aware depth propagation, depth jump detection, and color forwarding...")
+    killed_count = 0
+    
+    for t in range(T):
+        K = K_tensors[t]
+        c2w = c2w_tensors[t]
+        w2c = w2c_tensors[t]
+        points_2d = control_points_2d[t]
+        sampled_depth = all_depths[t]
         
-        # Transform to world coordinates
-        R = c2w[:3, :3]  # (3, 3)
-        trans = c2w[:3, 3]   # (3,)
-        points_world = points_cam @ R.T + trans  # (N_grid, 3)
+        # Sample colors for this frame
+        img = images[t]
+        img_H, img_W = img.shape[:2]
+        x_img = torch.clamp(points_2d[:, 0].long(), 0, img_W - 1).cpu().numpy()
+        y_img = torch.clamp(points_2d[:, 1].long(), 0, img_H - 1).cpu().numpy()
+        current_colors = torch.from_numpy(img[y_img, x_img]).to("cuda")  # (N_grid, 3)
         
-        control_points_3d[t] = points_world
+        # For points with valid depth, check for depth jumps (Phase 2)
+        valid_at_t = valid_mask[t] & ~killed_points  # (N_grid,)
+        
+        if depth_jump_threshold is not None and t > 0:
+            # For points that were valid before and are valid now, check for depth jumps
+            can_check_jump = has_valid_forward & valid_at_t
+            
+            if can_check_jump.any():
+                # Compute expected depth by reprojecting last valid world position (previous frame)
+                expected_depth = project_to_depth(last_valid_world_pos, w2c)
+                # Compare against actual depth of the current frame
+                depth_diff = torch.abs(sampled_depth - expected_depth)
+                
+                # Kill points where depth jump exceeds threshold
+                jumped = can_check_jump & (depth_diff > depth_jump_threshold)
+                newly_killed = jumped.sum().item()
+                if newly_killed > 0:
+                    killed_points = killed_points | jumped
+                    killed_count += newly_killed
+                    valid_at_t = valid_at_t & ~jumped  # Remove jumped points from valid
+        
+        # For valid points: compute world position, store it, use sampled color
+        if valid_at_t.any():
+            world_pos = unproject_to_world(points_2d, sampled_depth, K, c2w)
+            last_valid_world_pos = torch.where(valid_at_t.unsqueeze(-1), world_pos, last_valid_world_pos)
+            last_valid_colors = torch.where(valid_at_t.unsqueeze(-1), current_colors, last_valid_colors)
+            has_valid_forward = has_valid_forward | valid_at_t
+            
+            # Either assign current depth and color or continue with the last observed valid depth and color
+            filled_depths[t] = torch.where(valid_at_t, sampled_depth, filled_depths[t])
+            filled_colors[t] = torch.where(valid_at_t.unsqueeze(-1), current_colors, filled_colors[t])
+        
+        # For points needing fill (invalid but have been seen before): reproject world position
+        needs_fill = ~valid_at_t & has_valid_forward & ~killed_points
+        if needs_fill.any():
+            reprojected_depth = project_to_depth(last_valid_world_pos, w2c)
+            # Either keep depth and color that was previously computed or assign reprojected depth and prev color
+            filled_depths[t] = torch.where(needs_fill, reprojected_depth, filled_depths[t])
+            filled_colors[t] = torch.where(needs_fill.unsqueeze(-1), last_valid_colors, filled_colors[t])
+            was_filled[t] = was_filled[t] | needs_fill
+    
+    if killed_count > 0:
+        logger.info(f"Killed {killed_count} points due to depth jumps (threshold={depth_jump_threshold}m)")
+    
+    # Backward-fill: for points that were never seen valid in forward pass
+    # These need depth from the first future frame where they become valid
+    logger.info("Backward-filling remaining points...")
+    next_valid_world_pos = torch.zeros((N_grid, 3), device="cuda", dtype=torch.float32)
+    next_valid_colors = torch.zeros((N_grid, 3), device="cuda", dtype=torch.uint8)
+    has_valid_backward = torch.zeros(N_grid, device="cuda", dtype=torch.bool)
+    
+    # Starting from the back
+    for t in range(T - 1, -1, -1):
+        K = K_tensors[t]
+        c2w = c2w_tensors[t]
+        w2c = w2c_tensors[t]
+        points_2d = control_points_2d[t]
+        sampled_depth = all_depths[t]
+        
+        # Get colors for this frame (already computed in forward pass, but need for backward valid points)
+        img = images[t]
+        img_H, img_W = img.shape[:2]
+        x_img = torch.clamp(points_2d[:, 0].long(), 0, img_W - 1).cpu().numpy()
+        y_img = torch.clamp(points_2d[:, 1].long(), 0, img_H - 1).cpu().numpy()
+        current_colors = torch.from_numpy(img[y_img, x_img]).to("cuda")
+        
+        valid_at_t = valid_mask[t] & ~killed_points
+        
+        # Update next valid world position for valid points
+        if valid_at_t.any():
+            world_pos = unproject_to_world(points_2d, sampled_depth, K, c2w)
+            next_valid_world_pos = torch.where(valid_at_t.unsqueeze(-1), world_pos, next_valid_world_pos)
+            next_valid_colors = torch.where(valid_at_t.unsqueeze(-1), current_colors, next_valid_colors)
+            has_valid_backward = has_valid_backward | valid_at_t
+        
+        # For points that still need fill (weren't filled in forward pass)
+        still_needs_fill = (filled_depths[t] == 0) & has_valid_backward & ~killed_points
+        if still_needs_fill.any():
+            reprojected_depth = project_to_depth(next_valid_world_pos, w2c)
+            reprojected_depth = torch.clamp(reprojected_depth, min=0.001)
+            
+            filled_depths[t] = torch.where(still_needs_fill, reprojected_depth, filled_depths[t])
+            filled_colors[t] = torch.where(still_needs_fill.unsqueeze(-1), next_valid_colors, filled_colors[t])
+            was_filled[t] = was_filled[t] | still_needs_fill
+    
+    # Determine permanently valid points: valid depth at ALL frames and not killed
+    permanently_valid = (filled_depths > 0).all(dim=0) & ~killed_points  # (N_grid,)
+    valid_indices = permanently_valid.nonzero(as_tuple=True)[0]  # (N_valid,)
+    N_valid = valid_indices.shape[0]
+    
+    logger.info(f"Filtered {N_grid} control points to {N_valid} permanently valid points "
+                f"({N_grid - N_valid} removed: {killed_count} killed, {N_grid - N_valid - killed_count} never valid)")
+    
+    # Filter to keep only permanently valid points
+    filled_depths_filtered = filled_depths[:, valid_indices]  # (T, N_valid)
+    filled_colors_filtered = filled_colors[:, valid_indices]  # (T, N_valid, 3)
+    control_points_2d_filtered = control_points_2d[:, valid_indices]  # (T, N_valid, 2)
+    
+    # Final pass: compute world coordinates for valid points only
+    control_points_3d = torch.zeros((T, N_valid, 3), device="cuda", dtype=torch.float32)
+    
+    # Initialize rerun if saving
+    if save_dir is not None:
+        rr.init("cotracker3_visualization")
+        rr.save(save_dir / "cotracker3_visualization.rrd")
+    
+    for t in range(T):
+        K = K_tensors[t]
+        c2w = c2w_tensors[t]
+        points_2d = control_points_2d_filtered[t]  # (N_valid, 2)
+        depths = filled_depths_filtered[t]  # (N_valid,)
+        
+        # Compute world positions
+        world_pos = unproject_to_world(points_2d, depths, K, c2w)
+        control_points_3d[t] = world_pos
         
         # Logging for visualization
         if save_dir is not None:
             rr.set_time_sequence("frame", t)
-            rr.log("world/depth_map", rr.Image(depth_map_torch.cpu()))
-            rr.log("world/control_points", rr.Points3D(control_points_3d[t].cpu()))
+            rr.log("world/depth_map", rr.Image(depth_maps[t].cpu()))
+            
+            colors = filled_colors_filtered[t].cpu().numpy()
+            
+            rr.log("world/control_points", rr.Points3D(
+                positions=control_points_3d[t].cpu(),
+                colors=colors,
+            ))
     
     logger.info("Successfully converted control points to 3D world coordinates")
 
-    return control_points_3d, validity
+    return control_points_3d, control_points_2d_filtered
 
 
 def _compute_processed_resolution(orig_w: int, orig_h: int, patch_size: int = 14) -> Tuple[int, int]:
@@ -406,26 +567,30 @@ def _compute_processed_resolution(orig_w: int, orig_h: int, patch_size: int = 14
 
 def compute_gaussian_control_point_associations(
     control_points_2d_init: torch.Tensor,
-    depth_dir: Path,
+    control_points_3d_init: torch.Tensor,
+    depth_processed_dir: Path,
+    colmap_dir: Path,
+    image_files: List[Path],
     init_frame_idx: int,
     instance_mask: Optional[torch.Tensor],
     k_neighbors: int = 4,
-    grid_size: int = 32,
     idw_power: float = 2.0,
     pixel_stride: int = 1,
     confidence_dir: Optional[Path] = None,
     conf_thresh_percentile: float = 0.0,
 ) -> Dict[str, torch.Tensor]:
     """
-    Compute associations between Gaussians (from depth map) and control points using GPU-accelerated KNN.
+    Compute associations between Gaussians (from depth map) and control points using GPU-accelerated KNN in 3D.
     
     Args:
-        control_points_2d_init: (N_grid, 2) 2D control points at init frame (torch.Tensor on GPU)
-        depth_dir: Directory containing depth maps
+        control_points_2d_init: (N_points, 2) 2D control points at init frame (for instance mask lookups)
+        control_points_3d_init: (N_points, 3) 3D control points at init frame (for 3D distance computation)
+        depth_processed_dir: Directory containing depth maps at processed resolution
+        colmap_dir: Directory containing sparse/0/ Colmap data with camera parameters
+        image_files: List of image file paths (sorted by frame number)
         init_frame_idx: Index of initialization frame
         instance_mask: (H, W) instance mask tensor (0=background, >0=instance IDs) on GPU
         k_neighbors: Number of nearest neighbors for association
-        grid_size: Size of control point grid
         idw_power: Power parameter for inverse distance weighting
         pixel_stride: Stride for pixel subsampling
         confidence_dir: Optional directory containing confidence maps
@@ -438,23 +603,18 @@ def compute_gaussian_control_point_associations(
             - pixel_to_gaussian_map: (H, W) mapping from pixel to Gaussian index
             - instance_ids: (N_pixels,) instance ID per Gaussian (-1 for background if no mask)
     """
-    device = control_points_2d_init.device
+    device = control_points_3d_init.device
     
-    # Load depth map for init frame
-    depth_files = sorted(depth_dir.glob("*.npy"))
-    depth_map_orig = np.load(str(depth_files[init_frame_idx]))  # (H, W) in original resolution
-    H_original, W_original = depth_map_orig.shape
+    # Load depth map for init frame (already at processed resolution)
+    depth_files = sorted(depth_processed_dir.glob("*.npy"))
+    depth_map = np.load(str(depth_files[init_frame_idx]))  # (H, W) at processed resolution
+    processed_h, processed_w = depth_map.shape
     
-    # Resize depth map to processed resolution to match da3_to_single_view_colmap
-    # (da3_to_single_view_colmap uses prediction.depth which is in processed resolution)
-    processed_w, processed_h = _compute_processed_resolution(W_original, H_original)
-    if (processed_w, processed_h) != (W_original, H_original):
-        depth_map = cv2.resize(
-            depth_map_orig, (processed_w, processed_h), interpolation=cv2.INTER_LINEAR
-        )
-        logger.info(f"Resized depth map from ({W_original}, {H_original}) to processed resolution ({processed_w}, {processed_h})")
-    else:
-        depth_map = depth_map_orig
+    # Get original image resolution for coordinate scaling (COLMAP intrinsics are in original resolution)
+    first_image = Image.open(image_files[0])
+    W_original, H_original = first_image.size
+    
+    logger.info(f"Depth map at processed resolution ({processed_w}x{processed_h}), images at original ({W_original}x{H_original})")
     
     # Compute confidence threshold if confidence maps are available
     conf_thresh = None
@@ -509,7 +669,7 @@ def compute_gaussian_control_point_associations(
             # Resize confidence map to processed resolution to match depth map
             if (processed_w, processed_h) != (W_original, H_original):
                 conf_map = cv2.resize(
-                    conf_map_orig, (processed_w, processed_h), interpolation=cv2.INTER_LINEAR
+                    conf_map_orig, (processed_w, processed_h), interpolation=cv2.INTER_NEAREST
                 )
             else:
                 conf_map = conf_map_orig
@@ -549,32 +709,60 @@ def compute_gaussian_control_point_associations(
     
     N_pixels = len(vidx)
     
-    logger.info(f"Computing associations for {N_pixels} valid pixels (after pixel_stride={pixel_stride} subsampling, GPU-accelerated)...")
+    logger.info(f"Computing associations for {N_pixels} valid pixels (after pixel_stride={pixel_stride} subsampling, GPU-accelerated, 3D distances)...")
     
-    # Control points are already on GPU, ensure they're float
-    # Control points are in original image space, so use original coordinates for KNN
-    control_points_torch = control_points_2d_init.float()  # (N_grid, 2)
-    pixel_coords_torch = torch.stack([
-        torch.from_numpy(x_coords_original).float().to(device),
-        torch.from_numpy(y_coords_original).float().to(device)
-    ], dim=-1)  # (N_pixels, 2) in original image space
+    # Load camera parameters for unprojecting pixels to 3D
+    intrinsics_list, c2w_list = load_colmap_camera_parameters(colmap_dir, image_files)
+    K = torch.from_numpy(intrinsics_list[init_frame_idx]).float().to(device)  # (3, 3)
+    c2w = torch.from_numpy(c2w_list[init_frame_idx]).float().to(device)  # (4, 4)
     
-    # Compute pairwise distances using torch.cdist (GPU-accelerated)
+    # Extract intrinsic parameters
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+    
+    # Get depths for valid pixels (in subsampled space, need to sample from depth_map)
+    depth_map_torch = torch.from_numpy(depth_map).float().to(device)  # (H, W) subsampled
+    depths = depth_map_torch[torch.from_numpy(y_coords).long().to(device), 
+                             torch.from_numpy(x_coords).long().to(device)]  # (N_pixels,)
+    
+    # Unproject valid pixels to 3D world coordinates
+    # Use original resolution coordinates for unprojection (camera intrinsics are in original space)
+    u_coords = torch.from_numpy(x_coords_original).float().to(device)  # (N_pixels,)
+    v_coords = torch.from_numpy(y_coords_original).float().to(device)  # (N_pixels,)
+    
+    # Camera space coordinates
+    x_cam = (u_coords - cx) / fx * depths
+    y_cam = (v_coords - cy) / fy * depths
+    z_cam = depths
+    
+    # Stack to (N_pixels, 3) camera coordinates
+    points_cam = torch.stack([x_cam, y_cam, z_cam], dim=-1)  # (N_pixels, 3)
+    
+    # Transform to world coordinates
+    R = c2w[:3, :3]  # (3, 3)
+    trans = c2w[:3, 3]  # (3,)
+    gaussian_positions_3d = points_cam @ R.T + trans  # (N_pixels, 3)
+    
+    # Control points are already in 3D world space
+    control_points_torch = control_points_3d_init.float()  # (N_grid, 3)
+    
+    # Compute pairwise 3D distances using torch.cdist (GPU-accelerated)
     # cdist computes pairwise distances: (N_pixels, N_grid)
-    distances_matrix = torch.cdist(pixel_coords_torch, control_points_torch)  # (N_pixels, N_grid)
+    distances_matrix = torch.cdist(gaussian_positions_3d, control_points_torch)  # (N_pixels, N_grid)
     
     # Find K nearest neighbors using topk
     distances, indices = torch.topk(distances_matrix, k=k_neighbors, dim=1, largest=False)
     # distances: (N_pixels, K), indices: (N_pixels, K)
     
+    # TODO: we may want to get rid of this
     # Filter by instance mask if provided
     if instance_mask is not None:
         # Instance mask is already resized and subsampled, ensure it's on the right device and dtype
         instance_mask_torch = instance_mask.int().to(device)  # (H, W) in subsampled space
         
-        # Get instance IDs for control points
-        # Control points are in original image space, need to convert to subsampled space
-        control_point_coords = control_points_torch.long()  # (N_grid, 2) in original image space
+        # Get instance IDs for control points using their 2D pixel coordinates
+        # control_points_2d_init is in original image space, need to convert to subsampled space
+        control_point_coords = control_points_2d_init.long().to(device)  # (N_grid, 2) in original image space
         # First convert to processed resolution (if depth was resized)
         # Then convert to subsampled space
         if (processed_w, processed_h) != (W_original, H_original):
