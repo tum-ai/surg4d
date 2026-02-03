@@ -9,7 +9,7 @@ tool_viz_dir: ${eval.output_dir}/tool_viz/spatial
 layers: [0, 1, 2, 12, 16, 20, 24, 28, 31] # 0 to 31
 top_k_scores: 50 # for attn based methods wo/ refinement
 
-# which methods to run (subset of: splat, static_graph, frame_attn, splat_graph, frame_attn_refine, frame_direct, graph_agent)
+# which methods to run (subset of: frame_attn, frame_attn_refine, frame_direct, graph_agent)
 methods:
   # - frame_attn
   # - frame_attn_refine

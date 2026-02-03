@@ -20,11 +20,8 @@ from benchmark.temporal import (
 )
 from benchmark.spatial import (
     get_patched_qwen_for_spatial_grounding,
-    splat_feat_queries,
     dump_spatial_prediction_visualizations,
-    static_graph_feat_queries,
     frame_attn_feat_queries,
-    splat_graph_feat_queries,
     frame_attn_refine_feat_queries,
     frame_direct_feat_queries,
     graph_agent_feat_queries,
@@ -297,25 +294,21 @@ def evaluate_spatial(
     model: Qwen2_5_VLForConditionalGeneration,
     processor: Qwen2_5_VLProcessor,
 ):
-    """Compute text-to-vision attention over sampled scene points and log heatmaps to rerun.
+    """Run spatial grounding evaluation using frame-based and graph-based methods.
 
-    Expects graph extraction outputs to exist under output_root/<clip.name>/<graph_subdir>:
-      - visualization.rrd (existing rerun file; we'll append new logs)
-      - splat_spatial_grounding_feats.npy (T, N, D)
-      - splat_spatial_grounding_indices.npy (N,)
-      - positions.npy (M, 3) positions of filtered gaussians (indices refer into this)
+    Methods supported:
+      - frame_attn: Attention scores over frame patches
+      - frame_attn_refine: 2D attention proposals refined by Qwen
+      - frame_direct: Direct Qwen prompting on frame to return a pixel
+      - graph_agent: Agentic exploration of 3D scene graph with tools
 
-    Config (cfg.eval.spatial):
-      - graph_subdir: subdirectory name used by graph extraction (defaults to cfg.graph_extraction.graph_output_subdir)
-      - layers: list of transformer layers to read attentions from
-      - prompt: full prompt string containing the substring
-      - substring: substring to select query tokens for
-      - timestep: integer index into T for which features to use
-      - colormap: optional matplotlib colormap name (default 'jet')
+    Graph data (graph_dir) is only needed for graph_agent method.
 
     Args:
-      model: Pre-loaded patched qwen model for spatial grounding
-      processor: Pre-loaded qwen processor
+      model: Pre-loaded Qwen model
+      processor: Pre-loaded Qwen processor
+      model_spatial: Pre-loaded patched Qwen model for spatial grounding (attention methods)
+      processor_spatial: Pre-loaded processor for spatial model
     """
     # skip this if no eval config is set
     if cfg.eval is None or cfg.eval.spatial is None:
@@ -324,13 +317,8 @@ def evaluate_spatial(
     # which methods to run
     methods_to_run = set(cfg.eval.spatial.methods)
 
-    # splat data
+    # graph data (only needed for graph_agent)
     graph_dir = Path(cfg.output_root) / clip.name / cfg.eval.paths.graph_subdir
-    splat_feats = np.load(graph_dir / "splat_spatial_grounding_feats.npy")  #  (T, N, D)
-    splat_indices = np.load(
-        graph_dir / "splat_spatial_grounding_indices.npy"
-    )  # c_id -> (N,)
-    positions = np.load(graph_dir / "positions.npy")  # (T, N, 3)
 
     # load gt data
     gt_file = Path(cfg.preprocessed_root) / clip.name / cfg.eval.spatial.gt_filename
@@ -345,47 +333,6 @@ def evaluate_spatial(
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-
-    if "splat" in methods_to_run:
-        all_results["splat"] = splat_feat_queries(
-            model=model_spatial,
-            processor=processor_spatial,
-            splat_feats=splat_feats,
-            splat_indices=splat_indices,
-            positions=positions,
-            clip_gt=gt_data,
-            clip=clip,
-            cfg=cfg,
-        )
-        _clear_vram()
-
-    if "static_graph" in methods_to_run:
-        all_results["static_graph"] = static_graph_feat_queries(
-            model=model,
-            processor=processor,
-            graph_dir=graph_dir,
-            clip_gt=gt_data,
-            clip=clip,
-            cfg=cfg,
-        )
-        _clear_vram()
-
-    if "splat_graph" in methods_to_run:
-        # SPLAT proposals + static graph refinement
-        all_results["splat_graph"] = splat_graph_feat_queries(
-            model_spatial=model_spatial,
-            processor_spatial=processor_spatial,
-            model=model,
-            processor=processor,
-            splat_feats=splat_feats,
-            splat_indices=splat_indices,
-            positions=positions,
-            graph_dir=graph_dir,
-            clip_gt=gt_data,
-            clip=clip,
-            cfg=cfg,
-        )
-        _clear_vram()
 
     if "frame_attn" in methods_to_run:
         all_results["frame_attn"] = frame_attn_feat_queries(
@@ -447,10 +394,7 @@ def evaluate_spatial(
     # Optional: dump per-(query, layer) visualizations of top-k points on the frame
     if cfg.eval.spatial.dump_visualizations:
         viz_method_names = {
-            "splat": "splat",
-            "static_graph": "static",
             "frame_attn": "frame_attn",
-            "splat_graph": "splat_graph",
             "frame_attn_refine": "frame_attn_refine",
             "frame_direct": "frame_direct",
             "graph_agent": "graph_agent",
