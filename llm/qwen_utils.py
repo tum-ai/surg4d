@@ -11,6 +11,7 @@ from transformers import (
     Qwen3VLForConditionalGeneration,
     Qwen3VLProcessor,
 )
+from transformers.generation import LogitsProcessorList
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 from transformers.video_utils import VideoMetadata
 from typing import Dict, List, Optional, Union, Any, Callable, Tuple
@@ -22,6 +23,7 @@ from .patched_qwen import (
     PatchedQwen2_5_VLForConditionalGeneration,
     PatchedQwen3VLForConditionalGeneration,
 )
+from .thinking_budget_processor import ThinkingTokenBudgetProcessor
 from .tools import IMAGE_PLACEHOLDER
 
 # Qwen vision encoder constants by version
@@ -411,6 +413,7 @@ def ask_qwen_about_image_features(
     max_tokens: int = 8192,
     seed: int = 42,
     qwen_version: str = "qwen25",
+    max_thinking_tokens: Optional[int] = None,
 ):
     messages = [
         {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
@@ -423,7 +426,7 @@ def ask_qwen_about_image_features(
         },
     ]
     return generate_with_vision_features(
-        messages, [image_features], model, processor, qwen_version=qwen_version, max_tokens=max_tokens, seed=seed
+        messages, [image_features], model, processor, qwen_version=qwen_version, max_tokens=max_tokens, seed=seed, max_thinking_tokens=max_thinking_tokens
     )
 
 
@@ -485,6 +488,7 @@ def generate_with_vision_features(
     qwen_version: str = "qwen25",
     max_tokens: int = 8192,
     seed: int = 42,
+    max_thinking_tokens: Optional[int] = None,
 ):
     """Generate text from vision features.
 
@@ -498,10 +502,20 @@ def generate_with_vision_features(
         qwen_version: Either "qwen25" or "qwen3"
         max_tokens: Maximum tokens to generate
         seed: Random seed for deterministic sampling
+        max_thinking_tokens: Maximum tokens for thinking phase (Qwen3 only).
+            If None, no limit is applied. If 0, thinking is disabled immediately.
 
     Returns:
         Generated text response
     """
+    # Build logits processor for thinking budget (Qwen3 only)
+    logits_processor = None
+    if qwen_version == "qwen3" and max_thinking_tokens is not None:
+        thinking_processor = ThinkingTokenBudgetProcessor(
+            processor.tokenizer, max_thinking_tokens=max_thinking_tokens
+        )
+        logits_processor = LogitsProcessorList([thinking_processor])
+
     # For Qwen3, we need to split concatenated features into main + deepstack
     if qwen_version == "qwen3":
         main_features, deepstack_features = qwen3_format_multiple_deepstack_features(
@@ -514,12 +528,14 @@ def generate_with_vision_features(
         ).to(model.device)
 
         _set_generation_seed(seed)
-        generated_ids = model.generate(
-            **inputs,
-            max_new_tokens=max_tokens,
-            custom_patch_features=main_features,
-            custom_deepstack_features=deepstack_features,
-        )
+        generate_kwargs = {
+            "max_new_tokens": max_tokens,
+            "custom_patch_features": main_features,
+            "custom_deepstack_features": deepstack_features,
+        }
+        if logits_processor is not None:
+            generate_kwargs["logits_processor"] = logits_processor
+        generated_ids = model.generate(**inputs, **generate_kwargs)
     else:
         # Qwen2.5 path
         inputs = model_inputs(
@@ -752,11 +768,12 @@ def generate_with_vision_features_agentic(
     processor: Union[Qwen2_5_VLProcessor, Qwen3VLProcessor],
     tools: Dict[str, Tuple[Callable, Dict[str, Any]]],
     qwen_version: str = "qwen3",
-    max_tokens: int = 8192,
     max_iterations: int = 10,
     tool_call_limits: Optional[Dict[str, Optional[int]]] = None,
     verbose: bool = False,
     seed: int = 42,
+    max_new_tokens: int = 8192,
+    max_thinking_tokens: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Generate with vision features in an agentic loop, executing tools until done.
 
@@ -777,13 +794,15 @@ def generate_with_vision_features_agentic(
                      each (N, hidden_dim * 4) in concatenated format [main | d0 | d1 | d2].
                      Must have exactly as many tensors as IMAGE_PLACEHOLDER markers in text.
         qwen_version: Either "qwen25" or "qwen3"
-        max_tokens: Maximum tokens per generation
         max_iterations: Maximum number of tool-calling iterations
         tool_call_limits: Optional dict mapping tool_name -> max_calls (int or None for infinite).
             If None, all tools have infinite calls. If a tool is not in the dict, it defaults to infinite.
         verbose: If True, prints message and tool results at each iteration.
         seed: Random seed for deterministic sampling
-
+        max_new_tokens: Maximum number of new tokens to generate
+        max_thinking_tokens: Maximum tokens for thinking phase per iteration (Qwen3 only).
+            If None, no limit is applied. If 0, thinking is disabled immediately.
+            A new processor is created each iteration since it has internal state.
     Returns:
         Dict with keys:
             - "final_answer" (str): The extracted final answer from the model's last response.
@@ -857,15 +876,25 @@ def generate_with_vision_features_agentic(
             tools=tool_specs,
         ).to(model.device)
 
+        # Build logits processor for thinking budget (new each iteration due to internal state)
+        logits_processor = None
+        if max_thinking_tokens is not None:
+            thinking_processor = ThinkingTokenBudgetProcessor(
+                processor.tokenizer, max_thinking_tokens=max_thinking_tokens
+            )
+            logits_processor = LogitsProcessorList([thinking_processor])
+
         try:
             _set_generation_seed(seed + iteration)
             gen_start_time = time.time()
-            generated_ids = model.generate(
-                **inputs,
-                max_new_tokens=max_tokens,
-                custom_patch_features=main_features,
-                custom_deepstack_features=deepstack_features,
-            )
+            generate_kwargs = {
+                "max_new_tokens": max_new_tokens,
+                "custom_patch_features": main_features,
+                "custom_deepstack_features": deepstack_features,
+            }
+            if logits_processor is not None:
+                generate_kwargs["logits_processor"] = logits_processor
+            generated_ids = model.generate(**inputs, **generate_kwargs)
             gen_end_time = time.time()
             total_generation_time += gen_end_time - gen_start_time
         except Exception:
@@ -1148,6 +1177,8 @@ def prompt_graph_agent(
     tool_call_limits: Optional[Dict[str, Optional[int]]] = None,
     verbose: bool = False,
     seed: int = 42,
+    max_new_tokens: int = 8192,
+    max_thinking_tokens: Optional[int] = None,
 ):
     """
     node_feats: np.lib.npyio.NpzFile - npz file containing node features for each timestep
@@ -1161,6 +1192,9 @@ def prompt_graph_agent(
     system_prompt: str - system prompt to use
     tools: Dict[str, Tuple[Callable, Dict[str, Any]]] - tools to use
     verbose: If True, prints message and tool results at each iteration.
+    max_new_tokens: int - maximum number of new tokens to generate
+    max_thinking_tokens: int - maximum tokens for thinking phase per iteration (Qwen3 only).
+        If None, no limit is applied. If 0, thinking is disabled immediately.
     """
     assert qwen_version == "qwen3", "qwen3 is required for graph agentic prompting"
     assert tools is not None and len(tools) > 0, (
@@ -1249,11 +1283,12 @@ def prompt_graph_agent(
         processor=processor,
         tools=tools,
         qwen_version=qwen_version,
-        max_tokens=8192,
         max_iterations=max_iterations,
         tool_call_limits=tool_call_limits,
         verbose=verbose,
         seed=seed,
+        max_new_tokens=max_new_tokens,
+        max_thinking_tokens=max_thinking_tokens,
     )
 
 
@@ -1677,11 +1712,12 @@ def prompt_with_video_frames(
     image_paths: List[Any],
     model: Union[Qwen2_5_VLForConditionalGeneration, Qwen3VLForConditionalGeneration],
     processor: Union[Qwen2_5_VLProcessor, Qwen3VLProcessor],
-    qwen_version: str = "qwen3",
     system_prompt: str = None,
-    max_tokens: int = 8192,
     fps: float = None,
     seed: int = 42,
+    qwen_version: str = "qwen3",
+    max_new_tokens: int = 8192,
+    max_thinking_tokens: int = 8192,
 ) -> str:
     """Prompt model with video frames (list of images).
     
@@ -1690,11 +1726,15 @@ def prompt_with_video_frames(
         image_paths: List of image file paths (as strings or Path objects)
         model: Qwen VL model
         processor: Qwen VL processor
-        qwen_version: Either "qwen25" or "qwen3"
         system_prompt: Optional system prompt
-        max_tokens: Maximum tokens to generate
+        max_new_tokens: Maximum tokens to generate
+        max_thinking_tokens: Maximum tokens for thinking phase (Qwen3 only).
+            If None, no limit is applied. If 0, thinking is disabled immediately.
         fps: Optional frames per second for video metadata
-        
+        qwen_version: Either "qwen25" or "qwen3"
+        max_new_tokens: Maximum tokens to generate
+        max_thinking_tokens: Maximum tokens for thinking phase (Qwen3 only).
+            If None, no limit is applied. If 0, thinking is disabled immediately.
     Returns:
         Model response text
     """
@@ -1754,11 +1794,25 @@ def prompt_with_video_frames(
         padding=True,
         return_tensors="pt",
     ).to(model.device)
+
+    # thinking token limit processor
+    logits_processor = None
+    if qwen_version == "qwen3" and max_thinking_tokens is not None:
+        thinking_processor = ThinkingTokenBudgetProcessor(
+            processor.tokenizer, max_thinking_tokens=max_thinking_tokens
+        )
+        logits_processor = LogitsProcessorList([thinking_processor])
+
+    generate_kwargs = {
+        "max_new_tokens": max_new_tokens,
+    }
+    if logits_processor is not None:
+        generate_kwargs["logits_processor"] = logits_processor
     
     # Generate
     _set_generation_seed(seed)
     with torch.no_grad():
-        generated_ids = model.generate(**inputs, max_new_tokens=max_tokens)
+        generated_ids = model.generate(**inputs, **generate_kwargs)
     
     # Decode
     generated_ids_trimmed = [

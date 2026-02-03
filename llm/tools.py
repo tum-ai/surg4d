@@ -900,6 +900,114 @@ def inspect_scene_at_time(
     }
 
 
+spec_node_movement = {
+    "type": "function",
+    "function": {
+        "name": "node_movement",
+        "description": "Returns the centroid and bounding box of a node at each timestep. Use this to track how a node moves through time.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "node_id": {
+                    "type": "integer",
+                    "description": "The node's id",
+                },
+            },
+            "required": ["node_id"],
+        },
+    },
+}
+
+
+def node_movement(
+    centroids: np.ndarray,
+    centers: np.ndarray,
+    extents: np.ndarray,
+    node_id: int,
+    toolkit: Optional['GraphTools'] = None,
+) -> Dict[str, Any]:
+    """Return centroid and bounding box for a node at each timestep.
+
+    Args:
+        centroids: Cluster centroids through time (T, n_clusters, 3)
+        centers: Cluster centers through time (T, n_clusters, 3)
+        extents: Cluster extents through time (T, n_clusters, 3)
+        node_id: The node/cluster id to track
+        toolkit: Optional GraphTools instance for rerun logging
+
+    Returns:
+        Dict with centroid and bbox at each timestep.
+    """
+    n_timesteps = centroids.shape[0]
+    n_nodes = centroids.shape[1]
+
+    # Validate node_id
+    if not (0 <= node_id < n_nodes):
+        return {
+            "text": json.dumps(
+                {"error": f"node_id={node_id} out of range [0, {n_nodes})"}
+            )
+        }
+
+    # Build movement data
+    movement_data = []
+    for t in range(n_timesteps):
+        c = centroids[t, node_id]
+        ctr = centers[t, node_id]
+        ext = extents[t, node_id]
+
+        entry = {
+            "timestep": int(t),
+            "centroid": {
+                "x": round(float(c[0]), 4),
+                "y": round(float(c[1]), 4),
+                "z": round(float(c[2]), 4),
+            },
+            "bbox_center": {
+                "x": round(float(ctr[0]), 4),
+                "y": round(float(ctr[1]), 4),
+                "z": round(float(ctr[2]), 4),
+            },
+            "bbox_extent": {
+                "x": round(float(ext[0]), 4),
+                "y": round(float(ext[1]), 4),
+                "z": round(float(ext[2]), 4),
+            },
+        }
+        movement_data.append(entry)
+
+    # Rerun logging
+    if toolkit is not None and toolkit.recording_active:
+        counter = toolkit.increase_logging_tool_counter()
+        prefix = f"tool_calls/{counter:02d}_node_movement"
+
+        # Get mask for this node
+        node_mask = toolkit.clusters == node_id
+        scene_extent = _compute_scene_extent(toolkit.positions.reshape(-1, 3))
+        point_radius = max(scene_extent * 0.008, 1e-5)
+
+        for t in range(n_timesteps):
+            rr.set_time("timestep", sequence=t)
+
+            # Log node points at this timestep
+            node_positions = toolkit.positions[t, node_mask]
+            rr.log(
+                f"{prefix}/node_{node_id}",
+                rr.Points3D(
+                    positions=node_positions,
+                    colors=[[255, 128, 0]],  # Orange
+                    radii=point_radius,
+                )
+            )
+
+    return {
+        "text": json.dumps({
+            "node_id": int(node_id),
+            "movement": movement_data,
+        }),
+    }
+
+
 spec_voxelize_scene = {
     "type": "function",
     "function": {
@@ -1397,6 +1505,16 @@ class GraphTools:
                     toolkit=self,
                 ),
                 spec_voxelize_scene,
+            ),
+            "node_movement": (
+                partial(
+                    node_movement,
+                    centroids=self.point_o2n(self.centroids),
+                    centers=self.point_o2n(self.centers),
+                    extents=self.distance_o2n(self.extents),
+                    toolkit=self,
+                ),
+                spec_node_movement,
             ),
         }
 
