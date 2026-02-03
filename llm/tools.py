@@ -54,7 +54,7 @@ spec_node_distances_through_time = {
     "type": "function",
     "function": {
         "name": "node_distances_through_time",
-        "description": "Returns the Euclidean distances between the centroids of two graph nodes at all timesteps.",
+        "description": "Returns the distances between two nodes for all timesteps. The distances are computed as min distance(p_i, q_j), where p_i is a point in the first node and q_j is a point in the second node.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -74,13 +74,26 @@ spec_node_distances_through_time = {
 
 
 def node_distances_through_time(
-    centroids: np.ndarray,
+    positions: np.ndarray,
+    clusters: np.ndarray,
     node_id_1: int,
     node_id_2: int,
     toolkit: Optional['GraphTools'] = None,
 ) -> Dict[str, Any]:
-    n_timesteps = centroids.shape[0]
-    n_nodes = centroids.shape[1]
+    """Compute minimum distances between two nodes through time.
+    
+    Uses KDTree for efficient pairwise distance computation and takes the mean
+    of the lowest 5 percentile distances for robustness (similar to overlap_position).
+    
+    Args:
+        positions: Gaussian positions (T, n_gaussians, 3)
+        clusters: Cluster assignment per gaussian (n_gaussians,)
+        node_id_1: First node id
+        node_id_2: Second node id
+        toolkit: Optional GraphTools instance for rerun logging
+    """
+    n_timesteps = positions.shape[0]
+    n_nodes = int(clusters.max()) + 1
 
     # Validate node ids
     if not (0 <= node_id_1 < n_nodes):
@@ -96,27 +109,61 @@ def node_distances_through_time(
             )
         }
 
+    # Get gaussian indices for each cluster
+    mask1 = clusters == node_id_1
+    mask2 = clusters == node_id_2
+
     distances = []
+    # Store boundary points for rerun logging
+    boundary_points_1 = []
+    boundary_points_2 = []
+
     for t in range(n_timesteps):
+        # Get positions at this timestep
+        pos1 = positions[t, mask1]  # (n_gaussians_1, 3)
+        pos2 = positions[t, mask2]  # (n_gaussians_2, 3)
+
+        # Build KDTrees for each cluster
+        tree1 = KDTree(pos1)
+        tree2 = KDTree(pos2)
+
+        # Find distances to closest point in other cluster
+        dists1, _ = tree2.query(pos1)  # For each point in cluster 1, dist to closest in cluster 2
+        dists2, _ = tree1.query(pos2)  # For each point in cluster 2, dist to closest in cluster 1
+
+        # Take points in bottom percentile of distances (closest to contact)
+        threshold1 = np.percentile(dists1, 5)
+        threshold2 = np.percentile(dists2, 5)
+
+        boundary_mask1 = dists1 <= threshold1
+        boundary_mask2 = dists2 <= threshold2
+
+        boundary1 = pos1[boundary_mask1]
+        boundary2 = pos2[boundary_mask2]
+
+        # Compute mean distance from the selected boundary gaussians
+        # This is the mean of the lowest-percentile distances
+        selected_dists = np.concatenate([dists1[boundary_mask1], dists2[boundary_mask2]])
+        mean_min_distance = float(np.mean(selected_dists))
+
         dist_entry = {
             "timestep": t,
-            "distance": round(
-                float(
-                    np.linalg.norm(centroids[t, node_id_1] - centroids[t, node_id_2])
-                ),
-                4,
-            ),
+            "distance": round(mean_min_distance, 4),
         }
         distances.append(dist_entry)
+
+        # Store boundary points for visualization
+        boundary_points_1.append(boundary1)
+        boundary_points_2.append(boundary2)
 
     # Rerun logging
     if toolkit is not None and toolkit.recording_active:
         counter = toolkit.increase_logging_tool_counter()
         prefix = f"tool_calls/{counter:02d}_node_distances"
         
-        # Get masks for the two nodes
-        mask1 = toolkit.clusters == node_id_1
-        mask2 = toolkit.clusters == node_id_2
+        # Get masks for visualization (using original coordinates)
+        viz_mask1 = toolkit.clusters == node_id_1
+        viz_mask2 = toolkit.clusters == node_id_2
         
         scene_extent = _compute_scene_extent(toolkit.positions.reshape(-1, 3))
         point_radius = max(scene_extent * 0.008, 1e-5)
@@ -128,7 +175,7 @@ def node_distances_through_time(
             rr.log(
                 f"{prefix}/node_{node_id_1}",
                 rr.Points3D(
-                    positions=toolkit.positions[t][mask1],
+                    positions=toolkit.positions[t][viz_mask1],
                     colors=[[255, 0, 0]],
                     radii=point_radius
                 )
@@ -136,18 +183,22 @@ def node_distances_through_time(
             rr.log(
                 f"{prefix}/node_{node_id_2}",
                 rr.Points3D(
-                    positions=toolkit.positions[t][mask2],
+                    positions=toolkit.positions[t][viz_mask2],
                     colors=[[0, 0, 255]],
                     radii=point_radius
                 )
             )
             
-            # Log centroids and distance line
-            pos1 = toolkit.centroids[t, node_id_1]
-            pos2 = toolkit.centroids[t, node_id_2]
-            midpoint = (pos1 + pos2) / 2
+            # Compute mean positions of boundary gaussians in original coordinates
+            boundary1_orig = toolkit.point_n2o(boundary_points_1[t])
+            boundary2_orig = toolkit.point_n2o(boundary_points_2[t])
+            
+            mean_boundary1 = np.mean(boundary1_orig, axis=0)
+            mean_boundary2 = np.mean(boundary2_orig, axis=0)
+            midpoint = (mean_boundary1 + mean_boundary2) / 2
             dist = distances[t]["distance"]
             
+            # Log distance marker at midpoint
             rr.log(
                 f"{prefix}/distance_marker",
                 rr.Points3D(
@@ -159,10 +210,11 @@ def node_distances_through_time(
                 )
             )
             
+            # Log connection line from mean of boundary gaussians in cluster 1 to cluster 2
             rr.log(
                 f"{prefix}/connection",
                 rr.LineStrips3D(
-                    strips=[[pos1, pos2]],
+                    strips=[[mean_boundary1, mean_boundary2]],
                     colors=[[128, 128, 128]],
                     radii=[point_radius * 0.5],
                 )
@@ -406,7 +458,7 @@ def node_overlap_position_at_time(
     # Rerun logging
     if toolkit is not None and toolkit.recording_active:
         counter = toolkit.increase_logging_tool_counter()
-        prefix = f"tool_calls/{counter:02d}_overlap_position"
+        prefix = f"tool_calls/{counter:02d}_t{timestep:02d}_overlap_position"
         
         rr.set_time("timestep", sequence=timestep)
         
@@ -538,7 +590,7 @@ def inspect_highres_node_at_time(
     # Rerun logging
     if toolkit is not None and toolkit.recording_active:
         counter = toolkit.increase_logging_tool_counter()
-        prefix = f"tool_calls/{counter:02d}_highres_node"
+        prefix = f"tool_calls/{counter:02d}_t{timestep:02d}_highres_node"
         
         rr.set_time("timestep", sequence=timestep)
         
@@ -784,7 +836,7 @@ def inspect_scene_at_time(
     # Rerun logging
     if toolkit is not None and toolkit.recording_active:
         counter = toolkit.increase_logging_tool_counter()
-        prefix = f"tool_calls/{counter:02d}_scene_at_time"
+        prefix = f"tool_calls/{counter:02d}_t{timestep:02d}_scene_at_time"
         
         rr.set_time("timestep", sequence=timestep)
         
@@ -1010,7 +1062,7 @@ def voxelize_scene(
     # Rerun logging
     if toolkit is not None and toolkit.recording_active:
         counter = toolkit.increase_logging_tool_counter()
-        prefix = f"tool_calls/{counter:02d}_voxelize_scene"
+        prefix = f"tool_calls/{counter:02d}_t{timestep:02d}_voxelize_scene"
         
         rr.set_time("timestep", sequence=timestep)
         
@@ -1280,7 +1332,8 @@ class GraphTools:
             "node_distances_through_time": (
                 partial(
                     node_distances_through_time,
-                    centroids=self.point_o2n(self.centroids),
+                    positions=self.point_o2n(self.positions),
+                    clusters=self.clusters,
                     toolkit=self,
                 ),
                 spec_node_distances_through_time,
