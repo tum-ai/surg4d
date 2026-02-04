@@ -367,7 +367,7 @@ spec_node_overlap_position_at_time = {
     "type": "function",
     "function": {
         "name": "node_overlap_position_at_time",
-        "description": "Return the point in 3D at which two graph nodes overlap at a given timestep.",
+        "description": "Return the point in 3D at which two graph nodes overlap at a given timestep. If there is no overlap between the nodes at the given timestep, returns a message indicating no overlap instead of a point.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -394,11 +394,30 @@ def node_overlap_position_at_time(
     positions: np.ndarray,
     clusters: np.ndarray,
     centroids: np.ndarray,
+    bhattacharyya_coeffs: np.ndarray,
     node_id_1: int,
     node_id_2: int,
     timestep: int,
     toolkit: Optional['GraphTools'] = None,
 ) -> Dict[str, Any]:
+    """Return the point in 3D at which two graph nodes overlap at a given timestep.
+
+    If there is no spatial overlap between the nodes (Bhattacharyya coefficient of 0.0),
+    returns a message indicating no overlap instead of computing a contact point.
+
+    Args:
+        positions: Gaussian positions (T, n_gaussians, 3)
+        clusters: Cluster assignment per gaussian (n_gaussians,)
+        centroids: Cluster centroids through time (T, n_clusters, 3)
+        bhattacharyya_coeffs: Dense Bhattacharyya coefficients (T, n_clusters, n_clusters)
+        node_id_1: First node id
+        node_id_2: Second node id
+        timestep: The timestep at which to find the overlap point
+        toolkit: Optional GraphTools instance for rerun logging
+
+    Returns:
+        Dict with either the overlap point or a message indicating no overlap.
+    """
     n_timesteps = centroids.shape[0]
     n_nodes = centroids.shape[1]
 
@@ -420,6 +439,18 @@ def node_overlap_position_at_time(
             "text": json.dumps(
                 {"error": f"timestep={timestep} out of range [0, {n_timesteps})"}
             )
+        }
+
+    # Check if there is spatial overlap between the nodes
+    overlap_coeff = bhattacharyya_coeffs[timestep, node_id_1, node_id_2]
+    if np.isclose(overlap_coeff, 0.0):
+        return {
+            "text": json.dumps({
+                "node_id_1": int(node_id_1),
+                "node_id_2": int(node_id_2),
+                "timestep": int(timestep),
+                "message": f"No spatial overlap between node {node_id_1} and node {node_id_2} at timestep {timestep}.",
+            })
         }
 
     # Get gaussian indices for each cluster
@@ -1585,6 +1616,7 @@ class GraphTools:
                     clusters=self.clusters,
                     centroids=self.point_o2n(self.centroids),
                     toolkit=self,
+                    bhattacharyya_coeffs=self.bhattacharyya_coeffs,
                 ),
                 spec_node_overlap_position_at_time,
             ),
