@@ -794,15 +794,23 @@ def full_hdbscan_cluster_gaussians(gaussians: GaussianModel, cfg: DictConfig):
     lf_through_times = np.concatenate([i[2] for i in deformed_data], axis=-1)
     weight_pos = cfg.graph_extraction.full_hdbscan_clustering.weight_pos
     weight_lf = cfg.graph_extraction.full_hdbscan_clustering.weight_lf
-    samples = np.concatenate([pos_through_time * weight_pos, lf_through_times * weight_lf], axis=-1)
-    clusters = hdbscan.HDBSCAN(**cfg.graph_extraction.full_hdbscan_clustering.hdbscan_args).fit_predict(samples)
+    samples = np.concatenate(
+        [pos_through_time * weight_pos, lf_through_times * weight_lf], axis=-1
+    )
+    clusters = hdbscan.HDBSCAN(
+        **cfg.graph_extraction.full_hdbscan_clustering.hdbscan_args
+    ).fit_predict(samples)
     hdbscan_noise = (clusters == -1).sum()
 
     if cfg.graph_extraction.full_hdbscan_clustering.soft_clustering:
         clusters = assign_noise_to_nearest(samples, clusters)
-        print(f"[full_hdbscan] Assigned {hdbscan_noise} noise points to nearest clusters")
+        print(
+            f"[full_hdbscan] Assigned {hdbscan_noise} noise points to nearest clusters"
+        )
     else:
-        print(f"[full_hdbscan] Noise: {hdbscan_noise} total, 0 disconnected, {hdbscan_noise} HDBSCAN")
+        print(
+            f"[full_hdbscan] Noise: {hdbscan_noise} total, 0 disconnected, {hdbscan_noise} HDBSCAN"
+        )
 
     print(f"[full_hdbscan] total clusters: {len(np.unique(clusters[clusters >= 0]))}")
     return clusters
@@ -841,7 +849,9 @@ def spectral_cluster_gaussians(gaussians: GaussianModel, cfg: DictConfig):
         clusters = assign_noise_to_nearest(pos_through_time, clusters)
         print(f"[spectral] Assigned {hdbscan_noise} noise points to nearest clusters")
     else:
-        print(f"[spectral] Noise: {hdbscan_noise} total, 0 disconnected, {hdbscan_noise} HDBSCAN")
+        print(
+            f"[spectral] Noise: {hdbscan_noise} total, 0 disconnected, {hdbscan_noise} HDBSCAN"
+        )
 
     print(f"[spectral] total clusters: {len(np.unique(clusters[clusters >= 0]))}")
     return clusters
@@ -929,19 +939,26 @@ def clusterwise_qwen_feats(
     cfg: DictConfig,
     patch_lf_through_time: np.ndarray,
     instance_lf_through_time: np.ndarray = None,
+    feature_selection: str = "random",
+    opacities: np.ndarray = None,
 ) -> dict[int, np.ndarray]:
     """Extract qwen features from each cluster by sub-clustering its Qwen features.
 
     Args:
-        gaussians (GaussianModel): Gaussian model.
-        clusters (np.ndarray): Cluster ids.
-        cfg (DictConfig): Hydra configuration.
-        patch_lf (np.ndarray): Language features to use. If None, use static features from gaussians.
+        ae: QwenAutoencoder
+        clusters: np.ndarray, cluster ids
+        cfg: DictConfig
+        patch_lf_through_time: np.ndarray, patch language features through time (T, n_gaussians, lang_dim)
+        instance_lf_through_time: np.ndarray, instance language features through time (T, n_gaussians, lang_dim)
+        feature_selection: str, one of: [opacity, random]
+        opacities: np.ndarray, opacities (n_gaussians,) (only needed if feature_selection is "opacity")
 
     Returns:
         Dict[int, np.ndarray]: dict str(cluster id) -> tensor(T, n_feats, full_dim)
         or tuple of those dicts for patch and instance features
     """
+    assert feature_selection in ["opacity", "random"], "Invalid feature selection"
+
     cluster_to_patch_through_time = {}
     cluster_to_instance_through_time = {}
 
@@ -953,11 +970,16 @@ def clusterwise_qwen_feats(
             cluster_instance_lf = instance_lf_through_time[:, cmask]
 
         # pick random gaussians for that cluster
-        indices = np.random.choice(
-            np.arange(cluster_patch_lf.shape[1]),
-            min(cluster_patch_lf.shape[1], cfg.graph_extraction.features_per_cluster),
-            replace=True,
+        n_feats = min(
+            cluster_patch_lf.shape[1], cfg.graph_extraction.features_per_cluster
         )
+        if feature_selection == "random":
+            indices = np.random.choice(
+                np.arange(cluster_patch_lf.shape[1]), n_feats, replace=False
+            )
+        else:
+            indices = np.argsort(opacities[cmask])[-n_feats:]
+
         cluster_patch_lf = cluster_patch_lf[:, indices]
         if instance_lf_through_time is not None:
             cluster_instance_lf = cluster_instance_lf[:, indices]
@@ -969,19 +991,33 @@ def clusterwise_qwen_feats(
             torch.tensor(flat_cluster_patch_lf, device="cuda", dtype=torch.float32),
             cfg,
         )
-        decoded_cluster_patch_lf = decoded_flat_cluster_patch_lf.reshape(cluster_patch_lf.shape[0], -1, decoded_flat_cluster_patch_lf.shape[-1])
+        decoded_cluster_patch_lf = decoded_flat_cluster_patch_lf.reshape(
+            cluster_patch_lf.shape[0], -1, decoded_flat_cluster_patch_lf.shape[-1]
+        )
         cluster_to_patch_through_time[str(cid)] = decoded_cluster_patch_lf
         if instance_lf_through_time is not None:
-            flat_cluster_instance_lf = cluster_instance_lf.reshape(-1, cluster_instance_lf.shape[-1])
+            flat_cluster_instance_lf = cluster_instance_lf.reshape(
+                -1, cluster_instance_lf.shape[-1]
+            )
             decoded_flat_cluster_instance_lf = decode_qwen(
                 ae,
-                torch.tensor(flat_cluster_instance_lf, device="cuda", dtype=torch.float32),
+                torch.tensor(
+                    flat_cluster_instance_lf, device="cuda", dtype=torch.float32
+                ),
                 cfg,
             )
-            decoded_cluster_instance_lf = decoded_flat_cluster_instance_lf.reshape(cluster_instance_lf.shape[0], -1, decoded_flat_cluster_instance_lf.shape[-1])
+            decoded_cluster_instance_lf = decoded_flat_cluster_instance_lf.reshape(
+                cluster_instance_lf.shape[0],
+                -1,
+                decoded_flat_cluster_instance_lf.shape[-1],
+            )
             cluster_to_instance_through_time[str(cid)] = decoded_cluster_instance_lf
 
-    return cluster_to_patch_through_time if instance_lf_through_time is None else (cluster_to_patch_through_time, cluster_to_instance_through_time)
+    return (
+        cluster_to_patch_through_time
+        if instance_lf_through_time is None
+        else (cluster_to_patch_through_time, cluster_to_instance_through_time)
+    )
 
 
 def properties_through_time(positions_through_time: np.ndarray, clusters: np.ndarray):
@@ -1038,7 +1074,7 @@ def visualize_cluster_latent_distributions(
     timestep_idx: int = 0,
 ):
     """Create 3D PCA visualizations of latent features for each cluster.
-    
+
     Args:
         clusters: (n_gaussians,) cluster assignments
         lf_patch_through_time: (T, n_gaussians, lang_dim) latent features
@@ -1047,54 +1083,58 @@ def visualize_cluster_latent_distributions(
     """
     vis_dir = output_dir / "cluster_latent_vis"
     vis_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Get latent features at specified timestep
     lf = lf_patch_through_time[timestep_idx]  # (n_gaussians, lang_dim)
-    
+
     unique_clusters = np.unique(clusters[clusters >= 0])
-    logger.info(f"Visualizing latent distributions for {len(unique_clusters)} clusters...")
-    
+    logger.info(
+        f"Visualizing latent distributions for {len(unique_clusters)} clusters..."
+    )
+
     # Fit global PCA on all features for consistent projection
     pca_global = PCA(n_components=3)
     pca_global.fit(lf)
-    
+
     for cluster_id in unique_clusters:
         mask = clusters == cluster_id
         cluster_lf = lf[mask]  # (n_cluster_gaussians, lang_dim)
-        
+
         if len(cluster_lf) < 4:
             continue
-        
+
         # Project to 3D using global PCA
         lf_3d = pca_global.transform(cluster_lf)
-        
+
         fig = plt.figure(figsize=(10, 8))
-        ax = fig.add_subplot(111, projection='3d')
-        
+        ax = fig.add_subplot(111, projection="3d")
+
         scatter = ax.scatter(
-            lf_3d[:, 0], lf_3d[:, 1], lf_3d[:, 2],
+            lf_3d[:, 0],
+            lf_3d[:, 1],
+            lf_3d[:, 2],
             c=np.arange(len(lf_3d)),
-            cmap='viridis',
+            cmap="viridis",
             alpha=0.6,
             s=20,
         )
-        
-        ax.set_xlabel('PC1')
-        ax.set_ylabel('PC2')
-        ax.set_zlabel('PC3')
-        ax.set_title(f'Cluster {cluster_id} Latent Distribution (n={len(cluster_lf)})')
-        
-        plt.colorbar(scatter, label='Gaussian Index', shrink=0.6)
+
+        ax.set_xlabel("PC1")
+        ax.set_ylabel("PC2")
+        ax.set_zlabel("PC3")
+        ax.set_title(f"Cluster {cluster_id} Latent Distribution (n={len(cluster_lf)})")
+
+        plt.colorbar(scatter, label="Gaussian Index", shrink=0.6)
         plt.tight_layout()
         plt.savefig(vis_dir / f"cluster_{cluster_id:03d}_latents.png", dpi=150)
         plt.close(fig)
-    
+
     # Also create combined visualization with all clusters
     fig = plt.figure(figsize=(12, 10))
-    ax = fig.add_subplot(111, projection='3d')
-    
+    ax = fig.add_subplot(111, projection="3d")
+
     colors = plt.cm.tab20(np.linspace(0, 1, len(unique_clusters)))
-    
+
     for i, cluster_id in enumerate(unique_clusters):
         mask = clusters == cluster_id
         cluster_lf = lf[mask]
@@ -1102,23 +1142,25 @@ def visualize_cluster_latent_distributions(
             continue
         lf_3d = pca_global.transform(cluster_lf)
         ax.scatter(
-            lf_3d[:, 0], lf_3d[:, 1], lf_3d[:, 2],
+            lf_3d[:, 0],
+            lf_3d[:, 1],
+            lf_3d[:, 2],
             c=[colors[i % len(colors)]],
             alpha=0.4,
             s=10,
-            label=f'C{cluster_id}' if i < 20 else None,
+            label=f"C{cluster_id}" if i < 20 else None,
         )
-    
-    ax.set_xlabel('PC1')
-    ax.set_ylabel('PC2')
-    ax.set_zlabel('PC3')
-    ax.set_title(f'All Clusters Latent Distribution (PCA, t={timestep_idx})')
+
+    ax.set_xlabel("PC1")
+    ax.set_ylabel("PC2")
+    ax.set_zlabel("PC3")
+    ax.set_title(f"All Clusters Latent Distribution (PCA, t={timestep_idx})")
     if len(unique_clusters) <= 20:
-        ax.legend(loc='upper left', fontsize=8)
+        ax.legend(loc="upper left", fontsize=8)
     plt.tight_layout()
     plt.savefig(vis_dir / "all_clusters_latents.png", dpi=150)
     plt.close(fig)
-    
+
     logger.info(f"Saved latent visualizations to {vis_dir}")
 
 
@@ -1153,7 +1195,12 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
     graph_output_dir = Path(model_path) / cfg.graph_extraction.graph_output_subdir
     graph_output_dir.mkdir(parents=True, exist_ok=True)
 
-    assert cfg.graph_extraction.cluster_method in ["spectral", "precomputed", "hdbscan", "full_hdbscan"]
+    assert cfg.graph_extraction.cluster_method in [
+        "spectral",
+        "precomputed",
+        "hdbscan",
+        "full_hdbscan",
+    ]
     if cfg.graph_extraction.cluster_method == "spectral":
         clusters = spectral_cluster_gaussians(gaussians, cfg=cfg)
     if cfg.graph_extraction.cluster_method == "precomputed":
@@ -1192,6 +1239,8 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
         cfg,
         patch_lf_through_time=lf_patch_through_time,
         instance_lf_through_time=lf_instance_through_time,
+        feature_selection=cfg.graph_extraction.feature_selection,
+        opacities=gaussians.get_opacity.detach().squeeze().cpu().numpy(),
     )
 
     # graph structure

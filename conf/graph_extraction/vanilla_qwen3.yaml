@@ -61,6 +61,7 @@ hdbscan_clustering:
   rbf_sigma_lf_factor: 0.5
 
 # how many vision features represent each cluster
+feature_selection: opacity # one of: [opacity, random]
 features_per_cluster: 64
 
 # lf decoding
