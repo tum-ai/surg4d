@@ -223,6 +223,14 @@ def scene_reconstruction(
         logger.info(f"Rerun logging initialized, will save to {rerun_save_path}")
 
     final_iter = train_iter
+    track_best_checkpoint = args.save_best_checkpoint
+    best_metric = float("inf")
+    if track_best_checkpoint:
+        logger.info(
+            f"Best-checkpoint tracking enabled for {stage}: "
+            f"warmup_iterations={args.best_checkpoint_warmup_iterations}, "
+            "check=every_epoch"
+        )
 
     progress_bar = tqdm(range(first_iter, final_iter), desc="Training progress")
     first_iter += 1
@@ -237,6 +245,8 @@ def scene_reconstruction(
 
     batch_size = opt.batch_size_rgb if "base" in stage else opt.batch_size_language
     logger.info("data loading done")
+    frames_per_epoch = len(train_cams)
+    frames_seen_in_epoch = 0
 
     if opt.dataloader:
         viewpoint_stack = scene.getTrainCameras()
@@ -272,6 +282,28 @@ def scene_reconstruction(
     save_path = os.path.join(scene.model_path, "training_output_img")
     os.makedirs(save_path, exist_ok=True)
     total_time_ongt = 0
+
+    def build_training_debug_image(
+        image,
+        gt_image,
+        language_feature,
+        gt_language_feature,
+    ):
+        if "base" in stage:
+            images = [
+                image2save(image, "rgb"),
+                image2save(gt_image, "rgb"),
+            ]
+        else:
+            if language_feature is None:
+                language_feature = torch.zeros_like(gt_language_feature)
+            images = [
+                image2save(image, "rgb"),
+                image2save(gt_image, "rgb"),
+                image2save(language_feature, "lang"),
+                image2save(gt_language_feature, "lang"),
+            ]
+        return concat_images(images, mode="horizontal")
 
     # Consistent indices for logging
     num_gaussians = gaussians.get_xyz.shape[0]
@@ -414,6 +446,10 @@ def scene_reconstruction(
                 idx += 1
             if len(viewpoint_cams) == 0:
                 continue
+        frames_seen_in_epoch += len(viewpoint_cams)
+        epoch_completed_this_iter = frames_seen_in_epoch >= frames_per_epoch
+        if epoch_completed_this_iter:
+            frames_seen_in_epoch = frames_seen_in_epoch % frames_per_epoch
         # print(len(viewpoint_cams))
         # breakpoint()
         # Render
@@ -516,15 +552,18 @@ def scene_reconstruction(
         # breakpoint()
         # print(dataset.lf_path)
         resdict = {}
+        cosloss = None
+        per_head_cosloss = None
         # Image-based stage
         if "base" in stage:
-            Ll1 = l1_loss(image_tensor, gt_image_tensor[:, :3, :, :])
-            resdict["rgb_l1"] = Ll1.item()
+            rgb_l1 = l1_loss(image_tensor, gt_image_tensor[:, :3, :, :])
+            Ll1 = args.rgb_l1_weight * rgb_l1
+            resdict["rgb_l1"] = rgb_l1.item()
 
-            if args.depth_loss_weight != 0.0:
+            if args.depth_l1_weight != 0.0:
                 depth_loss = l1_loss(depth_map_tensor, gt_depth_map_tensor)
                 resdict["depth_l1"] = depth_loss.item()
-                Ll1 += args.depth_loss_weight * depth_loss
+                Ll1 += args.depth_l1_weight * depth_loss
         # Language feature stage
         else:
             Ll1 = 0.0
@@ -537,15 +576,29 @@ def scene_reconstruction(
             # Features are currently (B * C, H, W) -> (B, C, H * W) -> (H * W * B, C)
             masked_language_feature_tensor = masked_language_feature_tensor.reshape(batch_size, feature_dim, -1).permute(2, 0, 1).reshape(-1, feature_dim)
             masked_gt_language_feature_tensor = masked_gt_language_feature_tensor.reshape(batch_size, feature_dim, -1).permute(2, 0, 1).reshape(-1, feature_dim)
-            target = torch.ones(masked_language_feature_tensor.shape[0], device=masked_language_feature_tensor.device)
-            cosloss = cosine_similarity_loss(masked_language_feature_tensor, masked_gt_language_feature_tensor, target)
-            Ll1 += args.beta * cosloss
+            num_lang_features = int(os.environ["num_lang_features"])
+            lang_feature_dim = int(os.environ["lang_feature_dim"])
+            assert feature_dim == num_lang_features * lang_feature_dim, (
+                f"Feature dim mismatch: got {feature_dim}, expected "
+                f"{num_lang_features} * {lang_feature_dim}"
+            )
+            per_head_cosloss = []
+            for head_idx in range(num_lang_features):
+                start_idx = head_idx * lang_feature_dim
+                end_idx = start_idx + lang_feature_dim
+                head_pred = masked_language_feature_tensor[:, start_idx:end_idx]
+                head_gt = masked_gt_language_feature_tensor[:, start_idx:end_idx]
+                head_target = torch.ones(head_pred.shape[0], device=head_pred.device)
+                head_cosloss = cosine_similarity_loss(head_pred, head_gt, head_target)
+                per_head_cosloss.append(head_cosloss)
+            cosloss = torch.stack(per_head_cosloss).mean()
+            Ll1 += args.lang_cosine_weight * cosloss
             resdict["lang_l1"] = cosloss.item()
 
             if joint_train:
                 Ll1_rgb = l1_loss(image_tensor, gt_image_tensor[:, :3, :, :])
                 resdict["rgb_l1"] = Ll1_rgb.item()
-                Ll1 += Ll1_rgb
+                Ll1 += args.joint_rgb_l1_weight * Ll1_rgb
         
         # if opt.include_feature:
         #     Ll1 += l1_loss(language_feature*language_feature_mask, gt_language_feature*language_feature_mask)
@@ -555,26 +608,32 @@ def scene_reconstruction(
         # norm
 
         loss = Ll1
+        if tb_writer and cosloss is not None:
+            tb_writer.add_scalar(
+                f"{stage}/train_loss_patches/lang_cosine_raw",
+                cosloss.item(),
+                iteration,
+            )
+            if per_head_cosloss is not None:
+                for head_idx, head_cosloss in enumerate(per_head_cosloss):
+                    tb_writer.add_scalar(
+                        f"{stage}/train_loss_patches/lang_cosine_raw_head_{head_idx}",
+                        head_cosloss.item(),
+                        iteration,
+                    )
         if os.getenv("wandb", "f") == "t":
             wandb.log(resdict)
 
         ################ DEBUG  ################
         if iteration % log_iter_interval == 0:
-            if "base" in stage:
-                images = [
-                    image2save(image, "rgb"),
-                    image2save(gt_image, "rgb"),
-                ]
-            else:
-                if language_feature is None:
-                    language_feature = torch.zeros_like(gt_language_feature)
-                images = [
-                    image2save(image, "rgb"),
-                    image2save(gt_image, "rgb"),
-                    image2save(language_feature, "lang"),
-                    image2save(gt_language_feature, "lang"),
-                ]
-            concatenated_image = concat_images(images, mode="horizontal")
+            concatenated_image = build_training_debug_image(
+                image=image,
+                gt_image=gt_image,
+                language_feature=language_feature,
+                gt_language_feature=(
+                    None if "base" in stage else gt_language_feature
+                ),
+            )
 
             #
             concatenated_image.save(
@@ -661,7 +720,7 @@ def scene_reconstruction(
                     rotations = gaussians._rotation  # Raw, not get_rotation
                     opacity = gaussians._opacity  # Raw
                     shs = gaussians.get_features
-                    language_feature = gaussians.get_language_feature
+                    lang_feat_raw = gaussians.get_language_feature
                     
                     # Get colors from base SH DC component (shared)
                     sampled_shs = shs[sample_indices, 0, :].detach().cpu().numpy()
@@ -685,7 +744,7 @@ def scene_reconstruction(
                     # Apply deformation to get deformed positions
                     with torch.no_grad():
                         means3D_deformed, scales_deformed, rotations_deformed, opacity_deformed, shs_deformed, lang_deformed, coff = gaussians._deformation(
-                            means3D, scales, rotations, opacity, shs, language_feature, time_tensor
+                            means3D, scales, rotations, opacity, shs, lang_feat_raw, time_tensor
                         )
                     
                     # # Log DEFORMED Gaussian positions with actual colors
@@ -729,10 +788,10 @@ def scene_reconstruction(
                 hyper.l1_time_planes,
                 hyper.plane_tv_weight,
             )
-            loss += tv_loss
-        if opt.lambda_dssim != 0:
+            loss += args.fine_regulation_weight * tv_loss
+        if args.ssim_weight != 0:
             ssim_loss = ssim(image_tensor, gt_image_tensor)
-            loss += opt.lambda_dssim * (1.0 - ssim_loss)
+            loss += args.ssim_weight * (1.0 - ssim_loss)
 
         loss.backward()
 
@@ -751,6 +810,31 @@ def scene_reconstruction(
 
         with torch.no_grad():
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+            should_check_best = (
+                track_best_checkpoint
+                and iteration >= args.best_checkpoint_warmup_iterations
+                and (epoch_completed_this_iter or iteration == final_iter)
+            )
+            if should_check_best:
+                current_metric = loss.item()
+                metric_name = "train_loss"
+                if current_metric < best_metric:
+                    best_metric = current_metric
+                    scene.save(iteration, stage, best=True)
+                    if stage == "fine-lang":
+                        best_debug_image = build_training_debug_image(
+                            image=image,
+                            gt_image=gt_image,
+                            language_feature=language_feature,
+                            gt_language_feature=gt_language_feature,
+                        )
+                        best_debug_image.save(
+                            os.path.join(save_path, f"output_{stage}_best.png")
+                        )
+                    logger.info(
+                        f"[ITER {iteration}] New best checkpoint for {stage}: "
+                        f"{metric_name}={current_metric:.8f}"
+                    )
 
             total_point = gaussians._xyz.shape[0]
             if iteration % 10 == 0:
@@ -1047,6 +1131,16 @@ def training(
                 args,
                 timer,
             )
+        if opt.fine_base_iterations > 0 and opt.fine_lang_iterations > 0:
+            logger.info(
+                "Reloading best checkpoint from fine-base before starting fine-lang"
+            )
+            scene = Scene(
+                dataset,
+                gaussians,
+                load_iteration=-2,
+                load_stage="fine-base",
+            )
         if opt.fine_lang_iterations > 0:
             scene_reconstruction(
                 dataset,
@@ -1086,8 +1180,8 @@ def prepare_output_and_logger(expname, timestamp=None):
         if timestamp is None:
             import time
             timestamp = time.strftime("%Y%m%d_%H%M%S")
-        # Create a subdirectory with timestamp for TensorBoard logs
-        tb_log_dir = os.path.join(args.model_path, "tensorboard_logs", timestamp)
+        tb_subdir = f"{args.tensorboard_subdir}_{timestamp}"
+        tb_log_dir = os.path.join(args.model_path, "tensorboard_logs", tb_subdir)
         os.makedirs(tb_log_dir, exist_ok=True)
         tb_writer = SummaryWriter(tb_log_dir)
         logger.info("TensorBoard log directory: {}".format(tb_log_dir))
@@ -1293,6 +1387,13 @@ if __name__ == "__main__":
     parser.add_argument("--resume_from_iter", type=int, default=-1)
     # custom loss stuff
     parser.add_argument("--depth_loss_weight", type=float, default=0.0)
+    parser.add_argument("--rgb_l1_weight", type=float, default=1.0)
+    parser.add_argument("--depth_l1_weight", type=float, default=1.0)
+    parser.add_argument("--lang_cosine_weight", type=float, default=0.01)
+    parser.add_argument("--joint_rgb_l1_weight", type=float, default=1.0)
+    parser.add_argument("--ssim_weight", type=float, default=0.0)
+    parser.add_argument("--fine_regulation_weight", type=float, default=1.0)
+    parser.add_argument("--tensorboard_subdir", type=str, default="run")
 
     args = parser.parse_args(sys.argv[1:])
     if args.configs:

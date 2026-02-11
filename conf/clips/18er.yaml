@@ -1,0 +1,5 @@
+- name: video18_00979
+  video_id: 18
+  first_frame: 979
+  last_frame: 1059
+  frame_stride: 1

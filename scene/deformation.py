@@ -67,18 +67,20 @@ class Deformation(nn.Module):
         # Multiple independent language feature heads
         self.num_lang_features = int(os.getenv("num_lang_features", 2))  # default: patch + instance
         self.lang_feature_dim = int(os.getenv("lang_feature_dim", 3))   # dimension of each feature
+        self.lang_deform_width = int(os.getenv("lang_deform_width", str(self.W)))  # default: same as backbone
         language_feature_hiddendim = int(os.getenv("language_feature_hiddendim", 6))  # total dim for backward compat
         
         # Create independent deformation head for each language feature
         # Each head takes its own feature + time positional encoding as input
+        lang_W = self.lang_deform_width
         self.lang_deforms = nn.ModuleList([
             nn.Sequential(
                 nn.ReLU(),
-                nn.Linear(self.args.timebase_pe*2+1+self.lang_feature_dim, self.W),
+                nn.Linear(self.args.timebase_pe*2+1+self.lang_feature_dim, lang_W),
                 nn.ReLU(),
-                nn.Linear(self.W, self.W),
+                nn.Linear(lang_W, lang_W),
                 nn.ReLU(),
-                nn.Linear(self.W, self.lang_feature_dim)
+                nn.Linear(lang_W, self.lang_feature_dim)
             )
             for _ in range(self.num_lang_features)
         ])

@@ -303,11 +303,16 @@ class GaussianModel:
             # Set requires_grad for all parameters
             self._xyz.requires_grad_(joint_train and not freeze_xyz)
             self._deformation.requires_grad_(joint_train)
+            # Enable gradients for the actual language deformation heads (ModuleList) and their scaling alphas
+            self._deformation.deformation_net.lang_deforms.requires_grad_(no_dlang==0)
+            for alpha in self._deformation.deformation_net.lang_alphas:
+                alpha.requires_grad_(no_dlang==0)
+            # Legacy single head (used with use_discrete_lang_f only)
             self._deformation.deformation_net.lang_deform.requires_grad_(no_dlang==0)
             if 'discrete' in stage:
                 self._deformation.deformation_net.discrete_coff_generator.requires_grad_(True)
 
-            print(f"set self._deformation.deformation_net.lang_deform.requires_grad_ to {no_dlang==0}")
+            print(f"set lang_deforms.requires_grad_ to {no_dlang==0}")
             self._features_dc.requires_grad_(joint_train)
             self._features_rest.requires_grad_(joint_train)
             self._scaling.requires_grad_(joint_train)

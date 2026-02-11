@@ -15,9 +15,6 @@ from utils.params_utils import merge_hparams
 from train import training
 from render import render_sets
 
-from utils.gaussian_loading_utils import get_latest_model_iteration
-
-
 def train_splat(clip: DictConfig, cfg: DictConfig):
     """Train Gaussian Splatting for a single clip."""
 
@@ -28,6 +25,7 @@ def train_splat(clip: DictConfig, cfg: DictConfig):
     os.environ["use_discrete_lang_f"] = cfg.splat.use_discrete_lang_f
     os.environ["num_lang_features"] = str(cfg.splat.num_lang_features)
     os.environ["lang_feature_dim"] = str(cfg.splat.lang_feature_dim)
+    os.environ["lang_deform_width"] = str(cfg.splat.lang_deform_width)
     os.environ["centers_num"] = str(cfg.splat.centers_num)
 
     # Experiment name is just the clip directory name
@@ -71,12 +69,19 @@ def train_splat(clip: DictConfig, cfg: DictConfig):
     parser.add_argument("--resume_from_stage", type=str, default="")
     parser.add_argument("--resume_from_iter", type=int, default=-1)
     parser.add_argument("--depth_loss_weight", type=float, default=0.0)
+    parser.add_argument("--rgb_l1_weight", type=float, default=1.0)
+    parser.add_argument("--depth_l1_weight", type=float, default=1.0)
+    parser.add_argument("--lang_cosine_weight", type=float, default=0.01)
+    parser.add_argument("--joint_rgb_l1_weight", type=float, default=1.0)
+    parser.add_argument("--ssim_weight", type=float, default=0.0)
+    parser.add_argument("--fine_regulation_weight", type=float, default=1.0)
     parser.add_argument("--coarse_freeze_xyz", action="store_true")
     parser.add_argument("--coarse_frame_idx", type=int, default=None)
     # Progressive window arguments for fine stage training
     parser.add_argument("--progressive_window_enabled", action="store_true")
     parser.add_argument("--progressive_window_warmup_iterations", type=int, default=8000)
     parser.add_argument("--progressive_window_center_frame_idx", type=int, default=None)
+    parser.add_argument("--tensorboard_subdir", type=str, default="run")
 
     # Build command line args
     cmd_args = [
@@ -97,7 +102,7 @@ def train_splat(clip: DictConfig, cfg: DictConfig):
         "--no_dlang",
         "0" if cfg.splat.dynamic_language else "1",
         "--depth_loss_weight",
-        str(cfg.splat.depth_loss_weight),
+        str(cfg.splat.loss_weights.depth_l1),
     ]
     
     # Add coarse_freeze_xyz flag if enabled
@@ -157,16 +162,40 @@ def train_splat(clip: DictConfig, cfg: DictConfig):
     args.fine_base_iterations = cfg.splat.fine_base_iterations
     args.fine_lang_iterations = cfg.splat.fine_lang_iterations
     args.densify_until_iter = cfg.splat.densify_until_iter
-    
-    # Override dynamic property flags from Hydra config
-    # These are store_true flags with defaults, so we set them directly
-    args.no_dshs = not cfg.splat.dynamic_color  # dynamic SH coefficients (RGB)
-    args.no_ds = not cfg.splat.dynamic_scale    # dynamic gaussian scale
-    
+    args.save_best_checkpoint = cfg.splat.save_best_checkpoint
+    args.best_checkpoint_warmup_iterations = cfg.splat.best_checkpoint_warmup_iterations
+    args.rgb_l1_weight = cfg.splat.loss_weights.rgb_l1
+    args.depth_l1_weight = cfg.splat.loss_weights.depth_l1
+    args.depth_loss_weight = cfg.splat.loss_weights.depth_l1
+    args.lang_cosine_weight = cfg.splat.loss_weights.lang_cosine
+    args.joint_rgb_l1_weight = cfg.splat.loss_weights.joint_rgb_l1
+    args.ssim_weight = cfg.splat.loss_weights.ssim
+    args.lambda_dssim = cfg.splat.loss_weights.ssim
+    args.fine_regulation_weight = cfg.splat.loss_weights.fine_regulation
+    args.time_smoothness_weight = cfg.splat.loss_weights.time_smoothness
+    args.l1_time_planes = cfg.splat.loss_weights.l1_time_planes
+    args.plane_tv_weight = cfg.splat.loss_weights.plane_tv
+    args.position_lr_init = cfg.splat.learning_rates.position_init
+    args.position_lr_final = cfg.splat.learning_rates.position_final
+    args.position_lr_delay_mult = cfg.splat.learning_rates.position_delay_mult
+    args.position_lr_max_steps = cfg.splat.learning_rates.position_max_steps
+    args.deformation_lr_init = cfg.splat.learning_rates.deformation_init
+    args.deformation_lr_final = cfg.splat.learning_rates.deformation_final
+    args.deformation_lr_delay_mult = cfg.splat.learning_rates.deformation_delay_mult
+    args.grid_lr_init = cfg.splat.learning_rates.grid_init
+    args.grid_lr_final = cfg.splat.learning_rates.grid_final
+    args.feature_lr = cfg.splat.learning_rates.feature
+    args.opacity_lr = cfg.splat.learning_rates.opacity
+    args.language_feature_lr = cfg.splat.learning_rates.language_feature
+    args.scaling_lr = cfg.splat.learning_rates.scaling
+    args.rotation_lr = cfg.splat.learning_rates.rotation
+    args.no_dshs = not cfg.splat.dynamic_color
+    args.no_ds = not cfg.splat.dynamic_scale
     args.rezero_init = cfg.splat.rezero_init
 
     # Get timestamp
     timestamp = time_module.strftime("%Y%m%d_%H%M%S")
+    args.tensorboard_subdir = cfg.splat.tensorboard_subdir
 
     # Inject args into train module's global namespace (train.py expects it)
     import train as train_mod
@@ -201,16 +230,25 @@ def train_splat(clip: DictConfig, cfg: DictConfig):
         "fine_lang": "fine-lang",
     }
 
+    best_checkpoint_iteration = -2
     for stage_key, stage_name in stage_map.items():
         if cfg.splat.render_outputs.get(stage_key, False):
-            render_splat(clip, cfg, args.model_path, stage_name)
+            render_splat(
+                clip,
+                cfg,
+                args.model_path,
+                stage_name,
+                iteration=best_checkpoint_iteration,
+            )
     
     # Clean up GPU memory after training
     gc.collect()
     torch.cuda.empty_cache()
 
 
-def render_splat(clip: DictConfig, cfg: DictConfig, model_path: str, stage: str):
+def render_splat(
+    clip: DictConfig, cfg: DictConfig, model_path: str, stage: str, iteration: int
+):
     """Render RGB and language outputs after training for a specific stage.
 
     Args:
@@ -218,6 +256,7 @@ def render_splat(clip: DictConfig, cfg: DictConfig, model_path: str, stage: str)
         cfg: Full hydra configuration
         model_path: Path to the trained model
         stage: Training stage name (e.g., "fine-lang", "coarse-base")
+        iteration: Checkpoint selector to render. Use -2 for stage best checkpoint.
     """
 
     clip_dir = Path(cfg.preprocessed_root) / clip.name
@@ -240,7 +279,7 @@ def render_splat(clip: DictConfig, cfg: DictConfig, model_path: str, stage: str)
         hp = ModelHiddenParams(parser)
 
         # Add render-specific arguments
-        parser.add_argument("--iteration", default=-1, type=int)
+        parser.add_argument("--iteration", default=-2, type=int)
         parser.add_argument("--skip_train", action="store_true")
         parser.add_argument("--skip_test", action="store_true")
         parser.add_argument("--skip_video", action="store_true")
@@ -260,6 +299,8 @@ def render_splat(clip: DictConfig, cfg: DictConfig, model_path: str, stage: str)
             cfg.splat.latent_cat_feat_subdir,
             "--model_path",
             model_path,
+            "--iteration",
+            str(iteration),
             "--feature_level",
             "0",
             "--skip_train",
@@ -303,9 +344,6 @@ def render_splat(clip: DictConfig, cfg: DictConfig, model_path: str, stage: str)
         args.no_dshs = not cfg.splat.dynamic_color
         args.no_ds = not cfg.splat.dynamic_scale
         args.rezero_init = cfg.splat.rezero_init
-
-        if args.iteration == -1:
-            args.iteration = get_latest_model_iteration(cfg)
 
         # Call render function
         render_sets(

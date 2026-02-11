@@ -11,7 +11,6 @@
 
 import os
 import random
-import json
 from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
@@ -24,6 +23,10 @@ class Scene:
 
     gaussians : GaussianModel
 
+    @staticmethod
+    def _best_stage_dirname(stage: str) -> str:
+        return f"{stage}_best"
+
     def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0], load_coarse=False,load_stage='fine-lang'):
         """b
         :param path: Path to colmap scene main folder.
@@ -32,12 +35,18 @@ class Scene:
         self.loaded_iter = None
         self.gaussians = gaussians
         
+        self.load_best = False
         if load_iteration:
             if load_iteration == -1:
                 self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"),load_stage)
+            elif load_iteration == -2:
+                self.load_best = True
             else:
                 self.loaded_iter = load_iteration
-            print("Loading trained model at iteration {}".format(self.loaded_iter))
+            if self.load_best:
+                print(f"Loading best trained model for stage {load_stage}")
+            else:
+                print("Loading trained model at iteration {}".format(self.loaded_iter))
 
         self.train_cameras = {}
         self.test_cameras = {}
@@ -92,15 +101,21 @@ class Scene:
             # Store number of frames for time-to-frame conversion
             self.gaussians._num_frames = cotracker_data["gaussian_positions_precomputed"].shape[0]
         
-        if self.loaded_iter:
-            self.gaussians.load_ply(os.path.join(self.model_path,
-                                                            "point_cloud",
-                                                            f"{load_stage}_iteration_" + str(self.loaded_iter),
-                                                            "point_cloud.ply"))
-            self.gaussians.load_model(os.path.join(self.model_path,
-                                                        "point_cloud",
-                                                        f"{load_stage}_iteration_" + str(self.loaded_iter),
-                                                    ))
+        if self.loaded_iter or self.load_best:
+            if self.load_best:
+                point_cloud_dir = os.path.join(
+                    self.model_path,
+                    "point_cloud",
+                    self._best_stage_dirname(load_stage),
+                )
+            else:
+                point_cloud_dir = os.path.join(
+                    self.model_path,
+                    "point_cloud",
+                    f"{load_stage}_iteration_" + str(self.loaded_iter),
+                )
+            self.gaussians.load_ply(os.path.join(point_cloud_dir, "point_cloud.ply"))
+            self.gaussians.load_model(point_cloud_dir)
             # Initialize CoTracker control-point-driven mask if data is available (same as create_from_pcd)
             if cotracker_data is not None:
                 from utils.cotracker_gaussian_utils import initialize_control_point_driven_mask
@@ -117,8 +132,15 @@ class Scene:
         else:
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent, self.maxtime)
 
-    def save(self, iteration, stage):
-        point_cloud_path = os.path.join(self.model_path, f"point_cloud/{stage}_iteration_{iteration}")
+    def save(self, iteration, stage, best=False):
+        if best:
+            point_cloud_path = os.path.join(
+                self.model_path,
+                "point_cloud",
+                self._best_stage_dirname(stage),
+            )
+        else:
+            point_cloud_path = os.path.join(self.model_path, f"point_cloud/{stage}_iteration_{iteration}")
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
         self.gaussians.save_deformation(point_cloud_path)
     def getTrainCameras(self, scale=1.0):

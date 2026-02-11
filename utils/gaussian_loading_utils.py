@@ -25,3 +25,13 @@ def get_latest_model_iteration(cfg: DictConfig):
         iteration = last_stage_iter
         logger.info(f"No matching save_iterations found, using last stage iteration {iteration} for stage {stage}")
     return iteration
+
+
+def get_best_model_iteration(cfg: DictConfig, clip_name: str) -> int:
+    stage = cfg.graph_extraction.load_stage
+    iteration = -2
+    logger.info(
+        f"Using best checkpoint directory point_cloud/{stage}_best "
+        f"for clip {clip_name}"
+    )
+    return iteration

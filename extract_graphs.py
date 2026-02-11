@@ -29,7 +29,7 @@ from rerun_utils import (
     log_graph_structure_through_time,
 )
 from utils.sh_utils import SH2RGB
-from utils.gaussian_loading_utils import get_latest_model_iteration
+from utils.gaussian_loading_utils import get_best_model_iteration, get_latest_model_iteration
 
 
 logging.basicConfig(level=logging.INFO)
@@ -113,6 +113,7 @@ def load_gaussian_model(
     parser.add_argument("--clip_load_stage", type=str, default=None)
     parser.add_argument("--qwen_load_stage", type=str, default=None)
     parser.add_argument("--store_verbose", action="store_true")
+    parser.add_argument("--use_best_splat_checkpoint", action="store_true")
 
     # Build command line args
     qwen_ae_path = get_autoencoder_path(clip, cfg)
@@ -142,6 +143,8 @@ def load_gaussian_model(
 
     if cfg.graph_extraction.store_verbose:
         cmd_args.append("--store_verbose")
+    if cfg.graph_extraction.use_best_splat_checkpoint:
+        cmd_args.append("--use_best_splat_checkpoint")
 
     # Parse arguments
     args = parser.parse_args(cmd_args)
@@ -167,7 +170,10 @@ def load_gaussian_model(
         args = merge_hparams(args, config)
 
     if args.iteration == -1:
-        args.iteration = get_latest_model_iteration(cfg)
+        if args.use_best_splat_checkpoint:
+            args.iteration = get_best_model_iteration(cfg, clip.name)
+        else:
+            args.iteration = get_latest_model_iteration(cfg)
 
     # Set centers_num from config if available (needed for discrete_coff_generator)
     # This must be set before creating GaussianModel

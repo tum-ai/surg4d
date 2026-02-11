@@ -10,6 +10,7 @@ num_lang_features: ${splat.num_lang_features}
 lang_feature_dim: ${splat.lang_feature_dim}
 load_stage: fine-lang
 iteration: -1
+use_best_splat_checkpoint: false
 
 # ae params
 checkpoint_subdir: ${autoencoder.checkpoint_subdir}

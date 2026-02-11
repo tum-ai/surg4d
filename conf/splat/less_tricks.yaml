@@ -1,6 +1,32 @@
 config_path: arguments/cholecseg8k/no_tv.py # this config disables total variation losses
 
-depth_loss_weight: 1.0
+loss_weights:
+  rgb_l1: 1.0
+  depth_l1: 1.0
+  lang_cosine: 0.01
+  joint_rgb_l1: 1.0
+  ssim: 0.0
+  fine_regulation: 1.0
+  time_smoothness: 0.0
+  l1_time_planes: 0.0
+  plane_tv: 0.0
+
+learning_rates:
+  position_init: 0.00016
+  position_final: 0.0000016
+  position_delay_mult: 0.01
+  position_max_steps: 20000
+  deformation_init: 0.00016
+  deformation_final: 0.000016
+  deformation_delay_mult: 0.01
+  grid_init: 0.0016
+  grid_final: 0.00016
+  feature: 0.0025
+  opacity: 0.05
+  language_feature: 0.0025
+  scaling: 0.005
+  rotation: 0.001
+tensorboard_subdir: "run"
 opacity_loss_weight: 0.5
 
 dynamic_language: true
@@ -28,6 +54,9 @@ test_iterations: [2000, 10000] # when to compute val metrics (logged to tensorbo
 save_iterations: [2000, 10000] # when to save model checkpoints to disk (for rendering, graph extraction, etc.)
 checkpoint_iterations: [] # when to save full checkpoints (with optimizer states for resuming)
 
+save_best_checkpoint: true
+best_checkpoint_warmup_iterations: 500
+
 render_outputs:
   coarse_base: false
   coarse_lang: false
@@ -41,6 +70,7 @@ use_discrete_lang_f: f
 # multiple independent language features (e.g., patch + instance)
 num_lang_features: 2  # number of independent language feature types
 lang_feature_dim: 3   # dimension of each feature (must match autoencoder latent_dim)
+lang_deform_width: 128  # hidden width of language deformation heads (independent from backbone net_width)
 
 # model initialization
 rezero_init: false  # Initialize deformation deltas to 0 using ReZero scaling
