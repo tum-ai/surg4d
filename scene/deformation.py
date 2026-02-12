@@ -88,9 +88,14 @@ class Deformation(nn.Module):
             for _ in range(self.num_lang_features)
         ])
         
-        # Legacy single head for backward compatibility (used with use_discrete_lang_f)
+        # Legacy single head for backward compatibility
         self.lang_deform = nn.Sequential(nn.ReLU(),nn.Linear(self.args.timebase_pe*2+1+language_feature_hiddendim,self.W),nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, language_feature_hiddendim))
-        self.discrete_coff_generator = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, int(os.getenv("centers_num",3))))
+        # Per-language-feature coefficient prediction heads for discrete mode
+        centers_num = int(os.getenv("centers_num", 3))
+        self.discrete_coff_generators = nn.ModuleList([
+            nn.Sequential(nn.ReLU(), nn.Linear(self.W, self.W), nn.ReLU(), nn.Linear(self.W, centers_num))
+            for _ in range(self.num_lang_features)
+        ])
         
         # ReZero scaling parameters - initialize to 0 so deltas start at 0
         # This ensures the network starts as identity and gradually learns deformations
@@ -102,7 +107,7 @@ class Deformation(nn.Module):
             self.shs_alpha = nn.Parameter(torch.zeros(1))
             # Independent alpha for each language feature
             self.lang_alphas = nn.ParameterList([nn.Parameter(torch.zeros(1)) for _ in range(self.num_lang_features)])
-            self.lang_alpha = nn.Parameter(torch.zeros(1))  # legacy for discrete mode
+            self.lang_alpha = nn.Parameter(torch.zeros(1))  # legacy
         else:
             self.register_buffer('pos_alpha', torch.ones(1))
             self.register_buffer('scales_alpha', torch.ones(1))
@@ -111,7 +116,7 @@ class Deformation(nn.Module):
             self.register_buffer('shs_alpha', torch.ones(1))
             # Independent alpha for each language feature
             self.lang_alphas = nn.ParameterList([nn.Parameter(torch.ones(1)) for _ in range(self.num_lang_features)])
-            self.register_buffer('lang_alpha', torch.ones(1))  # legacy for discrete mode
+            self.register_buffer('lang_alpha', torch.ones(1))  # legacy
     def query_time(self, rays_pts_emb, scales_emb, rotations_emb, time_feature, time_emb):
 
         if self.no_grid:
@@ -199,15 +204,31 @@ class Deformation(nn.Module):
             # breakpoint()
             shs = shs_emb*mask.unsqueeze(-1) + dshs
         
-        if os.getenv('use_discrete_lang_f','f') == 't' and init_centers == False:
-            # Legacy discrete language feature mode (single head, full dim)
-            lang_feature = lang_emb[:,:int(os.getenv("language_feature_hiddendim",3)*int(os.getenv("centers_num",3)))]
-            lang_feature = lang_feature.view(lang_feature.shape[0], int(os.getenv("centers_num",3)), -1)
-            lang_feature = lang_feature / (torch.norm(lang_feature, dim=-1, keepdim=True))
-            coff = self.discrete_coff_generator(hidden)
+        # Discrete mode only active when: discrete env var is set AND not initializing centers AND language deformation is enabled
+        use_discrete = os.getenv('use_discrete_lang_f','f') == 't' and not init_centers and not self.args.no_dlang
+        if use_discrete:
+            # Discrete coefficient mode: per-language-feature base states + coefficient prediction
+            centers_num = int(os.getenv("centers_num", 3))
+            lang_features_out = []
+            coff = []
+            for i in range(self.num_lang_features):
+                # Extract base states for this language feature: (N, centers_num * lang_feature_dim)
+                start_idx = i * centers_num * self.lang_feature_dim
+                end_idx = start_idx + centers_num * self.lang_feature_dim
+                bases_i = lang_emb[:, start_idx:end_idx]
+                bases_i = bases_i.view(-1, centers_num, self.lang_feature_dim)  # (N, centers_num, lang_feature_dim)
+                bases_i = bases_i / (bases_i.norm(dim=-1, keepdim=True) + 1e-9)
+                
+                # Predict coefficients for this language feature from backbone hidden state
+                coff_i = self.discrete_coff_generators[i](hidden)  # (N, centers_num)
+                coff.append(coff_i)
+                
+                # Weighted sum of base states
+                feat_out = torch.matmul(coff_i.unsqueeze(1), bases_i).squeeze(1)  # (N, lang_feature_dim)
+                feat_out = feat_out / (feat_out.norm(dim=-1, keepdim=True) + 1e-9)
+                lang_features_out.append(feat_out)
             
-            lang_feature = torch.matmul(coff.unsqueeze(1), lang_feature).squeeze(1)
-            lang_feature = lang_feature / (torch.norm(lang_feature, dim=1, keepdim=True) + + 1e-9) 
+            lang_feature = torch.cat(lang_features_out, dim=-1)
         else:
             coff = None
             assert (init_centers and self.args.no_dlang)==False , " Dlang must be enabled when initialized centers"

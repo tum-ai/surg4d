@@ -10,6 +10,8 @@ os.environ["language_feature_hiddendim"] = "32"
 os.environ["use_discrete_lang_f"] = "f"
 os.environ["num_lang_features"] = "2"
 os.environ["lang_feature_dim"] = "16"
+os.environ["lang_deform_width"] = "256"
+os.environ["lang_timebase_pe"] = "4"
 os.environ["centers_num"] = "10"
 
 from argparse import ArgumentParser

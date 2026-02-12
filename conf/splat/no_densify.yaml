@@ -13,10 +13,10 @@ loss_weights:
   plane_tv: 0.0 # fine stages: weight on spatial total-variation regularization of deformation planes
 
 learning_rates:
+  lr_max_steps: 5000 # xyz/deformation/grid LR schedule horizon in optimizer steps
   position_init: 0.00016 # xyz Adam LR at start (scheduled)
   position_final: 0.0000016 # xyz Adam LR at end of schedule
   position_delay_mult: 0.01 # xyz LR schedule warmup multiplier
-  position_max_steps: 20000 # xyz/deformation/grid LR schedule horizon in optimizer steps
   deformation_init: 0.00016 # deformation MLP LR at start (scheduled), also used by lang deformation heads
   deformation_final: 0.000016 # deformation MLP LR at end of schedule, also used by lang deformation heads
   deformation_delay_mult: 0.01 # deformation/grid LR schedule warmup multiplier, also used by lang deformation heads
@@ -28,7 +28,7 @@ learning_rates:
   scaling: 0.005 # scale LR
   rotation: 0.001 # rotation LR
 
-tensorboard_subdir: "pe_4_4layers" # TensorBoard subdir prefix; actual folder is "<prefix>_<timestamp>"
+tensorboard_subdir: "correct_lr_schedule" # TensorBoard subdir prefix; actual folder is "<prefix>_<timestamp>"
 
 # CoTracker3 control point settings
 cotracker_k_neighbors: 3 # number of nearest control points per Gaussian
@@ -41,8 +41,8 @@ dynamic_scale: true
 dynamic_color: true
 
 # coarse iterations cut by 10x because we're only overfitting the feature heads on a single frame
-coarse_base_iterations: 0
-coarse_lang_iterations: 1
+coarse_base_iterations: 500
+coarse_lang_iterations: 500
 fine_base_iterations: 5000 # ! tmp while experimenting
 fine_lang_iterations: 5000
 
@@ -75,7 +75,7 @@ render_outputs:
 
 # environment variables
 language_feature_hiddendim: 32 # total dim = num_lang_features * lang_feature_dim
-use_discrete_lang_f: f
+use_discrete_lang_f: t
 centers_num: 10  # number of discrete deformation states to interpolate between
 
 # multiple independent language features (e.g., patch + instance)

@@ -179,7 +179,7 @@ def train_splat(clip: DictConfig, cfg: DictConfig):
     args.position_lr_init = cfg.splat.learning_rates.position_init
     args.position_lr_final = cfg.splat.learning_rates.position_final
     args.position_lr_delay_mult = cfg.splat.learning_rates.position_delay_mult
-    args.position_lr_max_steps = cfg.splat.learning_rates.position_max_steps
+    args.lr_max_steps = cfg.splat.learning_rates.lr_max_steps
     args.deformation_lr_init = cfg.splat.learning_rates.deformation_init
     args.deformation_lr_final = cfg.splat.learning_rates.deformation_final
     args.deformation_lr_delay_mult = cfg.splat.learning_rates.deformation_delay_mult

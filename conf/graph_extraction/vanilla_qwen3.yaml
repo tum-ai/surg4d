@@ -8,9 +8,12 @@ dynamic_language: ${splat.dynamic_language}
 latent_cat_feat_subdir: ${splat.latent_cat_feat_subdir}
 num_lang_features: ${splat.num_lang_features}
 lang_feature_dim: ${splat.lang_feature_dim}
+lang_deform_width: ${splat.lang_deform_width}
+lang_timebase_pe: ${splat.lang_timebase_pe}
+centers_num: ${splat.centers_num}
 load_stage: fine-lang
 iteration: -1
-use_best_splat_checkpoint: false
+use_best_splat_checkpoint: true
 # iteration: 1000
 
 # ae params

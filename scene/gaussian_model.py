@@ -264,13 +264,34 @@ class GaussianModel:
             xyz_optimizable_mask = torch.ones(self._xyz.shape[0], dtype=torch.bool, device="cuda")
 
         if training_args.include_feature and ("lang" in stage):
-            if 'discrete' in stage and self._language_feature.shape[-1]==int(os.getenv("language_feature_hiddendim",3)):
+            use_discrete = os.getenv('use_discrete_lang_f', 'f') == 't'
+            num_lang_features = int(os.getenv("num_lang_features", 2))
+            lang_feature_dim = int(os.getenv("lang_feature_dim", 3))
+            centers_num = int(os.getenv("centers_num", 3))
+            hiddendim = int(os.getenv("language_feature_hiddendim", 3))
+            
+            # Only expand to discrete base states in fine-lang stage (not coarse-lang)
+            # Coarse stages use static features without deformation
+            is_fine_lang = "fine" in stage and "lang" in stage
+            
+            # Sync no_dlang on the deformation net so generate_multi_feature_centers
+            # (and any other direct deformation calls) use the correct value.
+            # The renderer also sets this per-render, but we need it correct here
+            # before the first render of this stage.
+            self._deformation.deformation_net.args.no_dlang = no_dlang
+            
+            if use_discrete and is_fine_lang and self._language_feature is not None and self._language_feature.shape[-1] == hiddendim:
+                # Expand static language features to per-feature base states
                 multi_language_features = self.generate_multi_feature_centers(init_from_stage=init_from_stage)
                 multi_language_features = multi_language_features.to("cuda")
-                multi_language_features = multi_language_features.permute(0, 2, 1).reshape(self.get_xyz.shape[0],-1)
                 self._language_feature = nn.Parameter(multi_language_features.requires_grad_(True))
+            
+            if use_discrete and is_fine_lang:
+                expected_dim = num_lang_features * centers_num * lang_feature_dim
+            else:
+                expected_dim = hiddendim
             if self._language_feature is None or self._language_feature.shape[0] != self._xyz.shape[0]:
-                language_feature = torch.zeros((self._xyz.shape[0], int(os.getenv("language_feature_hiddendim",3))), device="cuda")
+                language_feature = torch.zeros((self._xyz.shape[0], expected_dim), device="cuda")
                 self._language_feature = nn.Parameter(language_feature.requires_grad_(True))
             
             print(f"training_args.language_feature_lr:{training_args.language_feature_lr}")
@@ -307,10 +328,11 @@ class GaussianModel:
             self._deformation.deformation_net.lang_deforms.requires_grad_(no_dlang==0)
             for alpha in self._deformation.deformation_net.lang_alphas:
                 alpha.requires_grad_(no_dlang==0)
-            # Legacy single head (used with use_discrete_lang_f only)
+            # Legacy single head
             self._deformation.deformation_net.lang_deform.requires_grad_(no_dlang==0)
-            if 'discrete' in stage:
-                self._deformation.deformation_net.discrete_coff_generator.requires_grad_(True)
+            # Per-feature coefficient prediction heads (only enabled in fine-lang stage)
+            is_fine_lang = "fine" in stage and "lang" in stage
+            self._deformation.deformation_net.discrete_coff_generators.requires_grad_(use_discrete and is_fine_lang)
 
             print(f"set lang_deforms.requires_grad_ to {no_dlang==0}")
             self._features_dc.requires_grad_(joint_train)
@@ -356,15 +378,15 @@ class GaussianModel:
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
-                                                    max_steps=training_args.position_lr_max_steps)
+                                                    max_steps=training_args.lr_max_steps)
         self.deformation_scheduler_args = get_expon_lr_func(lr_init=training_args.deformation_lr_init*self.spatial_lr_scale,
                                                     lr_final=training_args.deformation_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.deformation_lr_delay_mult,
-                                                    max_steps=training_args.position_lr_max_steps)    
+                                                    max_steps=training_args.lr_max_steps)    
         self.grid_scheduler_args = get_expon_lr_func(lr_init=training_args.grid_lr_init*self.spatial_lr_scale,
                                                     lr_final=training_args.grid_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.deformation_lr_delay_mult,
-                                                    max_steps=training_args.position_lr_max_steps)    
+                                                    max_steps=training_args.lr_max_steps)    
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
@@ -867,45 +889,72 @@ class GaussianModel:
     
     def generate_multi_feature_centers(self,sample_num=100,init_from_stage=Literal['fine-base','fine-lang']):
         '''
-            Use Kmeans method to find the discrete centers of each gaussians language features
-                return: centers_tensor (num of gaussians, centers_num, feature dim)
+            Generate per-language-feature base states for discrete coefficient mode.
+            Each language feature gets `centers_num` base states of dim `lang_feature_dim`.
+            
+            Returns: (N_gaussians, num_lang_features * centers_num * lang_feature_dim) tensor
         '''
-        # import pdb; pdb.set_trace()
-        
         centers_num = int(os.getenv("centers_num",3))
+        num_lang_features = int(os.getenv("num_lang_features", 2))
+        lang_feature_dim = int(os.getenv("lang_feature_dim", 3))
+        
         if init_from_stage == 'fine-base':
-            # generate language feature center init from static language features
-            language_feature = self.get_language_feature
-            language_feature = language_feature/ (language_feature.norm(dim=-1, keepdim=True) + 1e-9)
-            multi_language_feature = torch.zeros(language_feature.shape[0], centers_num, language_feature.shape[-1]).cuda()
-            for i in range(centers_num):
-                noise_std=0.05
-                multi_language_feature[:,i,:] = torch.normal(mean=language_feature, std=noise_std)
-            # import pdb; pdb.set_trace()
-            print(f"init_from_stage:{init_from_stage} Done.")
-            return multi_language_feature
+            # Initialize base states from static language features with noise
+            language_feature = self.get_language_feature  # (N, num_lang_features * lang_feature_dim)
+            all_centers = []
+            for feat_idx in range(num_lang_features):
+                start = feat_idx * lang_feature_dim
+                end = start + lang_feature_dim
+                feat_i = language_feature[:, start:end]
+                feat_i = feat_i / (feat_i.norm(dim=-1, keepdim=True) + 1e-9)
+                # Create centers_num noisy copies per Gaussian
+                noise_std = 0.05
+                centers_i = torch.stack([
+                    torch.normal(mean=feat_i, std=noise_std)
+                    for _ in range(centers_num)
+                ], dim=1)  # (N, centers_num, lang_feature_dim)
+                all_centers.append(centers_i.reshape(feat_i.shape[0], -1))  # (N, centers_num * lang_feature_dim)
+            result = torch.cat(all_centers, dim=-1)  # (N, num_lang_features * centers_num * lang_feature_dim)
+            print(f"init_from_stage:{init_from_stage} Done. Shape: {result.shape}")
+            return result
         else:
+            # Sample deformed features at random timesteps, then cluster per language feature
             language_feature_precomp_final = []
             for _ in range(sample_num):
                 random_time = torch.rand_like(self.get_opacity)
-                # print(random_time)
                 language_feature_precomp = self.get_language_feature
-                language_feature_precomp = language_feature_precomp/ (language_feature_precomp.norm(dim=-1, keepdim=True) + 1e-9)
-                language_feature_precomp_final.append(self._deformation(self.get_xyz,self.get_scaling,self.get_rotation,self.get_opacity,self.get_features,language_feature_precomp,random_time,init_centers=True)[-1])
-            res = torch.stack(language_feature_precomp_final,dim=1)
+                # Normalize each feature independently before deformation
+                normalized = []
+                for feat_idx in range(num_lang_features):
+                    start = feat_idx * lang_feature_dim
+                    end = start + lang_feature_dim
+                    feat = language_feature_precomp[:, start:end]
+                    feat = feat / (feat.norm(dim=-1, keepdim=True) + 1e-9)
+                    normalized.append(feat)
+                language_feature_precomp = torch.cat(normalized, dim=-1)
+                # deformation returns (..., lang_feature, coff) — take lang_feature (index -2)
+                deformed_lang = self._deformation(self.get_xyz,self.get_scaling,self.get_rotation,self.get_opacity,self.get_features,language_feature_precomp,random_time,init_centers=True)[-2]
+                language_feature_precomp_final.append(deformed_lang)
+            res = torch.stack(language_feature_precomp_final, dim=1)  # (N, sample_num, hiddendim)
             res = res.to('cpu')
             from sklearn.cluster import KMeans
-            centers = []
-
             from tqdm import tqdm
-            for i in tqdm(range(res.shape[0])):
-                data_point = res[i]  # 大小为 (10, 6)
-                kmeans = KMeans(n_clusters=centers_num, random_state=0).fit(data_point.detach().numpy())
-                center = kmeans.cluster_centers_
-                centers.append(center)
-                
-            centers_tensor = torch.tensor(centers).squeeze()
-            print(f"init_from_stage:{init_from_stage} Done.")
-            return centers_tensor
+            
+            # Cluster each language feature independently
+            all_centers = []
+            for feat_idx in range(num_lang_features):
+                start = feat_idx * lang_feature_dim
+                end = start + lang_feature_dim
+                res_feat = res[:, :, start:end]  # (N, sample_num, lang_feature_dim)
+                centers_feat = []
+                for g in tqdm(range(res_feat.shape[0]), desc=f"KMeans for lang feature {feat_idx}"):
+                    data_point = res_feat[g].detach().numpy()  # (sample_num, lang_feature_dim)
+                    kmeans = KMeans(n_clusters=centers_num, random_state=0).fit(data_point)
+                    centers_feat.append(kmeans.cluster_centers_)  # (centers_num, lang_feature_dim)
+                centers_feat = torch.tensor(np.array(centers_feat))  # (N, centers_num, lang_feature_dim)
+                all_centers.append(centers_feat.reshape(centers_feat.shape[0], -1))  # (N, centers_num * lang_feature_dim)
+            result = torch.cat(all_centers, dim=-1)  # (N, num_lang_features * centers_num * lang_feature_dim)
+            print(f"init_from_stage:{init_from_stage} Done. Shape: {result.shape}")
+            return result
         
     

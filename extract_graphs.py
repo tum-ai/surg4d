@@ -79,9 +79,9 @@ def load_gaussian_model(
     os.environ["use_discrete_lang_f"] = cfg.graph_extraction.use_discrete_lang_f
     os.environ["num_lang_features"] = str(cfg.graph_extraction.num_lang_features)
     os.environ["lang_feature_dim"] = str(cfg.graph_extraction.lang_feature_dim)
-    # centers_num is used by discrete_coff_generator in deformation network
-    if hasattr(cfg.splat, "centers_num"):
-        os.environ["centers_num"] = str(cfg.splat.centers_num)
+    os.environ["lang_deform_width"] = str(cfg.graph_extraction.lang_deform_width)
+    os.environ["lang_timebase_pe"] = str(cfg.graph_extraction.lang_timebase_pe)
+    os.environ["centers_num"] = str(cfg.graph_extraction.centers_num)
 
     clip_dir = Path(cfg.preprocessed_root) / clip.name
     model_path = Path(cfg.output_root) / clip.name
@@ -175,11 +175,6 @@ def load_gaussian_model(
         else:
             args.iteration = get_latest_model_iteration(cfg)
 
-    # Set centers_num from config if available (needed for discrete_coff_generator)
-    # This must be set before creating GaussianModel
-    if hasattr(cfg.splat, "centers_num"):
-        os.environ["centers_num"] = str(cfg.splat.centers_num)
-
     # Load model
     hyper = hyperparam.extract(args)
     dataset = model_params.extract(args)
@@ -256,19 +251,25 @@ def deform_at_timestep(gaussians: GaussianModel, timestep: float):
             dtype=means3D.dtype,
         )
 
-        # Normalize each language feature independently before deformation (matching renderer)
-        normalized_features = []
-        for i in range(num_lang_features):
-            start_idx = i * lang_feature_dim
-            end_idx = start_idx + lang_feature_dim
-            feat = lang[:, start_idx:end_idx]
-            feat = feat / (feat.norm(dim=-1, keepdim=True) + 1e-9)
-            normalized_features.append(feat)
-        lang_normalized = torch.cat(normalized_features, dim=-1)
+        # Pre-deformation normalization (matching renderer behavior)
+        use_discrete = os.environ.get('use_discrete_lang_f', 'f') == 't'
+        if use_discrete:
+            # In discrete mode, base states are passed through raw — deformation normalizes them
+            lang_input = lang
+        else:
+            # Normalize each language feature independently before deformation
+            normalized_features = []
+            for i in range(num_lang_features):
+                start_idx = i * lang_feature_dim
+                end_idx = start_idx + lang_feature_dim
+                feat = lang[:, start_idx:end_idx]
+                feat = feat / (feat.norm(dim=-1, keepdim=True) + 1e-9)
+                normalized_features.append(feat)
+            lang_input = torch.cat(normalized_features, dim=-1)
 
         # Apply deformation to all Gaussians (same as renderer)
         means3D_final, _, _, _, _, lang_final, _ = gaussians._deformation(
-            means3D, scales, rotations, opacity, shs, lang_normalized, time
+            means3D, scales, rotations, opacity, shs, lang_input, time
         )
 
         # Replace positions for control-point-driven Gaussians with precomputed positions

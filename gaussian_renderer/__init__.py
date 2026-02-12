@@ -90,7 +90,14 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     if include_feature and 'base' not in stage:
         # import pdb; pdb.set_trace()
         language_feature_precomp = pc.get_language_feature
-        if os.getenv("nonormalized",'f') == 'f':
+        use_discrete = os.getenv('use_discrete_lang_f', 'f') == 't'
+        is_fine_lang = "fine" in stage and "lang" in stage
+        # In discrete mode, base states are passed through raw only in fine-lang stage
+        # Coarse stages always normalize (discrete mode not active there)
+        if use_discrete and is_fine_lang:
+            # In discrete mode fine-lang, base states are passed through raw — deformation normalizes them
+            pass
+        elif os.getenv("nonormalized",'f') == 'f':
             # Normalize each language feature independently
             num_lang_features = int(os.getenv("num_lang_features", 2))
             lang_feature_dim = int(os.getenv("lang_feature_dim", 3))
@@ -359,7 +366,14 @@ def render_opacity(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.
     if include_feature and 'base' not in stage:
         # import pdb; pdb.set_trace()
         language_feature_precomp = pc.get_language_feature
-        if os.getenv("nonormalized",'f') == 'f':
+        use_discrete = os.getenv('use_discrete_lang_f', 'f') == 't'
+        is_fine_lang = "fine" in stage and "lang" in stage
+        # In discrete mode, base states are passed through raw only in fine-lang stage
+        # Coarse stages always normalize (discrete mode not active there)
+        if use_discrete and is_fine_lang:
+            # In discrete mode fine-lang, base states are passed through raw — deformation normalizes them
+            pass
+        elif os.getenv("nonormalized",'f') == 'f':
             # Normalize each language feature independently
             num_lang_features = int(os.getenv("num_lang_features", 2))
             lang_feature_dim = int(os.getenv("lang_feature_dim", 3))
