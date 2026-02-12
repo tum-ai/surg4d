@@ -99,12 +99,17 @@ def train_splat(clip: DictConfig, cfg: DictConfig):
         cfg.splat.latent_cat_feat_subdir,
         "--feature_level",
         "0",
-        "--joint_coarse",
         "--no_dlang",
         "0" if cfg.splat.dynamic_language else "1",
         "--depth_loss_weight",
         str(cfg.splat.loss_weights.depth_l1),
     ]
+    
+    # Add joint training flags if enabled
+    if cfg.splat.get("joint_coarse", False):
+        cmd_args.append("--joint_coarse")
+    if cfg.splat.get("joint_fine", False):
+        cmd_args.append("--joint_fine")
     
     # Add coarse_freeze_xyz flag if enabled
     if cfg.splat.coarse_freeze_xyz:

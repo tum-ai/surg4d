@@ -11,7 +11,8 @@ from tqdm import tqdm
 from benchmark.spatial import get_patched_qwen_for_spatial_grounding
 from preprocess import process_clip
 from generate_qwen_features import extract_qwen_features
-from train_autoencoders import train_ae
+from train_autoencoders import train_ae, train_global_ae, save_dim_reduced
+from autoencoder.model_qwen import QwenAutoencoder
 from train_splats import train_splat
 from extract_graphs import extract_graph
 from evaluate_benchmark import evaluate_triplets, evaluate_temporal, evaluate_spatial
@@ -50,11 +51,53 @@ def main():
         OmegaConf.save(cfg, config_dump)
 
     if cfg.whole_pipeline_clips_sequentially:
+        global_ae_mode = not cfg.skip_autoencoder and cfg.autoencoder.global_mode
+
+        # Global AE pre-pass: need features from ALL clips before training AE
+        if global_ae_mode:
+            if not cfg.skip_feature_extraction:
+                model, processor = get_patched_qwen(
+                    qwen_version=cfg.feature_extraction.qwen_version,
+                    use_bnb_4bit=cfg.feature_extraction.bnb_4bit,
+                    use_bnb_8bit=cfg.feature_extraction.bnb_8bit,
+                )
+            for clip in tqdm(cfg.clips, desc="Prep for global AE", unit="clip"):
+                if not cfg.skip_preprocessing:
+                    process_clip(clip, cfg)
+                if not cfg.skip_feature_extraction:
+                    extract_qwen_features(clip, cfg, model, processor)
+            if not cfg.skip_feature_extraction:
+                del model
+                del processor
+                gc.collect()
+                torch.cuda.empty_cache()
+
+            train_global_ae(cfg.clips, cfg)
+            global_checkpoint_path = (
+                Path(cfg.preprocessed_root)
+                / cfg.autoencoder.global_checkpoint_dir
+                / "best_ckpt.pth"
+            )
+            global_ae = QwenAutoencoder(
+                input_dim=cfg.autoencoder.full_dim,
+                latent_dim=cfg.autoencoder.latent_dim,
+            ).to("cuda")
+            global_ae.load_state_dict(
+                torch.load(global_checkpoint_path, map_location="cuda")
+            )
+            global_ae.eval()
+            for clip in tqdm(cfg.clips, desc="Encoding with global AE", unit="clip"):
+                save_dim_reduced(clip, cfg, ae=global_ae)
+            del global_ae
+            gc.collect()
+            torch.cuda.empty_cache()
+
         for clip in tqdm(cfg.clips, desc="Full Pipeline", unit="clip"):
-            if not cfg.skip_preprocessing:
+            # Skip preprocessing + features if already done in global AE pre-pass
+            if not cfg.skip_preprocessing and not global_ae_mode:
                 process_clip(clip, cfg)
 
-            if not cfg.skip_feature_extraction:
+            if not cfg.skip_feature_extraction and not global_ae_mode:
                 model, processor = get_patched_qwen(
                     qwen_version=cfg.feature_extraction.qwen_version,
                     use_bnb_4bit=cfg.feature_extraction.bnb_4bit,
@@ -66,7 +109,8 @@ def main():
                 gc.collect()
                 torch.cuda.empty_cache()
 
-            if not cfg.skip_autoencoder:
+            # Per-clip AE (only in non-global mode)
+            if not cfg.skip_autoencoder and not global_ae_mode:
                 train_ae(clip, cfg)
 
             if not cfg.skip_splat:
@@ -132,8 +176,29 @@ def main():
             torch.cuda.empty_cache()
 
         if not cfg.skip_autoencoder:
-            for clip in tqdm(cfg.clips, desc="Autoencoder Training", unit="clip"):
-                train_ae(clip, cfg)
+            if cfg.autoencoder.global_mode:
+                train_global_ae(cfg.clips, cfg)
+                global_checkpoint_path = (
+                    Path(cfg.preprocessed_root)
+                    / cfg.autoencoder.global_checkpoint_dir
+                    / "best_ckpt.pth"
+                )
+                global_ae = QwenAutoencoder(
+                    input_dim=cfg.autoencoder.full_dim,
+                    latent_dim=cfg.autoencoder.latent_dim,
+                ).to("cuda")
+                global_ae.load_state_dict(
+                    torch.load(global_checkpoint_path, map_location="cuda")
+                )
+                global_ae.eval()
+                for clip in tqdm(cfg.clips, desc="Encoding with global AE", unit="clip"):
+                    save_dim_reduced(clip, cfg, ae=global_ae)
+                del global_ae
+                gc.collect()
+                torch.cuda.empty_cache()
+            else:
+                for clip in tqdm(cfg.clips, desc="Autoencoder Training", unit="clip"):
+                    train_ae(clip, cfg)
 
         if not cfg.skip_splat:
             for clip in tqdm(cfg.clips, desc="Splat Training", unit="clip"):

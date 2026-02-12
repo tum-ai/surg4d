@@ -3,7 +3,7 @@ config_path: arguments/cholecseg8k/no_tv.py # this config disables total variati
 
 loss_weights:
   rgb_l1: 1.0 # base stages: mean absolute error between rendered RGB and GT RGB
-  depth_l1: 1.0 # base stages: mean absolute error between rendered depth map and GT depth map
+  depth_l1: 0.0 # base stages: mean absolute error between rendered depth map and GT depth map
   lang_cosine: 0.01 # lang stages: CosineEmbeddingLoss between predicted and GT language features (masked valid pixels only)
   joint_rgb_l1: 1.0 # lang stages with joint_train: extra RGB L1 term added alongside language loss
   ssim: 0.0 # all stages: adds ssim_weight * (1 - SSIM(render, gt)) as a perceptual image-structure term
@@ -13,7 +13,7 @@ loss_weights:
   plane_tv: 0.0 # fine stages: weight on spatial total-variation regularization of deformation planes
 
 learning_rates:
-  lr_max_steps: 5000 # xyz/deformation/grid LR schedule horizon in optimizer steps
+  lr_max_steps: 10000 # xyz/deformation/grid LR schedule horizon in optimizer steps
   position_init: 0.00016 # xyz Adam LR at start (scheduled)
   position_final: 0.0000016 # xyz Adam LR at end of schedule
   position_delay_mult: 0.01 # xyz LR schedule warmup multiplier
@@ -28,7 +28,7 @@ learning_rates:
   scaling: 0.005 # scale LR
   rotation: 0.001 # rotation LR
 
-tensorboard_subdir: "correct_lr_schedule" # TensorBoard subdir prefix; actual folder is "<prefix>_<timestamp>"
+tensorboard_subdir: "states15_iter10k" # TensorBoard subdir prefix; actual folder is "<prefix>_<timestamp>"
 
 # CoTracker3 control point settings
 cotracker_k_neighbors: 3 # number of nearest control points per Gaussian
@@ -41,16 +41,20 @@ dynamic_scale: true
 dynamic_color: true
 
 # coarse iterations cut by 10x because we're only overfitting the feature heads on a single frame
-coarse_base_iterations: 500
-coarse_lang_iterations: 500
-fine_base_iterations: 5000 # ! tmp while experimenting
-fine_lang_iterations: 5000
+coarse_base_iterations: 1000
+coarse_lang_iterations: 1000
+fine_base_iterations: 10000
+fine_lang_iterations: 10000
 
 # settings for simplifying coarse training for high quality initial depth map
 # TODO: fix this later, only for debugging
 densify_until_iter: 0
 coarse_freeze_xyz: true # freeze gaussian means during coarse
 coarse_frame_idx: null # train on all frames during coarse (point cloud initialized from first/middle/last frames)
+
+# joint training flags: enable RGB L1 loss alongside language loss during lang stages
+joint_coarse: true # enable joint RGB+lang training for coarse-lang stage
+joint_fine: false # enable joint RGB+lang training for fine-lang stage
 
 # fine (dynamic) stage progressive frame sampling window
 progressive_window:
@@ -61,11 +65,11 @@ progressive_window:
 # each stage starts at 0 iterations and the lang stages consider these lists
 # ATTENTION: it's crucial to save the last iteration of fine lang here!
 test_iterations: [499, 999, 1499, 1999, 2999, 4999, 8999, 9999] # when to compute val metrics (logged to tensorboard)
-save_iterations: [5000] # when to save model checkpoints to disk (for rendering, graph extraction, etc.)
+save_iterations: [10000] # when to save model checkpoints to disk (for rendering, graph extraction, etc.)
 checkpoint_iterations: [] # when to save full checkpoints (with optimizer states for resuming)
 
 save_best_checkpoint: true
-best_checkpoint_warmup_iterations: 500
+best_checkpoint_warmup_iterations: 3000
 
 render_outputs:
   coarse_base: false
@@ -76,7 +80,7 @@ render_outputs:
 # environment variables
 language_feature_hiddendim: 32 # total dim = num_lang_features * lang_feature_dim
 use_discrete_lang_f: t
-centers_num: 10  # number of discrete deformation states to interpolate between
+centers_num: 15  # number of discrete deformation states to interpolate between
 
 # multiple independent language features (e.g., patch + instance)
 num_lang_features: 2  # number of independent language feature types
