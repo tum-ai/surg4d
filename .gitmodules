@@ -7,9 +7,6 @@
 [submodule "submodules/4d-langsplat-tracking-anything-with-deva"]
 	path = submodules/4d-langsplat-tracking-anything-with-deva
 	url = git@github.com:zrporz/4d-langsplat-tracking-anything-with-deva.git
-[submodule "submodules/vipe"]
-	path = submodules/vipe
-	url = https://github.com/nv-tlabs/vipe
 [submodule "submodules/depth-anything-3"]
 	path = submodules/depth-anything-3
 	url = https://github.com/ByteDance-Seed/Depth-Anything-3

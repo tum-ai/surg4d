@@ -10,8 +10,6 @@ import shutil
 import sys
 import torch
 from loguru import logger
-import zipfile
-from openexr_numpy import imread
 import cv2
 import json
 import re
@@ -108,7 +106,6 @@ def _load_and_translate_spatial_labels(
     clip: DictConfig,
     cfg: DictConfig,
     crop_box: tuple[int, int, int, int],
-    center_divisor: int,
 ) -> tuple[dict, dict]:
     """
     Load spatial labels for this clip, map original frame numbers to contiguous
@@ -117,80 +114,49 @@ def _load_and_translate_spatial_labels(
       - translated_labels_json (dict): same schema filtered and updated
       - per_frame_points (dict[int, list[tuple[int,int,str]]]): for visualization
     """
-    # Build input filename from template
-    template = cfg.preprocessing.get(
-        "spatial_labels_input_filename_template", "{clip_name}_spatial.json"
-    )
-    input_filename = template.format(clip_name=clip.name)
-    labels_path = Path(cfg.preprocessing.spatial_labels_root) / input_filename
+    labels_path = Path(cfg.preprocessing.annotation_root) / "spatial" / f"{clip.name}.json"
     if not labels_path.exists():
         return {}, {}
 
     with open(labels_path, "r") as f:
         original = json.load(f)
 
-    first_frame = clip.first_frame
-    last_frame = clip.last_frame
-    stride = clip.frame_stride
-
-    # Compute cropping offsets
+    # Compute cropping offsets (black border and qwen patch center crop)
     top, bottom, left, right = crop_box
     cropped_h = bottom - top
     cropped_w = right - left
-    off_y, off_x = _compute_center_crop_offsets(cropped_h, cropped_w, center_divisor)
+    off_y, off_x = _compute_center_crop_offsets(cropped_h, cropped_w, cfg.preprocessing.frames_divisor)
     final_h = cropped_h - 2 * off_y
     final_w = cropped_w - 2 * off_x
 
-    translated = {}
+    translated_annotations = []
     per_frame_points: dict[int, list[tuple[int, int, str, str]]] = {}
 
-    for key, entry in original.items():
-        orig_fn = entry.get("frame_number")
-        if orig_fn is None:
+    for annotation in original["annotations"]:
+        # Translate coordinates from pil_coords [x, y]
+        x_orig, y_orig = annotation.get("pil_coords")
+        x_new = int(x_orig - left - off_x)
+        y_new = int(y_orig - top - off_y)
+        
+        # Skip if out of bounds
+        if not (0 <= x_new < final_w and 0 <= y_new < final_h):
+            print(f"Skipping annotation {clip.name} {annotation['id']} because it's out of bounds")
             continue
-        if orig_fn < first_frame or orig_fn >= last_frame:
-            continue
-        if (orig_fn - first_frame) % stride != 0:
-            continue
-        new_idx = (orig_fn - first_frame) // stride
 
-        # Translate objects/actions coords
-        def _translate_list(items: list) -> list:
-            out = []
-            for it in items:
-                x = it.get("pixel_x")
-                y = it.get("pixel_y")
-                if x is None or y is None:
-                    continue
-                x2 = int(x - left - off_x)
-                y2 = int(y - top - off_y)
-                if not (0 <= x2 < final_w and 0 <= y2 < final_h):
-                    continue
-                new_it = dict(it)
-                new_it["pixel_x"] = x2
-                new_it["pixel_y"] = y2
-                new_it["pixel_coords_numpy"] = [y2, x2]
-                out.append(new_it)
-            return out
+        # Create translated annotation
+        new_annotation = {
+            "timestep": annotation["timestep"],
+            "id": annotation["id"],
+            "numpy_coords": [y_new, x_new],
+            "pil_coords": [x_new, y_new],
+            "query": annotation["query"],
+        }
+        translated_annotations.append(new_annotation)
 
-        new_objects = _translate_list(entry.get("objects", []))
-        new_actions = _translate_list(entry.get("actions", []))
+        # For visualization
+        per_frame_points.setdefault(int(annotation["timestep"] * cfg.preprocessing.annotation_stride), []).append((x_new, y_new, new_annotation["query"], "spatial"))
 
-        # If both empty, we still keep the entry to preserve format
-        new_entry = dict(entry)
-        new_entry["frame_number"] = int(new_idx)
-        new_entry["objects"] = new_objects
-        new_entry["actions"] = new_actions
-        translated[key] = new_entry
-
-        # For visualization, aggregate simple points with labels
-        pts = []
-        for it in new_objects:
-            pts.append((it["pixel_x"], it["pixel_y"], it.get("query", "object"), "obj"))
-        for it in new_actions:
-            pts.append((it["pixel_x"], it["pixel_y"], it.get("query", "action"), "act"))
-        if pts:
-            per_frame_points.setdefault(int(new_idx), []).extend(pts)
+    translated = {"annotations": translated_annotations}
 
     return translated, per_frame_points
 
@@ -228,14 +194,17 @@ def _render_label_visualization(
 def get_cholecseg8k_frames(clip: DictConfig, cfg: DictConfig):
     clip_dir = Path(cfg.preprocessed_root) / clip.name
 
-    out_rgb = clip_dir / "rgb"
-    out_rgb.mkdir(parents=True, exist_ok=True)
+    only_update_annotations = cfg.preprocessing.get("only_update_annotations", False)
 
-    out_sem_masks = clip_dir / cfg.preprocessing.semantic_mask_subdir
-    out_sem_masks.mkdir(parents=True, exist_ok=True)
+    if not only_update_annotations:
+        out_rgb = clip_dir / "rgb"
+        out_rgb.mkdir(parents=True, exist_ok=True)
 
-    out_inst_masks = clip_dir / cfg.preprocessing.instance_mask_subdir
-    out_inst_masks.mkdir(parents=True, exist_ok=True)
+        out_sem_masks = clip_dir / cfg.preprocessing.semantic_mask_subdir
+        out_sem_masks.mkdir(parents=True, exist_ok=True)
+
+        out_inst_masks = clip_dir / cfg.preprocessing.instance_mask_subdir
+        out_inst_masks.mkdir(parents=True, exist_ok=True)
 
     frame_files, semantic_mask_files = get_clip_seg8k(
         seg8k_root=Path(cfg.cholecseg8k_root),
@@ -249,16 +218,23 @@ def get_cholecseg8k_frames(clip: DictConfig, cfg: DictConfig):
         parse_cholecseg8k_instance_mask(Image.open(semantic_mask_files[0]))
     )
 
-    # Pre-compute label translations and optional visualization metadata
+    # translate spatial labels to new coordinates
     translated_labels, viz_points = _load_and_translate_spatial_labels(
         clip,
         cfg,
         crop_box=(top, bottom, left, right),
-        center_divisor=cfg.preprocessing.frames_divisor,
     )
-    # Build output filename from config
-    out_filename = cfg.preprocessing.spatial_labels_output_filename
-    labels_out_path = clip_dir / out_filename
+    if translated_labels:
+        labels_out_path = clip_dir / cfg.preprocessing.spatial_labels_output_filename
+        with open(labels_out_path, "w") as f:
+            json.dump(translated_labels, f, indent=2)
+
+    # Create visualization directory once if needed
+    if cfg.preprocessing.get("dump_label_visualizations", False) and viz_points:
+        viz_dir = clip_dir / cfg.preprocessing.get("label_viz_subdir", "label_viz")
+        if viz_dir.exists():
+            shutil.rmtree(viz_dir)
+        viz_dir.mkdir(parents=True)
 
     for new_frame_id, (frame_file, semantic_mask_file) in enumerate(
         zip(frame_files, semantic_mask_files)
@@ -275,32 +251,33 @@ def get_cholecseg8k_frames(clip: DictConfig, cfg: DictConfig):
         )  # required for qwen encoder
         class_ids = center_crop_divisible(class_ids, cfg.preprocessing.frames_divisor)
 
-        # Generate instance masks from semantic masks using connected components
-        # 2d arrays, 0 is background, > 0 are instance ids
-        instance_ids = np.zeros_like(class_ids, dtype=np.int32)
-        instance_counter = 1
-        unique_classes = np.unique(class_ids)
-        unique_classes = unique_classes[unique_classes != 0]
-        for class_id in unique_classes:
-            class_binary = (class_ids == class_id).astype(np.uint8)
-            num_components, labeled_components = cv2.connectedComponents(
-                class_binary, connectivity=8
-            )
-            for component_id in range(
-                1, num_components
-            ):  # cv2 starts at 1, 0 is background
-                component_mask = labeled_components == component_id
-                component_area = component_mask.sum()
-                # Filter out tiny components (noise)
-                if component_area < cfg.preprocessing.min_component_area:
-                    continue
-                instance_ids[component_mask] = instance_counter
-                instance_counter += 1
+        if not only_update_annotations:
+            # Generate instance masks from semantic masks using connected components
+            # 2d arrays, 0 is background, > 0 are instance ids
+            instance_ids = np.zeros_like(class_ids, dtype=np.int32)
+            instance_counter = 1
+            unique_classes = np.unique(class_ids)
+            unique_classes = unique_classes[unique_classes != 0]
+            for class_id in unique_classes:
+                class_binary = (class_ids == class_id).astype(np.uint8)
+                num_components, labeled_components = cv2.connectedComponents(
+                    class_binary, connectivity=8
+                )
+                for component_id in range(
+                    1, num_components
+                ):  # cv2 starts at 1, 0 is background
+                    component_mask = labeled_components == component_id
+                    component_area = component_mask.sum()
+                    # Filter out tiny components (noise)
+                    if component_area < cfg.preprocessing.min_component_area:
+                        continue
+                    instance_ids[component_mask] = instance_counter
+                    instance_counter += 1
 
-        rgb_img_path = out_rgb / f"frame_{new_frame_id:06d}.png"
-        Image.fromarray(rgb).save(rgb_img_path)
-        np.save(out_sem_masks / f"frame_{new_frame_id:06d}.npy", class_ids)
-        np.save(out_inst_masks / f"frame_{new_frame_id:06d}.npy", instance_ids)
+            rgb_img_path = out_rgb / f"frame_{new_frame_id:06d}.png"
+            Image.fromarray(rgb).save(rgb_img_path)
+            np.save(out_sem_masks / f"frame_{new_frame_id:06d}.npy", class_ids)
+            np.save(out_inst_masks / f"frame_{new_frame_id:06d}.npy", instance_ids)
 
         # Optional visualization of labels on preprocessed frames
         if (
@@ -308,18 +285,11 @@ def get_cholecseg8k_frames(clip: DictConfig, cfg: DictConfig):
             and new_frame_id in viz_points
         ):
             viz_dir = clip_dir / cfg.preprocessing.get("label_viz_subdir", "label_viz")
-            viz_dir.mkdir(parents=True, exist_ok=True)
             img_viz = _render_label_visualization(rgb, viz_points[new_frame_id])
             cv2.imwrite(
                 str(viz_dir / f"frame_{new_frame_id:06d}_viz.png"),
                 cv2.cvtColor(img_viz, cv2.COLOR_RGB2BGR),
             )
-
-    # Save translated labels JSON if any present
-    if translated_labels:
-        with open(labels_out_path, "w") as f:
-            json.dump(translated_labels, f, indent=2)
-
 
 def colmap_txt_to_bin(clip: DictConfig, cfg: DictConfig):
     clip_dir = Path(cfg.preprocessed_root) / clip.name
@@ -483,18 +453,15 @@ def pc_ply_visualization(clip: DictConfig, cfg: DictConfig):
 
 def process_clip(clip: DictConfig, cfg: DictConfig):
     get_cholecseg8k_frames(clip, cfg)
-    if cfg.preprocessing.depth_estimation == "da3":
+
+    if not cfg.preprocessing.only_update_annotations:
         da3(clip, cfg)
-    else:
-        raise ValueError(
-            f"Invalid depth estimation method: {cfg.preprocessing.depth_estimation}"
-        )
 
-    if cfg.preprocessing.pc_ply_visualization_filename:
-        pc_ply_visualization(clip, cfg)
+        if cfg.preprocessing.pc_ply_visualization_filename:
+            pc_ply_visualization(clip, cfg)
 
-    if not cfg.preprocessing.verbose_output:
-        delete_unused_files(clip, cfg)
+        if not cfg.preprocessing.verbose_output:
+            delete_unused_files(clip, cfg)
 
 
 def main():
