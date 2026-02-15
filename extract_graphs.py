@@ -1241,6 +1241,16 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
     pos_through_time = np.stack([i[0] for i in deformed_data])
     lf_patch_through_time = np.stack([i[1] for i in deformed_data])
     lf_instance_through_time = np.stack([i[2] for i in deformed_data])
+    
+    # Extract opacities through time
+    logger.info(f"Extracting opacities through time...")
+    opacities_through_time = []
+    for t in timesteps:
+        with torch.no_grad():
+            # Get opacity at this timestep (opacity may change through deformation)
+            opacity = gaussians.get_opacity.detach().squeeze().cpu().numpy()
+            opacities_through_time.append(opacity)
+    opacities_through_time = np.stack(opacities_through_time)  # (T, n_filtered_gaussians)
     (
         cluster_pos_through_time,
         cluster_center_through_time,
@@ -1302,6 +1312,9 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
     np.save(
         out / "patch_latents_through_time.npy", lf_patch_through_time
     )  # patch latents through time (timesteps, n_filtered_gaussians, lang_dim)
+    np.save(
+        out / "opacities_through_time.npy", opacities_through_time
+    )  # opacities through time (timesteps, n_filtered_gaussians)
 
     # matplotlib 3D latent feature visualizations
     logger.info(f"Creating cluster latent visualizations...")

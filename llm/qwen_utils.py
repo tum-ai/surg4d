@@ -24,6 +24,8 @@ from .patched_qwen import (
 from .thinking_budget_processor import ThinkingTokenBudgetProcessor
 from .tools import IMAGE_PLACEHOLDER
 
+from loguru import logger
+
 # Qwen vision encoder constants by version
 # Note: Both Qwen2.5 and Qwen3 use smart_resize() which resizes (not crops/pads)
 # images to dimensions divisible by (patch_size × spatial_merge).
@@ -39,8 +41,8 @@ QWEN_CONSTANTS = {
 
 QWEN_VERSIONS = tuple(QWEN_CONSTANTS.keys())
 
-THINKING_TOKEN_LIMIT = 8000
-NEW_TOKEN_LIMIT = 10000
+THINKING_TOKEN_LIMIT = 1000
+NEW_TOKEN_LIMIT = 1000
 
 
 def timestep_to_seconds_str(timestep: int, fps: float) -> str:
@@ -215,7 +217,7 @@ def ask_qwen_about_image(
     prompt: str,
     model: Qwen3VLForConditionalGeneration,
     processor: Qwen3VLProcessor,
-    system_prompt: str = "You are a medical assistant designed to aid medical practitioners during a cholecystectomy procedure. The surgeon user will ask you a question and show you their current situation, and you give a concise answer.",
+    system_prompt: str,
     max_new_tokens: int = NEW_TOKEN_LIMIT,
     max_thinking_tokens: int = THINKING_TOKEN_LIMIT,
     seed: int = 42,
@@ -278,6 +280,105 @@ def ask_qwen_about_image(
     return output_text[0]
 
 
+def ask_qwen_about_image_custom(
+    image: Image.Image,
+    prompt: str,
+    model: Qwen3VLForConditionalGeneration,
+    processor: Qwen3VLProcessor,
+    system_prompt: str,
+    max_new_tokens: int = NEW_TOKEN_LIMIT,
+    max_thinking_tokens: int = THINKING_TOKEN_LIMIT,
+    seed: int = 42,
+):
+    """Custom version that uses extracted features with custom_patch_features path.
+    
+    This method:
+    1. Extracts features from the image using qwen_encode_image (vision encoder)
+    2. Uses the custom_patch_features path (like graph queries)
+    3. Keeps positional encodings (zero_image_hw=False)
+    4. Uses the real image_grid_thw from processor
+    
+    This should reproduce the same results as ask_qwen_about_image (vanilla),
+    allowing us to validate that the custom features mechanism works correctly.
+    """
+    # Extract features from image (using vision encoder)
+    # This gives us the features that would normally be computed internally
+    image_features = qwen_encode_image(image, model, processor)
+    # image_features shape: (N, hidden_dim * 4) containing [main | d0 | d1 | d2]
+    
+    # Prepare messages
+    messages = [
+        {
+            "role": "system",
+            "content": [
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": None},
+                {"type": "text", "text": prompt},
+            ],
+        },
+    ]
+    
+    # Apply chat template and process with real image
+    # We use the real image so processor inserts correct placeholder tokens
+    # and computes the correct image_grid_thw
+    text = processor.apply_chat_template(  # type:ignore
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    inputs = processor(
+        text=[text],
+        images=[image],  # Use real image for proper tokenization
+        padding=True,
+        return_tensors="pt",
+    ).to(model.device)
+    
+    # Split features into main + deepstack
+    main_features, deepstack_features = qwen3_cat_to_deepstack_multiple([image_features])
+    
+    # Generate with custom features; note how this is passing the features and the possibility to zero out pos encodings
+    # This is handled by the custom forward pass (and rope index computation) of the custom model behind this
+    # Again, the purpose here is to have more or less the default 2D Qwen3-VL behavior while testing the feature extraction and custom positional encodings
+    # The behavior (when not zeroing out pos encodings) should be identical to the standard Qwen3-VL behavior
+    _set_generation_seed(seed)
+    generate_kwargs = {
+        "max_new_tokens": max_new_tokens,
+        "custom_patch_features": main_features,
+        "custom_deepstack_features": deepstack_features,
+        "zero_image_hw": False,  # Keep positional encodings (don't zero out h, w)
+    }
+    
+    # thinking token limit processor
+    logits_processor = None
+    if max_thinking_tokens is not None:
+        thinking_processor = ThinkingTokenBudgetProcessor(
+            processor.tokenizer, max_thinking_tokens=max_thinking_tokens
+        )
+        logits_processor = LogitsProcessorList([thinking_processor])
+        generate_kwargs["logits_processor"] = logits_processor
+    
+    generated_ids = model.generate(
+        **inputs,
+        **generate_kwargs,
+    )
+    generated_ids_trimmed = [
+        out_ids[len(in_ids) :]
+        for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+    ]
+    output_text = processor.batch_decode(
+        generated_ids_trimmed,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )
+    return output_text[0]
+
+
 @lru_cache(maxsize=1000)
 def closest_factor_pair(n: int) -> tuple[int, int]:
     """Find width, height factors for n tokens."""
@@ -322,13 +423,165 @@ def ask_qwen_about_image_features(
     )
 
 
+# TODO: beware that this does not take batching into account in the sense that there is no padding and no adjusting of the attention mask
+#   This might mess us up later, may have to come back to this
+def adjust_input_ids_for_gaussians(
+    inputs: Dict[str, torch.Tensor],
+    processor: Qwen3VLProcessor,
+    gaussians_per_image: List[int],
+    image_token_id: int,
+    image_pad_token_id: int,
+    vision_start_token_id: int,
+    vision_end_token_id: int,
+) -> Dict[str, torch.Tensor]:
+    """Adjust input_ids to have the correct number of image tokens per image.
+    
+    Uses the same logic as get_placeholder_mask: finds all <image> tokens directly,
+    groups consecutive ones into blocks (one per image), and replaces each block
+    with the correct number of <image> tokens to match num_gaussians.
+    
+    Args:
+        inputs: Dictionary from processor containing input_ids, attention_mask, etc.
+        processor: Qwen3VLProcessor instance
+        gaussians_per_image: List of number of Gaussians per image
+        image_token_id: Token ID for <image> token
+    
+    Returns:
+        Modified inputs dict with adjusted input_ids and attention_mask
+    """
+
+    input_ids = inputs["input_ids"].clone()  # (B, L)
+    attention_mask = inputs.get("attention_mask")
+    if attention_mask is not None:
+        attention_mask = attention_mask.clone()
+
+    logger.info(f"input_ids of shape: {input_ids.shape}")
+    logger.info(f"attention_mask of shape: {attention_mask.shape}")
+    logger.info(f"image_token_id: {image_token_id}")
+
+    batch_size = input_ids.shape[0]
+    assert batch_size == 1, "Only batch_size=1 supported for now"
+    assert len(gaussians_per_image) > 0, "gaussians_per_image must not be empty"
+    
+    for b in range(batch_size):
+        seq = input_ids[b]  # (L,)
+        
+        # Find all image token positions (same logic as get_placeholder_mask)
+        image_mask = seq == image_token_id  # (L,) boolean
+        image_positions = image_mask.nonzero(as_tuple=True)[0]  # Indices where image tokens are
+
+        # Do the same counting for the other provided token ids
+        vision_start_mask = seq == vision_start_token_id
+        vision_start_positions = vision_start_mask.nonzero(as_tuple=True)[0]
+        vision_end_mask = seq == vision_end_token_id
+        vision_end_positions = vision_end_mask.nonzero(as_tuple=True)[0]
+
+        logger.info(f"Found total of {len(vision_start_positions)} vision start tokens")
+        logger.info(f"Found total of {len(vision_end_positions)} vision end tokens")
+
+        image_pad_mask = seq == image_pad_token_id
+        image_pad_positions = image_pad_mask.nonzero(as_tuple=True)[0]
+        logger.info(f"Found total of {len(image_pad_positions)} image pad tokens")
+
+        if len(image_positions) == 0:
+            # No image tokens found, nothing to adjust
+            logger.info(f"No image tokens found, nothing to adjust")
+            continue
+        else:
+            logger.info(f"Found total of {len(image_positions)} image tokens")
+        
+        # Group consecutive image tokens into blocks (one block per image)
+        # Find boundaries where image tokens are not consecutive
+        blocks = []
+        block_start = image_positions[0].item()
+        for i in range(1, len(image_positions)):
+            if image_positions[i].item() != image_positions[i-1].item() + 1:
+                # Gap found: end current block, start new one
+                blocks.append((block_start, image_positions[i-1].item() + 1))
+                block_start = image_positions[i].item()
+        # Add final block
+        blocks.append((block_start, image_positions[-1].item() + 1))
+        
+        assert len(blocks) == len(gaussians_per_image), (
+            f"Found {len(blocks)} image token blocks but {len(gaussians_per_image)} Gaussians per image specified"
+        )
+        
+        # Build new sequence: before first block, then each adjusted block, then after last block
+        new_seq_parts = []
+        prev_end = 0
+        
+        for block_idx, (block_start, block_end) in enumerate(blocks):
+            # Add tokens before this block
+            if block_start > prev_end:
+                new_seq_parts.append(seq[prev_end:block_start])
+            
+            # Add correct number of image tokens for this block
+            target_tokens = gaussians_per_image[block_idx]
+            current_tokens = block_end - block_start
+            
+            if target_tokens != current_tokens:
+                # Create new image token block
+                new_image_tokens = torch.full(
+                    (target_tokens,),
+                    image_token_id,
+                    dtype=seq.dtype,
+                    device=seq.device
+                )
+                new_seq_parts.append(new_image_tokens)
+            else:
+                # Same count: keep existing tokens
+                new_seq_parts.append(seq[block_start:block_end])
+            
+            prev_end = block_end
+        
+        # Add remaining tokens after last block
+        if prev_end < len(seq):
+            new_seq_parts.append(seq[prev_end:])
+        
+        # Concatenate all parts
+        new_seq = torch.cat(new_seq_parts, dim=0)
+        
+        input_ids = new_seq.unsqueeze(0).to(input_ids.device)
+        attention_mask = torch.ones_like(input_ids)
+    
+    inputs["input_ids"] = input_ids
+    if attention_mask is not None:
+        inputs["attention_mask"] = attention_mask
+
+    logger.info(f"final shape of input_ids: {input_ids.shape}")
+    logger.info(f"final shape of attention_mask: {attention_mask.shape}")
+    
+    return inputs
+
+
 def model_inputs(
     messages: List[Dict[str, Any]],
     vision_features: List[torch.Tensor],
     processor: Qwen3VLProcessor,
+    image_token_id: int,
+    image_pad_token_id: int,
+    vision_start_token_id: int,
+    vision_end_token_id: int,
+    image_grid_thw: torch.Tensor,
+    gaussians_per_image: List[int],
     tools: List[Dict[str, Any]] = [],
 ):
-    """Prepare model inputs from messages and vision features."""
+    """Prepare model inputs from messages and vision features.
+    
+    Args:
+        messages: Chat messages with image placeholders
+        vision_features: List of vision feature tensors
+        processor: Qwen3VLProcessor instance
+        image_token_id: Token ID for <image> token
+        image_pad_token_id: Token ID for <image_pad> token
+        vision_start_token_id: Token ID for <vision_start> token
+        vision_end_token_id: Token ID for <vision_end> token
+        image_grid_thw: Grid dimensions (BEFORE spatial merge)
+        gaussians_per_image: List of number of Gaussians per image.
+            If provided, adjusts input_ids to have the correct number of <image> tokens.
+        tools: Optional tools for chat template
+    """
+
     # make sure number of messages and vision feature sets match
     n_msg_images = sum(
         1
@@ -345,6 +598,15 @@ def model_inputs(
     text = processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True, tools=tools
     )
+    
+    logger.info("=" * 80)
+    logger.info("model_inputs: CHAT TEMPLATE OUTPUT")
+    logger.info("=" * 80)
+    logger.info(f"Generated text length: {len(text)} chars")
+    logger.info(f"Generated text (first 1000 chars): {text[:1000]}")
+    logger.info(f"Generated text (last 1000 chars): {text[-1000:]}")
+    if len(text) > 2000:
+        logger.warning(f"⚠️ TEXT IS VERY LONG: {len(text)} chars - may be truncated!")
 
     # create mock images such that their size corresponds to
     # the correct number of tokens after tokenizing and spatial merging
@@ -352,21 +614,52 @@ def model_inputs(
     # input ids already contains placeholder vision tokens)
     effective_patch_size = QWEN_CONSTANTS["qwen3"]["effective_patch_size"]
     mock_images: List[Image.Image] = []
-    for feat in vision_features:
-        n = int(feat.shape[0])
-        w, h = closest_factor_pair(n)
-        img_w = w * effective_patch_size
-        img_h = h * effective_patch_size
+    for i, feat in enumerate(vision_features):
+        if image_grid_thw is None:
+            n = int(feat.shape[0])
+            w, h = closest_factor_pair(n)
+            img_w = w * effective_patch_size
+            img_h = h * effective_patch_size
+        else:
+            # We have already a precomputed image_grid_thw whose height and width we consider desirable
+            # Effective patch size already includes spatial merge factor, see constants above
+            height = image_grid_thw[0, 1]
+            width = image_grid_thw[0, 2]
+            img_w = width * effective_patch_size
+            img_h = height * effective_patch_size
+        logger.info(f"Mock image {i}: ({img_w}, {img_h}) pixels, features: {feat.shape[0]}")
         mock_img = Image.new("RGB", (img_w, img_h), color="red")
         mock_images.append(mock_img)
 
+    # This will compute the image grid thw based on (mock) image dims and account for patch size only (no spatial merge yet)
+    # That means the returned image grid thw will be the desired grid size divided by patch size but before spatial merge, still "too large"
+    # Later, a spatial feature merge would be performed (we do not do this on Gaussian tokens) -> grid is divided by spatial merge factor in rope index computation in model forward pass
+    # -> yields the actual LLM grid size we want
+    # In a sense, we want image grid thw after all this -> above we multiply by effective patch size = patch size * spatial merge factor
+    # -> processor divides by patch size, and rope index computation divides by spatial merge -> reverted to desired grid size for final inference
     inputs = processor(
         text=text,
         images=mock_images,
-        padding=True,
+        padding=False,
         return_tensors="pt",
         do_resize=False,
     )
+    
+    logger.info(f"After processor: input_ids shape: {inputs['input_ids'].shape}")
+    logger.info(f"After processor: attention_mask shape: {inputs['attention_mask'].shape if 'attention_mask' in inputs else None}")
+    
+    # Adjust input_ids to allow for passing the Gaussian tokens; processor will assume a 1:1 mapping between tokens derived from llm grid and actual tokens
+    # In our case however, we have a desired grid size but we might have a many : 1 mapping between actual tokens and llm grid cells
+    # This is still distinct from the actual assignment of tokens to grid cells for pos enc, which is handled in the rope index computation
+    # Note: this is called already with the filtered, final selection of gaussian tokens!
+    if gaussians_per_image is not None:
+        assert len(gaussians_per_image) == len(vision_features), (
+            f"gaussians_per_image length ({len(gaussians_per_image)}) must match "
+            f"vision_features length ({len(vision_features)})"
+        )
+        logger.info(f"Adjusting input_ids for gaussians_per_image: {gaussians_per_image}")
+        inputs = adjust_input_ids_for_gaussians(inputs, processor, gaussians_per_image, image_token_id, image_pad_token_id, vision_start_token_id, vision_end_token_id)
+        logger.info(f"After adjustment: input_ids shape: {inputs['input_ids'].shape}")
 
     return inputs
 

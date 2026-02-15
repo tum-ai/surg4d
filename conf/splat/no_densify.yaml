@@ -3,7 +3,7 @@ config_path: arguments/cholecseg8k/no_tv.py # this config disables total variati
 
 loss_weights:
   rgb_l1: 1.0 # base stages rgb
-  depth_l1: 0.0 # base stages depth
+  depth_l1: 1.0 # base stages depth
   lang_cosine: 0.01 # lang stages lf
   joint_rgb_l1: 1.0 # joint stages rgb (coarse lang atm, see joint options below)
   ssim: 0.0 # all stages

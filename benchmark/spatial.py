@@ -17,6 +17,7 @@ from llm.qwen_utils import (
     get_patch_hw,
     prompt_graph_agent,
     ask_qwen_about_image,
+    ask_qwen_about_image_custom,
     qwen3_cat_to_deepstack_multiple,
     get_patched_qwen3,
 )
@@ -26,6 +27,8 @@ from scene.dataset_readers import CameraInfo, readColmapSceneInfo
 from scene.cameras import Camera
 from PIL import Image
 from qwen_vl_utils import process_vision_info
+
+from loguru import logger
 
 
 def find_image_path(images_dir: Path, frame_number: int) -> Optional[Path]:
@@ -998,284 +1001,6 @@ def _patch_indices_to_pixel_centers(
     return np.stack([xs, ys], axis=-1)
 
 
-def frame_attn_predict_query_list(
-    queries_list,
-    *,
-    model,
-    processor,
-    max_proposals: int,
-    image: Image.Image,
-    layers: List[int],
-    prompt_template: str,
-    system_prompt: str,
-    qwen_version: str = "qwen25",
-):
-    outputs = []
-    for query in queries_list:
-        substring = query["query"]
-        prompt = prompt_template.format(substring=substring)
-        attn_out = extract_text_to_image_attention(
-            model=model,
-            processor=processor,
-            image=image,
-            layers=layers,
-            prompt=prompt,
-            substring=substring,
-            system_prompt=system_prompt,
-        )
-        attn_scores = attn_out["scores"]  # [L, Q, V]
-
-        out_item = {"query": substring, "predictions": {}}
-        for layer_idx, layer in enumerate(layers):
-            layer_scores = attn_scores[layer_idx]  # [Q, V]
-            layer_scores = layer_scores.mean(dim=0)  # [V]
-            top_scores, top_indices = layer_scores.topk(k=max_proposals, sorted=True)
-            top_scores = top_scores.detach().cpu().numpy()
-            top_indices = top_indices.detach().cpu().numpy()
-
-            # Map patch indices to pixel centers
-            pixels = _patch_indices_to_pixel_centers(
-                top_indices, image.height, image.width, qwen_version=qwen_version
-            )
-
-            out_item["predictions"][layer] = {
-                "scores": top_scores.tolist(),
-                "pixel_coords": pixels.tolist(),
-            }
-        outputs.append(out_item)
-    return outputs
-
-
-def frame_attn_refine_predict_query_list(
-    queries_list,
-    *,
-    model_spatial,
-    processor_spatial,
-    model,
-    processor,
-    image: Image.Image,
-    attn_layer: int,
-    top_k: int,
-    prompt_template_attn: str,
-    system_prompt_attn: str,
-    prompt_template_refine: str,
-    system_prompt_refine: str,
-    include_scores_in_context: bool = False,
-    qwen_version: str = "qwen25",
-):
-    outputs = []
-    for query in queries_list:
-        substring = query["query"]
-        prompt_attn = prompt_template_attn.format(substring=substring)
-        attn_out = extract_text_to_image_attention(
-            model=model_spatial,
-            processor=processor_spatial,
-            image=image,
-            layers=[attn_layer],
-            prompt=prompt_attn,
-            substring=substring,
-            system_prompt=system_prompt_attn,
-        )
-        attn_scores = attn_out["scores"]  # [1, Q, V]
-        layer_scores = attn_scores[0].mean(dim=0)  # [V]
-        top_scores, top_indices = layer_scores.topk(k=top_k, sorted=True)
-        top_indices_np = top_indices.detach().cpu().numpy()
-        top_scores_np = top_scores.detach().cpu().numpy()
-
-        # Map patch indices to pixel centers
-        pixels = _patch_indices_to_pixel_centers(
-            top_indices_np, image.height, image.width, qwen_version=qwen_version
-        )
-
-        # Prepare refine prompt with proposals
-        question = prompt_template_refine.format(substring=substring)
-        if pixels.shape[0] > 0:
-            # For Qwen3, convert pixel proposals to [0, 1000] coordinate system
-            if qwen_version == "qwen3":
-                pixels_for_prompt = _pixels_to_qwen3_coords(
-                    pixels, image.width, image.height
-                )
-            else:
-                pixels_for_prompt = pixels
-            
-            if include_scores_in_context:
-                lines = [
-                    "Candidate pixel proposals (x, y) with attention scores:",
-                    *[
-                        f"- {float(p[0]):.1f}, {float(p[1]):.1f} (score={float(s):.4f}, rank={i + 1})"
-                        for i, (p, s) in enumerate(zip(pixels_for_prompt, top_scores_np))
-                    ],
-                ]
-            else:
-                lines = [
-                    "Candidate pixel proposals (x, y):",
-                    *[f"- {float(p[0]):.1f}, {float(p[1]):.1f}" for p in pixels_for_prompt],
-                ]
-            question = question + "\n\n" + "\n".join(lines)
-
-        response = ask_qwen_about_image(
-            image=image,
-            prompt=question,
-            model=model,
-            processor=processor,
-            system_prompt=system_prompt_refine,
-        )
-
-        px = _parse_pixel_from_json(
-            response,
-            qwen_version=qwen_version,
-            img_width=image.width,
-            img_height=image.height,
-        )
-        if px is None:
-            # fallback to the top-1 proposal
-            if pixels.shape[0] > 0:
-                px = [float(pixels[0, 0]), float(pixels[0, 1])]
-            else:
-                px = [0.0, 0.0]
-
-        out_item = {"query": substring, "predictions": {}, "raw_response": response}
-        out_item["predictions"]["0"] = {
-            "pixel_coords": [px],
-        }
-        outputs.append(out_item)
-    return outputs
-
-
-def frame_attn_refine_feat_queries(
-    *,
-    model_spatial,
-    processor_spatial,
-    model,
-    processor,
-    preprocessed_root: Path | str,
-    images_subdir: str,
-    clip_gt: Dict[str, Any],
-    clip: DictConfig,
-    cfg: DictConfig,
-):
-    results: Dict[str, Any] = {}
-    images_dir = Path(preprocessed_root) / clip.name / images_subdir
-
-    attn_layer = cfg.eval.spatial.frame_attn_refine_attn_layer
-    prompt_template_attn = cfg.eval.spatial.frame_attn_prompt_template
-    system_prompt_attn = cfg.eval.spatial.frame_attn_system_prompt
-    prompt_template_refine = cfg.eval.spatial.frame_attn_refine_prompt_template
-    system_prompt_refine = cfg.eval.spatial.frame_attn_refine_system_prompt
-    include_scores = cfg.eval.spatial.frame_attn_refine_include_scores_in_context
-
-    for timestep, timestep_queries in clip_gt.items():
-        frame_number = int(timestep_queries["frame_number"])  # local idx
-        frame_path = find_image_path(images_dir, frame_number)
-        if frame_path is None:
-            continue
-        image = Image.open(frame_path).convert("RGB")
-
-        results[timestep] = {"objects": [], "actions": []}
-
-        results[timestep]["objects"] = frame_attn_refine_predict_query_list(
-            timestep_queries.get("objects", []),
-            model_spatial=model_spatial,
-            processor_spatial=processor_spatial,
-            model=model,
-            processor=processor,
-            image=image,
-            attn_layer=attn_layer,
-            top_k=cfg.eval.spatial.frame_attn_refine_max_proposals,
-            prompt_template_attn=prompt_template_attn,
-            system_prompt_attn=system_prompt_attn,
-            prompt_template_refine=prompt_template_refine,
-            system_prompt_refine=system_prompt_refine,
-            include_scores_in_context=include_scores,
-            qwen_version=cfg.eval.qwen_version,
-        )
-
-        results[timestep]["actions"] = frame_attn_refine_predict_query_list(
-            timestep_queries.get("actions", []),
-            model_spatial=model_spatial,
-            processor_spatial=processor_spatial,
-            model=model,
-            processor=processor,
-            image=image,
-            attn_layer=attn_layer,
-            top_k=cfg.eval.spatial.frame_attn_refine_max_proposals,
-            prompt_template_attn=prompt_template_attn,
-            system_prompt_attn=system_prompt_attn,
-            prompt_template_refine=prompt_template_refine,
-            system_prompt_refine=system_prompt_refine,
-            include_scores_in_context=include_scores,
-            qwen_version=cfg.eval.qwen_version,
-        )
-
-        # Clear VRAM after each timestep to prevent OOM
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    return results
-
-
-def frame_attn_feat_queries(
-    *,
-    model,
-    processor,
-    preprocessed_root: Path | str,
-    images_subdir: str,
-    clip_gt: Dict[str, Any],
-    clip: DictConfig,
-    cfg: DictConfig,
-):
-    """Run 2D frame attention baseline across all queries for a clip.
-
-    Uses text-to-vision attention on the original frame and maps top-k patches to pixel centers.
-    """
-    results: Dict[str, Any] = {}
-    images_dir = Path(preprocessed_root) / clip.name / images_subdir
-    layers = cfg.eval.spatial.layers
-    prompt_template = cfg.eval.spatial.frame_attn_prompt_template
-    system_prompt = cfg.eval.spatial.frame_attn_system_prompt
-
-    for timestep, timestep_queries in clip_gt.items():
-        frame_number = int(timestep_queries["frame_number"])  # local idx
-        frame_path = find_image_path(images_dir, frame_number)
-        if frame_path is None:
-            continue
-        image = Image.open(frame_path).convert("RGB")
-
-        results[timestep] = {"objects": [], "actions": []}
-
-        results[timestep]["objects"] = frame_attn_predict_query_list(
-            timestep_queries.get("objects", []),
-            model=model,
-            processor=processor,
-            image=image,
-            layers=layers,
-            max_proposals=cfg.eval.spatial.frame_attn_refine_max_proposals,
-            prompt_template=prompt_template,
-            system_prompt=system_prompt,
-            qwen_version=cfg.eval.qwen_version,
-        )
-
-        results[timestep]["actions"] = frame_attn_predict_query_list(
-            timestep_queries.get("actions", []),
-            model=model,
-            processor=processor,
-            image=image,
-            layers=layers,
-            max_proposals=cfg.eval.spatial.frame_attn_refine_max_proposals,
-            prompt_template=prompt_template,
-            system_prompt=system_prompt,
-            qwen_version=cfg.eval.qwen_version,
-        )
-
-        # Clear VRAM after each timestep to prevent OOM
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    return results
-
-
 def frame_direct_predict_query_list(
     queries_list,
     *,
@@ -1291,7 +1016,10 @@ def frame_direct_predict_query_list(
         substring = query["query"]
         question = prompt_template.format(substring=substring)
 
-        response = ask_qwen_about_image(
+        # Custom implementation to test feature extraction and pos encodings (can zero out if needed)
+        # This should reproduce the same results as vanilla ask_qwen_about_image with pos encodings enabled
+        # It should be possible to swap this against ask_qwen_about_image
+        response = ask_qwen_about_image_custom(
             image=image,
             prompt=question,
             model=model,
@@ -1342,6 +1070,7 @@ def frame_direct_feat_queries(
 
         results[timestep] = {"objects": [], "actions": []}
 
+        logger.info(f"Evaluating frame_direct for objects at timestep: {timestep}")
         results[timestep]["objects"] = frame_direct_predict_query_list(
             timestep_queries.get("objects", []),
             model=model,
@@ -1352,6 +1081,7 @@ def frame_direct_feat_queries(
             qwen_version=cfg.eval.qwen_version,
         )
 
+        logger.info(f"Evaluating frame_direct for actions at timestep: {timestep}")
         results[timestep]["actions"] = frame_direct_predict_query_list(
             timestep_queries.get("actions", []),
             model=model,

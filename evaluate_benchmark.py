@@ -7,21 +7,24 @@ from tqdm import tqdm
 import hydra
 import numpy as np
 import torch
+from loguru import logger
 
+# Standard patched Qwen3 model
 from llm.qwen_utils import get_patched_qwen3
+
+# Custom Qwen3 model with 3D positional encoding support
+from llm.qwen_utils_3d import get_custom_qwen3_3d
+
 from benchmark.temporal import (
     load_video_frames,
     multiframe_queries,
     graph_agent_queries,
 )
 from benchmark.spatial import (
-    get_patched_qwen_for_spatial_grounding,
     dump_spatial_prediction_visualizations,
-    frame_attn_feat_queries,
-    frame_attn_refine_feat_queries,
     frame_direct_feat_queries,
-    graph_agent_feat_queries,
 )
+from benchmark.spatial_3d import graph_agent_3d_feat_queries
 
 def evaluate_triplets(
     clip: DictConfig,
@@ -239,33 +242,28 @@ def get_timestep_from_frame(frame: str, image_dir: Path) -> int:
 def evaluate_spatial(
     clip: DictConfig,
     cfg: DictConfig,
-    model_spatial,
-    processor_spatial,
     model,
     processor,
+    method
 ):
     """Run spatial grounding evaluation using frame-based and graph-based methods.
 
     Methods supported:
-      - frame_attn: Attention scores over frame patches
-      - frame_attn_refine: 2D attention proposals refined by Qwen
       - frame_direct: Direct Qwen prompting on frame to return a pixel
       - graph_agent: Agentic exploration of 3D scene graph with tools
 
     Graph data (graph_dir) is only needed for graph_agent method.
 
     Args:
+      clip: Clip to evaluate
+      cfg: Configuration
       model: Pre-loaded Qwen model
       processor: Pre-loaded Qwen processor
-      model_spatial: Pre-loaded patched Qwen model for spatial grounding (attention methods)
-      processor_spatial: Pre-loaded processor for spatial model
+      method: Method to evaluate
     """
     # skip this if no eval config is set
     if cfg.eval is None or cfg.eval.spatial is None:
         return
-
-    # which methods to run
-    methods_to_run = set(cfg.eval.spatial.methods)
 
     # graph data (only needed for graph_agent)
     graph_dir = Path(cfg.output_root) / clip.name / cfg.eval.paths.graph_subdir
@@ -284,35 +282,10 @@ def evaluate_spatial(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    if "frame_attn" in methods_to_run:
-        all_results["frame_attn"] = frame_attn_feat_queries(
-            model=model_spatial,
-            processor=processor_spatial,
-            preprocessed_root=Path(cfg.preprocessed_root),
-            images_subdir=cfg.eval.paths.images_subdir,
-            clip_gt=gt_data,
-            clip=clip,
-            cfg=cfg,
-        )
-        _clear_vram()
-
-    if "frame_attn_refine" in methods_to_run:
-        # 2D attention proposals + refinement via normal Qwen
-        all_results["frame_attn_refine"] = frame_attn_refine_feat_queries(
-            model_spatial=model_spatial,
-            processor_spatial=processor_spatial,
-            model=model,
-            processor=processor,
-            preprocessed_root=Path(cfg.preprocessed_root),
-            images_subdir=cfg.eval.paths.images_subdir,
-            clip_gt=gt_data,
-            clip=clip,
-            cfg=cfg,
-        )
-        _clear_vram()
-
-    if "frame_direct" in methods_to_run:
+    if method == "frame_direct":
         # Direct Qwen prompting on frame to return a pixel
+        logger.info(f"Evaluating frame_direct for clip: {clip.name}")
+
         all_results["frame_direct"] = frame_direct_feat_queries(
             model=model,
             processor=processor,
@@ -322,19 +295,21 @@ def evaluate_spatial(
             clip=clip,
             cfg=cfg,
         )
+        
+        logger.info(f"Finished evaluating frame_direct for clip: {clip.name}")
         _clear_vram()
 
-    if "graph_agent" in methods_to_run:
-        # Graph agent with tools (requires qwen3)
-        all_results["graph_agent"] = graph_agent_feat_queries(
-            model=model,
+    if method == "graph_agent":        
+        all_results["graph_agent"] = graph_agent_3d_feat_queries(
+            model=model,  # Uses CustomQwen3VLForConditionalGeneration3D (class swapped)
             processor=processor,
-            graph_dir=graph_dir,
+            graph_dir=graph_dir,  # Contains Gaussian splat data and features
             clip_gt=gt_data,
             clip=clip,
             cfg=cfg,
         )
         _clear_vram()
+
     out_dir = Path(cfg.eval.spatial.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     predictions_file = out_dir / f"{clip.name}.json"
@@ -371,38 +346,37 @@ def main(cfg: DictConfig):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(42)
 
-    model, processor = get_patched_qwen3(
-        size=cfg.eval.qwen3_size,
-        use_fp8=cfg.eval.qwen3_use_fp8,
-    )
-    
-    # Only load spatial attention model if spatial evaluation is enabled
-    model_spatial = None
-    processor_spatial = None
-    if cfg.eval is not None and cfg.eval.spatial is not None:
-        model_spatial, processor_spatial = get_patched_qwen_for_spatial_grounding(
-            size=cfg.eval.qwen3_size,
-            use_fp8=cfg.eval.qwen3_use_fp8,
-        )
+    # Spatial evaluation
+    methods_to_run = set(cfg.eval.spatial.methods)
+    for method in methods_to_run:
+        if method == "frame_direct":
+            model, processor = get_patched_qwen3(
+                size=cfg.eval.qwen3_size,
+                use_fp8=cfg.eval.qwen3_use_fp8,
+            )
+        elif method == "graph_agent":
+            model, processor = get_custom_qwen3_3d(
+                size=cfg.eval.qwen3_size,
+                use_fp8=cfg.eval.qwen3_use_fp8,
+            )
+        else:
+            raise ValueError(f"Invalid method: {method}")
 
-    for clip in tqdm(cfg.clips, desc="Evaluating clips", unit="clip"):
-        evaluate_triplets(clip, cfg, model=model, processor=processor)
-        evaluate_temporal(clip, cfg, model=model, processor=processor)
-        evaluate_spatial(
-            clip=clip,
-            cfg=cfg,
-            model=model,
-            processor=processor,
-            model_spatial=model_spatial,
-            processor_spatial=processor_spatial,
-        )
+        for clip in tqdm(cfg.clips, desc="Evaluating clips (spatial)", unit="clip"):
+            logger.info(f"Evaluating spatial for clip: {clip.name}")
+            evaluate_spatial(
+                clip=clip,
+                cfg=cfg,
+                model=model,
+                processor=processor,
+                method=method,
+            )
 
-    # Clean up spatial models if they were loaded
-    if model_spatial is not None:
-        del model_spatial
-        del processor_spatial
-        gc.collect()
-        torch.cuda.empty_cache()
+    # TODO: handle triplets and temporal accordingly down the line
+    # for clip in tqdm(cfg.clips, desc="Evaluating clips (temporal)", unit="clip"):
+    #     evaluate_temporal(clip, cfg, model=model, processor=processor)
+    # for clip in tqdm(cfg.clips, desc="Evaluating clips (triplets)", unit="clip"):
+    #     evaluate_triplets(clip, cfg, model=model, processor=processor)
 
 
 if __name__ == "__main__":
