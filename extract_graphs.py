@@ -977,6 +977,7 @@ def clusterwise_qwen_feats(
 
     cluster_to_patch_through_time = {}
     cluster_to_instance_through_time = {}
+    cluster_to_indices = {}
 
     for cid in np.unique(clusters):
         # get feats for that cluster
@@ -990,15 +991,18 @@ def clusterwise_qwen_feats(
             cluster_patch_lf.shape[1], cfg.graph_extraction.features_per_cluster
         )
         if feature_selection == "random":
-            indices = np.random.choice(
+            local_indices = np.random.choice(
                 np.arange(cluster_patch_lf.shape[1]), n_feats, replace=False
             )
         else:
-            indices = np.argsort(opacities[cmask])[-n_feats:]
+            local_indices = np.argsort(opacities[cmask])[-n_feats:]
+        # Convert local indices to global indices by tracing back through cluster mask
+        global_indices = np.where(cmask)[0][local_indices]
+        cluster_to_indices[str(cid)] = global_indices
 
-        cluster_patch_lf = cluster_patch_lf[:, indices]
+        cluster_patch_lf = cluster_patch_lf[:, local_indices]
         if instance_lf_through_time is not None:
-            cluster_instance_lf = cluster_instance_lf[:, indices]
+            cluster_instance_lf = cluster_instance_lf[:, local_indices]
 
         # decode them
         flat_cluster_patch_lf = cluster_patch_lf.reshape(-1, cluster_patch_lf.shape[-1])
@@ -1030,9 +1034,9 @@ def clusterwise_qwen_feats(
             cluster_to_instance_through_time[str(cid)] = decoded_cluster_instance_lf
 
     return (
-        cluster_to_patch_through_time
+        (cluster_to_patch_through_time, cluster_to_indices)
         if instance_lf_through_time is None
-        else (cluster_to_patch_through_time, cluster_to_instance_through_time)
+        else (cluster_to_patch_through_time, cluster_to_instance_through_time, cluster_to_indices)
     )
 
 
@@ -1259,7 +1263,7 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
 
     # cluster qwen features
     logger.info(f"Decoding Qwen features...")
-    cluster_feats_dict_patch, cluster_feats_dict_instance = clusterwise_qwen_feats(
+    cluster_feats_dict_patch, cluster_feats_dict_instance, cluster_indices_dict = clusterwise_qwen_feats(
         ae,
         clusters,
         cfg,
@@ -1292,6 +1296,9 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
     np.savez(
         out / "c_qwen_feats_instance.npz", **cluster_feats_dict_instance
     )  # qwen instance features per cluster through time (cluster_id -> (timesteps, n_feats, 3584))
+    np.savez(
+        out / "c_indices.npz", **cluster_indices_dict
+    )  # qwen indices per cluster (cluster_id -> (n_feats,))
     np.save(
         out / "c_centroids.npy", cluster_pos_through_time
     )  # cluster centroids through time (timesteps, n_clusters, 3)
