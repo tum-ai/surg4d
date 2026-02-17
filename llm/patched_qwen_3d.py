@@ -112,9 +112,6 @@ class CustomQwen3VLModel3D(Qwen3VLModel):
             if isinstance(custom_patch_features, (list, tuple)):
                 custom_patch_features = torch.cat(custom_patch_features, dim=0)
 
-            # Deepstack features stay as a list of per-layer tensors, matching Qwen3's expectations
-            deepstack_image_embeds = custom_deepstack_features
-
             # Sanity-check feature dimension against language-model hidden size
             custom_feat_dim = custom_patch_features.shape[-1]
             model_hidden_size = inputs_embeds.shape[-1]
@@ -123,33 +120,62 @@ class CustomQwen3VLModel3D(Qwen3VLModel):
                     f"Custom patch feature dim ({custom_feat_dim}) does not match model hidden size ({model_hidden_size})."
                 )
 
-            # Use features as-is (bypassing the vision encoder)
-            image_embeds = custom_patch_features.to(inputs_embeds.device, inputs_embeds.dtype)
-
-            logger.info(f"[prefill] inputs_embeds of shape: {inputs_embeds.shape}")
-            logger.info(f"[prefill] image_embeds of shape: {image_embeds.shape}")
-            if deepstack_image_embeds is not None:
-                logger.info(f"[prefill] deepstack_image_embeds (list of {len(deepstack_image_embeds)} tensors)")
-
-            # Debug / safety check: compare placeholder slice and feature numel on prefill only
             image_token_id = self.config.image_token_id
-            special_image_mask = input_ids == image_token_id
-            n_image_tokens = special_image_mask.sum()
-            logger.info(f"[prefill] n_image_tokens: {n_image_tokens}")
-            special_image_mask = special_image_mask.unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
-            num_el_embeds = inputs_embeds[special_image_mask].numel()
-            logger.info(f"[prefill] num_el_embeds: {num_el_embeds}")
-            num_el_features = image_embeds.numel()
-            logger.info(f"[prefill] num_el_features: {num_el_features}")
-
-            assert (
-                num_el_embeds == num_el_features
-            ), "Image features and image tokens do not match in prefill forward"
-
-            image_mask, _ = self.get_placeholder_mask(
-                input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
+            video_token_id = self.config.video_token_id
+            n_image_tokens = (input_ids == image_token_id).sum()
+            n_video_tokens = (input_ids == video_token_id).sum()
+            assert not (n_image_tokens > 0 and n_video_tokens > 0), (
+                "Mixed image and video placeholders are not supported with custom_patch_features."
             )
-            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
+
+            if n_video_tokens > 0:
+                video_embeds = custom_patch_features.to(inputs_embeds.device, inputs_embeds.dtype)
+                deepstack_video_embeds = custom_deepstack_features
+
+                logger.info(f"[prefill] inputs_embeds of shape: {inputs_embeds.shape}")
+                logger.info(f"[prefill] video_embeds of shape: {video_embeds.shape}")
+                if deepstack_video_embeds is not None:
+                    logger.info(f"[prefill] deepstack_video_embeds (list of {len(deepstack_video_embeds)} tensors)")
+
+                special_video_mask = input_ids == video_token_id
+                logger.info(f"[prefill] n_video_tokens: {special_video_mask.sum()}")
+                special_video_mask = special_video_mask.unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
+                num_el_embeds = inputs_embeds[special_video_mask].numel()
+                num_el_features = video_embeds.numel()
+                logger.info(f"[prefill] num_el_embeds: {num_el_embeds}")
+                logger.info(f"[prefill] num_el_features: {num_el_features}")
+                assert (
+                    num_el_embeds == num_el_features
+                ), "Video features and video tokens do not match in prefill forward"
+
+                _, video_mask = self.get_placeholder_mask(
+                    input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds
+                )
+                inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+            else:
+                deepstack_image_embeds = custom_deepstack_features
+                image_embeds = custom_patch_features.to(inputs_embeds.device, inputs_embeds.dtype)
+
+                logger.info(f"[prefill] inputs_embeds of shape: {inputs_embeds.shape}")
+                logger.info(f"[prefill] image_embeds of shape: {image_embeds.shape}")
+                if deepstack_image_embeds is not None:
+                    logger.info(f"[prefill] deepstack_image_embeds (list of {len(deepstack_image_embeds)} tensors)")
+
+                special_image_mask = input_ids == image_token_id
+                logger.info(f"[prefill] n_image_tokens: {special_image_mask.sum()}")
+                special_image_mask = special_image_mask.unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
+                num_el_embeds = inputs_embeds[special_image_mask].numel()
+                num_el_features = image_embeds.numel()
+                logger.info(f"[prefill] num_el_embeds: {num_el_embeds}")
+                logger.info(f"[prefill] num_el_features: {num_el_features}")
+                assert (
+                    num_el_embeds == num_el_features
+                ), "Image features and image tokens do not match in prefill forward"
+
+                image_mask, _ = self.get_placeholder_mask(
+                    input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
+                )
+                inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
         # Build visual_pos_masks and deepstack_visual_embeds
         visual_pos_masks = None
@@ -366,10 +392,18 @@ class CustomQwen3VLModel3D(Qwen3VLModel):
                 vision_tokens = input_ids[vision_start_indices + 1]
                 image_nums = (vision_tokens == image_token_id).sum()
                 video_nums = (vision_tokens == video_token_id).sum()
+                assert gaussian_to_grid_mapping is not None
+                assert gaussians_per_image is not None
+                assert len(gaussians_per_image) == int(image_nums + video_nums), (
+                    f"gaussians_per_image has {len(gaussians_per_image)} entries, "
+                    f"but sequence has {int(image_nums + video_nums)} visual blocks."
+                )
 
                 input_tokens = input_ids.tolist() # list of len seq_len
                 llm_pos_ids_list: list = []
                 st = 0
+                gaussian_cursor = 0
+                visual_block_index = 0
                 # Counters to keep track of how many images and videos are still missing
                 remain_images, remain_videos = image_nums, video_nums
                 for _ in range(image_nums + video_nums):
@@ -432,11 +466,22 @@ class CustomQwen3VLModel3D(Qwen3VLModel):
                     # h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()
                     # w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(llm_grid_t, llm_grid_h, -1).flatten()
                     # Ours: gaussian to grid mapping already contains the h, w indices, t can be set to torch.ones and concatenated
-                    t_index = torch.ones(gaussian_to_grid_mapping.shape[0], device=input_ids.device, dtype=torch.long).flatten()
-                    h_index = gaussian_to_grid_mapping[..., 0].flatten().long()
-                    w_index = gaussian_to_grid_mapping[..., 1].flatten().long()
-                    logger.info(f"Number of gaussians: {gaussian_to_grid_mapping.shape[0]}")
-                    logger.info(f"max h: {h_index.max()}, max w: {w_index.max()}")
+                    num_gaussians_this_block = int(gaussians_per_image[visual_block_index])
+                    visual_block_index += 1
+                    mapping_this_block = gaussian_to_grid_mapping[
+                        gaussian_cursor : gaussian_cursor + num_gaussians_this_block
+                    ]
+                    gaussian_cursor += num_gaussians_this_block
+
+                    t_index = torch.ones(
+                        num_gaussians_this_block,
+                        device=input_ids.device,
+                        dtype=torch.long,
+                    ).flatten()
+                    h_index = mapping_this_block[..., 0].flatten().long()
+                    w_index = mapping_this_block[..., 1].flatten().long()
+                    logger.info(f"Number of gaussians: {num_gaussians_this_block}")
+                    logger.info(f"max h_index rope: {h_index.max()}, max w_index rope: {w_index.max()}")
 
                     # Standard implementation:
                     # # Offset local image grid positions by the previous positions/previous "context": st_idx (previous max position + 1) and text len before that image or video in the current "processing block"
@@ -448,7 +493,7 @@ class CustomQwen3VLModel3D(Qwen3VLModel):
                     # Standard: This keeps track of where we are in the input tokens; next search for image / video will start from there
                     # st = ed + llm_grid_t * llm_grid_h * llm_grid_w
                     # Ours: we are not moving ahead based on grid size, but based on number of gaussians!
-                    st = ed + gaussian_to_grid_mapping.shape[0]
+                    st = ed + num_gaussians_this_block
                     logger.info(f"st {st} after image")
 
                 # Check if we are done with the input tokens; if there are some left, they must be text tokens
@@ -542,13 +587,7 @@ class CustomQwen3VLForConditionalGeneration3D(Qwen3VLForConditionalGeneration):
         
         This is called internally by model.generate() during the generation loop.
         The gaussian_to_grid_mapping and gaussians_per_image parameters come from
-        the caller of model.generate() (e.g., graph_agent_3d_feat_queries in benchmark/spatial_3d.py).
-        
-        Call flow:
-        1. graph_agent_3d_feat_queries() creates gaussian_to_grid_mapping
-        2. Calls model.generate(..., gaussian_to_grid_mapping=...)
-        3. model.generate() calls this prepare_inputs_for_generation()
-        4. This forwards the mapping to forward() → get_rope_index()
+        the caller of model.generate()
         """
         model_inputs = super().prepare_inputs_for_generation(
             input_ids,

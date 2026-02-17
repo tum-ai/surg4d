@@ -36,6 +36,7 @@ QWEN_CONSTANTS = {
         "spatial_merge": 2,
         "effective_patch_size": 32,  # 16 * 2
         "num_deepstack_layers": 3,
+        "temporal_patch_size": 2
     },
 }
 
@@ -423,18 +424,17 @@ def ask_qwen_about_image_features(
     )
 
 
-# TODO: beware that this does not take batching into account in the sense that there is no padding and no adjusting of the attention mask
-#   This might mess us up later, may have to come back to this
 def adjust_input_ids_for_gaussians(
     inputs: Dict[str, torch.Tensor],
     processor: Qwen3VLProcessor,
     gaussians_per_image: List[int],
     image_token_id: int,
+    video_token_id: int,
     image_pad_token_id: int,
     vision_start_token_id: int,
     vision_end_token_id: int,
 ) -> Dict[str, torch.Tensor]:
-    """Adjust input_ids to have the correct number of image tokens per image.
+    """Adjust input_ids to have the correct number of visual tokens per frame/image.
     
     Uses the same logic as get_placeholder_mask: finds all <image> tokens directly,
     groups consecutive ones into blocks (one per image), and replaces each block
@@ -445,6 +445,7 @@ def adjust_input_ids_for_gaussians(
         processor: Qwen3VLProcessor instance
         gaussians_per_image: List of number of Gaussians per image
         image_token_id: Token ID for <image> token
+        video_token_id: Token ID for <video> token
     
     Returns:
         Modified inputs dict with adjusted input_ids and attention_mask
@@ -458,6 +459,7 @@ def adjust_input_ids_for_gaussians(
     logger.info(f"input_ids of shape: {input_ids.shape}")
     logger.info(f"attention_mask of shape: {attention_mask.shape}")
     logger.info(f"image_token_id: {image_token_id}")
+    logger.info(f"video_token_id: {video_token_id}")
 
     batch_size = input_ids.shape[0]
     assert batch_size == 1, "Only batch_size=1 supported for now"
@@ -466,9 +468,9 @@ def adjust_input_ids_for_gaussians(
     for b in range(batch_size):
         seq = input_ids[b]  # (L,)
         
-        # Find all image token positions (same logic as get_placeholder_mask)
-        image_mask = seq == image_token_id  # (L,) boolean
-        image_positions = image_mask.nonzero(as_tuple=True)[0]  # Indices where image tokens are
+        # Find all visual token positions (same logic as get_placeholder_mask)
+        visual_mask = (seq == image_token_id) | (seq == video_token_id)
+        visual_positions = visual_mask.nonzero(as_tuple=True)[0]
 
         # Do the same counting for the other provided token ids
         vision_start_mask = seq == vision_start_token_id
@@ -483,24 +485,25 @@ def adjust_input_ids_for_gaussians(
         image_pad_positions = image_pad_mask.nonzero(as_tuple=True)[0]
         logger.info(f"Found total of {len(image_pad_positions)} image pad tokens")
 
-        if len(image_positions) == 0:
-            # No image tokens found, nothing to adjust
-            logger.info(f"No image tokens found, nothing to adjust")
+        if len(visual_positions) == 0:
+            logger.info("No visual tokens found, nothing to adjust")
             continue
         else:
-            logger.info(f"Found total of {len(image_positions)} image tokens")
+            logger.info(f"Found total of {len(visual_positions)} visual tokens")
         
-        # Group consecutive image tokens into blocks (one block per image)
-        # Find boundaries where image tokens are not consecutive
+        # Group consecutive visual tokens into blocks (one block per image/frame)
         blocks = []
-        block_start = image_positions[0].item()
-        for i in range(1, len(image_positions)):
-            if image_positions[i].item() != image_positions[i-1].item() + 1:
-                # Gap found: end current block, start new one
-                blocks.append((block_start, image_positions[i-1].item() + 1))
-                block_start = image_positions[i].item()
-        # Add final block
-        blocks.append((block_start, image_positions[-1].item() + 1))
+        block_start = visual_positions[0].item()
+        current_token_id = int(seq[block_start].item())
+        for i in range(1, len(visual_positions)):
+            cur_pos = visual_positions[i].item()
+            prev_pos = visual_positions[i - 1].item()
+            cur_token_id = int(seq[cur_pos].item())
+            if cur_pos != prev_pos + 1 or cur_token_id != current_token_id:
+                blocks.append((block_start, prev_pos + 1, current_token_id))
+                block_start = cur_pos
+                current_token_id = cur_token_id
+        blocks.append((block_start, visual_positions[-1].item() + 1, current_token_id))
         
         assert len(blocks) == len(gaussians_per_image), (
             f"Found {len(blocks)} image token blocks but {len(gaussians_per_image)} Gaussians per image specified"
@@ -510,26 +513,24 @@ def adjust_input_ids_for_gaussians(
         new_seq_parts = []
         prev_end = 0
         
-        for block_idx, (block_start, block_end) in enumerate(blocks):
+        for block_idx, (block_start, block_end, block_token_id) in enumerate(blocks):
             # Add tokens before this block
             if block_start > prev_end:
                 new_seq_parts.append(seq[prev_end:block_start])
             
-            # Add correct number of image tokens for this block
+            # Add correct number of visual tokens for this block
             target_tokens = gaussians_per_image[block_idx]
             current_tokens = block_end - block_start
             
             if target_tokens != current_tokens:
-                # Create new image token block
-                new_image_tokens = torch.full(
+                new_visual_tokens = torch.full(
                     (target_tokens,),
-                    image_token_id,
+                    block_token_id,
                     dtype=seq.dtype,
                     device=seq.device
                 )
-                new_seq_parts.append(new_image_tokens)
+                new_seq_parts.append(new_visual_tokens)
             else:
-                # Same count: keep existing tokens
                 new_seq_parts.append(seq[block_start:block_end])
             
             prev_end = block_end
@@ -558,13 +559,16 @@ def model_inputs(
     messages: List[Dict[str, Any]],
     vision_features: List[torch.Tensor],
     processor: Qwen3VLProcessor,
-    image_token_id: int,
-    image_pad_token_id: int,
-    vision_start_token_id: int,
-    vision_end_token_id: int,
-    image_grid_thw: torch.Tensor,
-    gaussians_per_image: List[int],
+    image_token_id: Optional[int] = None,
+    video_token_id: Optional[int] = None,
+    image_pad_token_id: Optional[int] = None,
+    vision_start_token_id: Optional[int] = None,
+    vision_end_token_id: Optional[int] = None,
+    image_grid_thw: Optional[torch.Tensor] = None,
+    video_grid_thw: Optional[torch.Tensor] = None,
+    gaussians_per_image: Optional[List[int]] = None,
     tools: List[Dict[str, Any]] = [],
+    **kwargs,
 ):
     """Prepare model inputs from messages and vision features.
     
@@ -581,18 +585,6 @@ def model_inputs(
             If provided, adjusts input_ids to have the correct number of <image> tokens.
         tools: Optional tools for chat template
     """
-
-    # make sure number of messages and vision feature sets match
-    n_msg_images = sum(
-        1
-        for msg in messages
-        if msg["role"] == "user"
-        for part in msg.get("content", [])
-        if part.get("type") == "image"
-    )
-    assert n_msg_images == len(vision_features), (
-        "number of messages and vision features must match"
-    )
 
     # create actual text template from messages dict
     text = processor.apply_chat_template(
@@ -613,52 +605,107 @@ def model_inputs(
     # (we cannot just overwrite image_grid_thw because
     # input ids already contains placeholder vision tokens)
     effective_patch_size = QWEN_CONSTANTS["qwen3"]["effective_patch_size"]
+    temporal_patch_size = QWEN_CONSTANTS["qwen3"]["temporal_patch_size"]
+    if image_grid_thw is not None:
+        assert image_grid_thw.shape[0] == len(vision_features)
+    if video_grid_thw is not None:
+        assert video_grid_thw.shape[0] == len(vision_features)
     mock_images: List[Image.Image] = []
     for i, feat in enumerate(vision_features):
-        if image_grid_thw is None:
+        if image_grid_thw is None and video_grid_thw is None:
             n = int(feat.shape[0])
             w, h = closest_factor_pair(n)
             img_w = w * effective_patch_size
             img_h = h * effective_patch_size
-        else:
-            # We have already a precomputed image_grid_thw whose height and width we consider desirable
-            # Effective patch size already includes spatial merge factor, see constants above
-            height = image_grid_thw[0, 1]
-            width = image_grid_thw[0, 2]
+        elif image_grid_thw is not None:
+            height = int(image_grid_thw[i, 1].item())
+            width = int(image_grid_thw[i, 2].item())
             img_w = width * effective_patch_size
             img_h = height * effective_patch_size
+        else:
+            height = int(video_grid_thw[i, 1].item())
+            width = int(video_grid_thw[i, 2].item())
+            logger.info(f"Desired video grid thw spatial resolution: {height}, {width})")
+            img_w = width * effective_patch_size
+            img_h = height * effective_patch_size
+            logger.info(f"Video grid spatial resolution after accounting for effective patch size: ({img_w}, {img_h})")
         logger.info(f"Mock image {i}: ({img_w}, {img_h}) pixels, features: {feat.shape[0]}")
         mock_img = Image.new("RGB", (img_w, img_h), color="red")
         mock_images.append(mock_img)
 
-    # This will compute the image grid thw based on (mock) image dims and account for patch size only (no spatial merge yet)
-    # That means the returned image grid thw will be the desired grid size divided by patch size but before spatial merge, still "too large"
-    # Later, a spatial feature merge would be performed (we do not do this on Gaussian tokens) -> grid is divided by spatial merge factor in rope index computation in model forward pass
-    # -> yields the actual LLM grid size we want
-    # In a sense, we want image grid thw after all this -> above we multiply by effective patch size = patch size * spatial merge factor
-    # -> processor divides by patch size, and rope index computation divides by spatial merge -> reverted to desired grid size for final inference
-    inputs = processor(
-        text=text,
-        images=mock_images,
-        padding=False,
-        return_tensors="pt",
-        do_resize=False,
+    has_video = any(
+        part.get("type") == "video"
+        for msg in messages
+        if msg["role"] == "user"
+        for part in msg.get("content", [])
     )
+    if has_video:
+        # Preserve per-frame shape information by passing a frame list for one video.
+        # TODO: this is accounting for temporal patch size, either use the Qwen constant or move this to hydra
+        video_input = [list(mock_images) + list(mock_images)]
+        logger.info(
+            f"video_input structure: {len(video_input)} video(s), "
+            f"{len(video_input[0]) if video_input else 0} frame(s) in first video"
+        )
+        logger.info(f"number of images: {len(gaussians_per_image)}")
+        inputs = processor(
+            text=[text],
+            videos=video_input,
+            padding=False,
+            return_tensors="pt",
+            do_sample_frames=False,
+            do_resize=False,
+        )
+    else:
+        # This will compute the image grid thw based on (mock) image dims and account for patch size only (no spatial merge yet)
+        # That means the returned image grid thw will be the desired grid size divided by patch size but before spatial merge, still "too large"
+        # Later, a spatial feature merge would be performed (we do not do this on Gaussian tokens) -> grid is divided by spatial merge factor in rope index computation in model forward pass
+        # -> yields the actual LLM grid size we want
+        # In a sense, we want image grid thw after all this -> above we multiply by effective patch size = patch size * spatial merge factor
+        # -> processor divides by patch size, and rope index computation divides by spatial merge -> reverted to desired grid size for final inference
+        inputs = processor(
+            text=text,
+            images=mock_images,
+            padding=False,
+            return_tensors="pt",
+            do_resize=False,
+        )
     
     logger.info(f"After processor: input_ids shape: {inputs['input_ids'].shape}")
     logger.info(f"After processor: attention_mask shape: {inputs['attention_mask'].shape if 'attention_mask' in inputs else None}")
+
+    # Decode all input ids after processor and print without skipping special tokens
+    input_ids = inputs["input_ids"]
+    logger.info(f"input_ids shape: {input_ids.shape}")
+    torch.set_printoptions(threshold=10000)
+    decoded_input = processor.tokenizer.decode(input_ids[0], skip_special_tokens=False)
+    logger.info(f"Decoded input: {decoded_input}")
     
     # Adjust input_ids to allow for passing the Gaussian tokens; processor will assume a 1:1 mapping between tokens derived from llm grid and actual tokens
     # In our case however, we have a desired grid size but we might have a many : 1 mapping between actual tokens and llm grid cells
     # This is still distinct from the actual assignment of tokens to grid cells for pos enc, which is handled in the rope index computation
     # Note: this is called already with the filtered, final selection of gaussian tokens!
     if gaussians_per_image is not None:
+        assert image_token_id is not None
+        assert video_token_id is not None
+        assert image_pad_token_id is not None
+        assert vision_start_token_id is not None
+        assert vision_end_token_id is not None
         assert len(gaussians_per_image) == len(vision_features), (
             f"gaussians_per_image length ({len(gaussians_per_image)}) must match "
             f"vision_features length ({len(vision_features)})"
         )
         logger.info(f"Adjusting input_ids for gaussians_per_image: {gaussians_per_image}")
-        inputs = adjust_input_ids_for_gaussians(inputs, processor, gaussians_per_image, image_token_id, image_pad_token_id, vision_start_token_id, vision_end_token_id)
+        inputs = adjust_input_ids_for_gaussians(
+            inputs,
+            processor,
+            gaussians_per_image,
+            image_token_id,
+            video_token_id,
+            image_pad_token_id,
+            vision_start_token_id,
+            vision_end_token_id,
+        )
         logger.info(f"After adjustment: input_ids shape: {inputs['input_ids'].shape}")
 
     return inputs
@@ -702,7 +749,14 @@ def generate_with_vision_features(
 
     # preprocess and generate
     inputs = model_inputs(
-        messages, main_features, processor
+        messages,
+        main_features,
+        processor,
+        image_token_id=model.model.config.image_token_id,
+        video_token_id=model.model.config.video_token_id,
+        image_pad_token_id=processor.tokenizer.convert_tokens_to_ids("<|image_pad|>"),
+        vision_start_token_id=model.model.config.vision_start_token_id,
+        vision_end_token_id=model.model.config.vision_end_token_id,
     ).to(model.device)
 
     _set_generation_seed(seed)
@@ -930,6 +984,7 @@ def _format_message_trace_for_debug(
     return "\n".join(lines)
 
 
+# TODO: Pretty sure this would no longer work, adjust if needed in the end or remove
 def generate_with_vision_features_agentic(
     messages: List[Dict[str, Any]],
     vision_features: List[torch.Tensor],

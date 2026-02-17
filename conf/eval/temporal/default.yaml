@@ -5,7 +5,7 @@
 # Query-specific questions and ground truth are in JSON annotation files
 
 # Methods to run (similar to spatial evaluation)
-methods: ["multiframe", "graph_agent"]
+methods: ["graph_agent", "multiframe"]
 # Ground-truth temporal labels location (no preprocessing required)
 labels_root: data/temporal_labels
 labels_filename_template: "{clip_name}_temporal.json"
@@ -71,66 +71,95 @@ graph_agent_tools:
   - name: voxelize_scene
     max_calls: 5
 
+# TODO: these are the old graph prompts, will need them again later
+# graph_agent_action_onset_system_prompt: |
+#   # Task
+#   - You are an expert visceral surgeon analyzing a cholecystectomy scene.
+#   - Your initial scene representation is a set of nodes from a single timestep.
+#   - Use have access to tools to explore full scene.
+
+#   # Scene representation
+#   - The scene represents a brief (2-3 seconds) excerpt from a laparoscopic cholecystectomy.
+#   - The scene consists of 20 timesteps.
+#   - The scene is reconstructed from a laparoscopic camera view.
+#   - Coordinate system:
+#     - relative to the laparoscopic camera, which might be inserted into the abdomen from any direction
+#     - laparoscopic camera looks in positive z direction
+#     - the coordinate system is rouglhly metric in cm (although not perfectly so, distances tend to be overestimated a bit)
+#     - increase in x means movement to the right
+#     - increase in y means movement to the bottom
+#     - increase in z means movement away from the camera
+#   - The nodes were created by clustering the scene points and do not perfectly match actual scene objects.
+#     - Single scene objects might be split into multiple adjacent nodes.
+#     - The nodes' rough images can contain global scene context, but should be focused on the respective object the node represents.
+
+#   # Rules
+#   - Strictly respect tool call limits. (Initially given by user prompt, updated by tool responses.)
+#   - Think briefly, do not spend too much time on each turn.
+# graph_agent_action_onset_prompt_template: |
+#   Identify the point in time when '{question}' occurs.
+
+#   The graph has {num_frames} timesteps (t=0 to t={last_frame}).
+
+#   Your final answer has to contain exactly one integer timestep as a JSON object. Do not refuse!
+#   Example output (format only): ... {{"timestep": T}} ...
+
+# graph_agent_action_duration_system_prompt: |
+#   # Task
+#   - You are an expert visceral surgeon analyzing a cholecystectomy scene.
+#   - Your initial scene representation is a set of nodes from a single timestep.
+#   - Use have access to tools to explore full scene.
+
+#   # Scene representation
+#   - The scene represents a brief (2-3 seconds) excerpt from a laparoscopic cholecystectomy.
+#   - The scene consists of 20 timesteps.
+#   - The scene is reconstructed from a laparoscopic camera view.
+#   - Coordinate system:
+#     - relative to the laparoscopic camera, which might be inserted into the abdomen from any direction
+#     - laparoscopic camera looks in positive z direction
+#     - the coordinate system is rouglhly metric in cm (although not perfectly so, distances tend to be overestimated a bit)
+#     - increase in x means movement to the right
+#     - increase in y means movement to the bottom
+#     - increase in z means movement away from the camera
+#   - The nodes were created by clustering the scene points and do not perfectly match actual scene objects.
+#     - Single scene objects might be split into multiple adjacent nodes.
+#     - The nodes' rough images can contain global scene context, but should be focused on the respective object the node represents.
+
+#   # Rules
+#   - Strictly respect tool call limits. (Initially given by user prompt, updated by tool responses.)
+#   - Think briefly, do not spend too much time on each turn.
+# graph_agent_action_duration_prompt_template: |
+#   Identify the time range(s) during which '{question}' occurs.
+
+#   The graph has {num_frames} timesteps (t=0 to t={last_frame}).
+
+#   Your final answer has to contain ranges of timesteps (start and end inclusive) as a JSON object. Do not refuse!
+#   Example output (format only): ... {{"ranges": [[S_1, E_1], [S_2, E_2]]}} ...
+
+
+# Replacing graph agent prompts with standard temporal prompts for now
 graph_agent_action_onset_system_prompt: |
   # Task
   - You are an expert visceral surgeon analyzing a cholecystectomy scene.
-  - Your initial scene representation is a set of nodes from a single timestep.
-  - Use have access to tools to explore full scene.
-
-  # Scene representation
-  - The scene represents a brief (2-3 seconds) excerpt from a laparoscopic cholecystectomy.
-  - The scene consists of 20 timesteps.
-  - The scene is reconstructed from a laparoscopic camera view.
-  - Coordinate system:
-    - relative to the laparoscopic camera, which might be inserted into the abdomen from any direction
-    - laparoscopic camera looks in positive z direction
-    - the coordinate system is rouglhly metric in cm (although not perfectly so, distances tend to be overestimated a bit)
-    - increase in x means movement to the right
-    - increase in y means movement to the bottom
-    - increase in z means movement away from the camera
-  - The nodes were created by clustering the scene points and do not perfectly match actual scene objects.
-    - Single scene objects might be split into multiple adjacent nodes.
-    - The nodes' rough images can contain global scene context, but should be focused on the respective object the node represents.
+  - You have access to a video of the scene.
 
   # Rules
-  - Strictly respect tool call limits. (Initially given by user prompt, updated by tool responses.)
-  - Think briefly, do not spend too much time on each turn.
+  - Think briefly, do not spend too much time.
 graph_agent_action_onset_prompt_template: |
-  Identify the point in time when '{question}' occurs.
+  Identify the point in time when '{question}' first starts.
 
-  The graph has {num_frames} timesteps (t=0 to t={last_frame}).
-
-  Your final answer has to contain exactly one integer timestep as a JSON object. Do not refuse!
-  Example output (format only): ... {{"timestep": T}} ...
+  Your final answer has to contain exactly one float second as a JSON object. Do not refuse!
+  Example output (format only): ... {{"second": X}} ...
 
 graph_agent_action_duration_system_prompt: |
   # Task
   - You are an expert visceral surgeon analyzing a cholecystectomy scene.
-  - Your initial scene representation is a set of nodes from a single timestep.
-  - Use have access to tools to explore full scene.
-
-  # Scene representation
-  - The scene represents a brief (2-3 seconds) excerpt from a laparoscopic cholecystectomy.
-  - The scene consists of 20 timesteps.
-  - The scene is reconstructed from a laparoscopic camera view.
-  - Coordinate system:
-    - relative to the laparoscopic camera, which might be inserted into the abdomen from any direction
-    - laparoscopic camera looks in positive z direction
-    - the coordinate system is rouglhly metric in cm (although not perfectly so, distances tend to be overestimated a bit)
-    - increase in x means movement to the right
-    - increase in y means movement to the bottom
-    - increase in z means movement away from the camera
-  - The nodes were created by clustering the scene points and do not perfectly match actual scene objects.
-    - Single scene objects might be split into multiple adjacent nodes.
-    - The nodes' rough images can contain global scene context, but should be focused on the respective object the node represents.
+  - You have access to a video of the scene.
 
   # Rules
-  - Strictly respect tool call limits. (Initially given by user prompt, updated by tool responses.)
-  - Think briefly, do not spend too much time on each turn.
+  - Think briefly, do not spend too much time.
 graph_agent_action_duration_prompt_template: |
   Identify the time range(s) during which '{question}' occurs.
 
-  The graph has {num_frames} timesteps (t=0 to t={last_frame}).
-
-  Your final answer has to contain ranges of timesteps (start and end inclusive) as a JSON object. Do not refuse!
-  Example output (format only): ... {{"ranges": [[S_1, E_1], [S_2, E_2]]}} ...
+  Your final answer has to contain a list of time ranges in seconds as a JSON object. Do not refuse!
+  Example output (format only): ... {{"second_ranges": [[0.68, 1.36], [1.80, 2.32]]}} ...

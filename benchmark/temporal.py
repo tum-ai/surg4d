@@ -352,43 +352,14 @@ def multiframe_queries(
             image_paths=selected_frames,
             model=model,
             processor=processor,
-            qwen_version=cfg.eval.qwen_version,
             system_prompt=system_prompt,
             fps=effective_fps,
         )
-        
-        # Parse response
-        predicted = parser_map[query_type](response, query_type)
-        
-        # Convert seconds to timesteps if using Qwen3 format
-        if predicted and 'second' in predicted:
-            # Convert single second to timestep
-            predicted['timestep'] = seconds_to_timestep(predicted['second'], num_ts, effective_fps)
-        elif predicted and 'second_ranges' in predicted:
-            # Convert second ranges to timestep ranges
-            timestep_ranges = []
-            for start_sec, end_sec in predicted['second_ranges']:
-                start_timestep = seconds_to_timestep(start_sec, num_ts, effective_fps)
-                end_timestep = seconds_to_timestep(end_sec, num_ts, effective_fps)
-                timestep_ranges.append([start_timestep, end_timestep])
-            predicted['ranges'] = timestep_ranges
-        
-        # Build message history for consistency with graph_agent
-        # (multiframe doesn't support tools, so this is just the initial query and response)
-        message_history = [
-            {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
-            {"role": "user", "content": [{"type": "text", "text": prompt}]},
-            {"role": "assistant", "content": [{"type": "text", "text": response}]}
-        ]
-        
-        results.append({
-            'query_id': query_anno['query_id'],
-            'query_type': query_type,
-            'question': query_anno['question'],
-            'predicted': predicted,
-            'raw_response': response,
-            'message_history': message_history,
-        })
+
+        result_item = {
+            'raw_response': response
+        }
+        results.append(result_item)
         
         # Clear memory after each query to prevent OOM with video inputs
         gc.collect()

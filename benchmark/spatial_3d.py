@@ -1,7 +1,7 @@
 """
 Spatial query evaluation using 3D Gaussian-to-grid positional encoding.
 
-This module provides graph_agent_3d_feat_queries which uses custom positional encodings
+This module provides graph_agent_3d_feat_queries_general which uses custom positional encodings
 based on Gaussian spatial positions, enabling spatial queries over 3D Gaussian splatting data.
 No tools are used - the model directly processes Gaussian features with spatial positional encoding.
 """
@@ -32,12 +32,15 @@ from llm.qwen_utils import (
     ThinkingTokenBudgetProcessor,
 )
 from transformers import LogitsProcessorList
+from transformers.video_utils import VideoMetadata
 
 import rerun as rr
 
 
 def compute_gaussian_grid_thw(
     gaussian_means: np.ndarray,  # (N, 3)
+    img_height: int,
+    img_width: int,
     patch_size: float = 0.01,
 ) -> torch.Tensor:
     """Compute image_grid_thw from Gaussian means.
@@ -63,13 +66,25 @@ def compute_gaussian_grid_thw(
     extent_y = max_y - min_y
     logger.info(f"Scene extent: extent_x={extent_x}, extent_y={extent_y}")
 
-    # Compute grid dimensions (BEFORE spatial merge)
-    # The model will apply spatial_merge_size internally in get_rope_index
-    grid_w = int(np.ceil(extent_x / patch_size)) + 1
-    grid_h = int(np.ceil(extent_y / patch_size)) + 1
+    # TODO: have to make a decision here; either replicating actual image plane and patches (when patch size is set to 16) or do it free-formm
+    #   Free-form including out-of-view stuff and independent of image would be great, but will lead to inconsistencies across frames, "empty" grid cells, etc.
+    #   Therefore, using the simplified version to exclude empty patches and irregular amounts of tokens per image as a source of error
+
+    # # Compute grid dimensions (BEFORE spatial merge)
+    # # The model will apply spatial_merge_size internally in get_rope_index
+    # grid_w = int(np.ceil(extent_x / patch_size)) + 1
+    # grid_h = int(np.ceil(extent_y / patch_size)) + 1
+
+    # Simplification for now, replicating image plane and its extent
+    grid_w = int(np.ceil(img_width / patch_size))
+    grid_h = int(np.ceil(img_height / patch_size))
+    min_x = 0
+    min_y = 0
+    max_x = img_width - 1
+    max_y = img_height - 1
 
     # image_grid_thw uses dimensions BEFORE spatial merge
-    # get_rope_index will apply spatial_merge_size internally
+    # get_rope_index will later apply spatial_merge_size
     image_grid_thw = torch.tensor([[1, grid_h, grid_w]], dtype=torch.long)
     logger.info(f"Image grid thw: {image_grid_thw}")
 
@@ -80,6 +95,11 @@ def create_gaussian_to_grid_mapping(
     gaussian_means: np.ndarray,  # (N, 3) world coordinates
     image_grid_thw: torch.Tensor,  # (1, 3) with [t, h, w]
     patch_size: float = 0.01,
+    # Those are optionally provided when extent is intentionally manipulated, e.g., to conform with original image extents after projection
+    min_x = None,
+    min_y = None,
+    max_x = None,
+    max_y = None
 ) -> torch.Tensor:
     """Map Gaussian means to grid positions. Also sort the gaussians according to their grid positions.
 
@@ -99,18 +119,15 @@ def create_gaussian_to_grid_mapping(
     # Drop z axis and compute grid indices
     xy = gaussian_means[:, :2]  # (N, 2)
 
-    # Compute extent to get origin offset
-    min_x, min_y = xy.min(axis=0)
-    max_x, max_y = xy.max(axis=0)
+    # Compute extent to get origin offset; might be provided externally if we want to force a different extent (e.g., excluding out of view, following image plane extent, etc.)
+    if min_x is None and min_y is None and max_x is None and max_y is None:
+        min_x, min_y = xy.min(axis=0)
+        max_x, max_y = xy.max(axis=0)
 
     # Map to grid indices (0-indexed)
     # x -> w (width), y -> h (height)
-    w_indices = ((xy[:, 0] - min_x) / patch_size).astype(np.int64)
-    h_indices = ((xy[:, 1] - min_y) / patch_size).astype(np.int64)
-
-    # Check that all indices end up within the grid
-    assert (w_indices >= 0).all() and (w_indices < grid_w).all()
-    assert (h_indices >= 0).all() and (h_indices < grid_h).all()
+    w_indices = np.floor((xy[:, 0] - min_x) / patch_size)
+    h_indices = np.floor((xy[:, 1] - min_y) / patch_size)
 
     # Stack into (N, 2) with [h_idx, w_idx]
     mapping = torch.tensor(np.stack([h_indices, w_indices], axis=1), dtype=torch.long)
@@ -166,7 +183,8 @@ def generate_with_vision_features_3d(
     vision_features: List[torch.Tensor],
     model: Qwen3VLForConditionalGeneration,
     processor: Qwen3VLProcessor,
-    image_grid_thw: torch.Tensor,
+    image_grid_thw: Optional[torch.Tensor],
+    video_grid_thw: Optional[torch.Tensor],
     gaussian_to_grid_mapping: torch.Tensor,
     gaussians_per_image: List[int],
     seed: int = 42,
@@ -183,6 +201,7 @@ def generate_with_vision_features_3d(
         model: CustomQwen3VLForConditionalGeneration3D model instance
         processor: Qwen3VLProcessor instance
         image_grid_thw: (num_images, 3) tensor with [t, h, w] grid dimensions (BEFORE merge)
+        video_grid_thw: (num_frames, 3) tensor with [t, h, w] per-frame dims (BEFORE merge)
         gaussian_to_grid_mapping: (total_gaussians, 2) tensor with [h_idx, w_idx] for each Gaussian
         gaussians_per_image: List of number of Gaussians per image
         max_new_tokens: Maximum tokens to generate
@@ -211,6 +230,8 @@ def generate_with_vision_features_3d(
     # Preprocess and generate
     image_token_id = model.model.config.image_token_id
     logger.info(f"image_token_id: {image_token_id}")
+    video_token_id = model.model.config.video_token_id
+    logger.info(f"video_token_id: {video_token_id}")
 
     image_pad_token_id = processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
     logger.info(f"image_pad_token_id: {image_pad_token_id}")
@@ -235,8 +256,10 @@ def generate_with_vision_features_3d(
     inputs = model_inputs(
         messages, main_features, processor, 
         image_grid_thw=image_grid_thw,
+        video_grid_thw=video_grid_thw,
         gaussians_per_image=gaussians_per_image,
         image_token_id=image_token_id,
+        video_token_id=video_token_id,
         image_pad_token_id=image_pad_token_id,
         vision_start_token_id=vision_start_token_id,
         vision_end_token_id=vision_end_token_id,
@@ -284,6 +307,7 @@ def generate_with_vision_features_3d(
     logger.info(f"zero_positional_encodings: {zero_positional_encodings}")
     logger.info(f"gaussians_per_image: {gaussians_per_image}")
     logger.info(f"image_grid_thw: {image_grid_thw}")
+    logger.info(f"video_grid_thw: {video_grid_thw}")
     logger.info(f"gaussian_to_grid_mapping shape: {gaussian_to_grid_mapping.shape}")
     logger.info(f"main_features: {[f.shape for f in main_features]}")
     logger.info(f"deepstack_features: {[f.shape for f in deepstack_features] if deepstack_features else None}")
@@ -332,30 +356,35 @@ def generate_with_vision_features_3d(
     return output_text[0]
 
 
-def filter_gaussian_tokens(gaussian_to_grid_mapping: np.ndarray, depth: np.ndarray, opacity: np.ndarray) -> np.ndarray:
-    """Filter Gaussians based on depth and opacity.
+def filter_gaussian_tokens(gaussian_to_grid_mapping: np.ndarray, depth: np.ndarray, opacity: np.ndarray, grid_h: int, grid_w: int) -> np.ndarray:
+    """Filter Gaussians based on depth, opacity, and grid assignment.
 
     Args:
         gaussian_to_grid_mapping: (N, 2) array of [h_idx, w_idx] for each Gaussian
         depth: (N,) array of depth values for each Gaussian
         opacity: (N,) array of opacity values for each Gaussian
+        grid_h: height of the grid
+        grid_w: width of the grid
 
     Returns:
         filtered_indices: (M,) array of indices of the filtered Gaussians
     """
 
-    # TODO: if we keep using this, it must go into hydra configs
+    # TODO: if we keep using this, threshold must go into hydra configs
     filtered_depth = depth.copy()
     filtered_depth[opacity < 0.8] = np.inf
 
-    # Get the unique mappings
+    # Get the unique mappings to grid indices
     _, unique_start_indices, unique_counts = np.unique(gaussian_to_grid_mapping, axis=0, return_index=True, return_counts=True)
     
     final_indices = []
     for unique_start_index, unique_count in zip(unique_start_indices, unique_counts):
-        print(f"unique_start_index: {unique_start_index}, unique_count: {unique_count}")
+        # Check the mapping and potentially skip if it is outside of the grid; want to exclude those Gaussians at the moment
+        current_mapping = gaussian_to_grid_mapping[unique_start_index:unique_start_index+unique_count]
+        if (current_mapping[:, 0] < 0).any() or (current_mapping[:, 0] >= grid_h).any() or (current_mapping[:, 1] < 0).any() or (current_mapping[:, 1] >= grid_w).any():
+            continue
+
         relevant_depths = filtered_depth[unique_start_index:unique_start_index+unique_count]
-        print(f"relevant_depths: {relevant_depths}")
 
         # If all depths are infinity, we take the shallowest depth from the original depth
         if np.all(relevant_depths == np.inf):
@@ -363,25 +392,28 @@ def filter_gaussian_tokens(gaussian_to_grid_mapping: np.ndarray, depth: np.ndarr
         else:
             shallowest_depth_index = np.argmin(relevant_depths)
 
-        print(f"shallowest_depth: {relevant_depths[shallowest_depth_index]}")
         final_indices.append(unique_start_index + shallowest_depth_index)
-
-    print(f"final_indices: {final_indices}")
 
     return np.array(final_indices)
 
 
-# Entry point to the 3D logic of custom grid etc.
-def graph_agent_3d_feat_queries(
+# TODO: may want to rename the file or move this and its submethods to another file, makes no sense to be in a specific "spatial" file
+# General interface for Gaussian token queries (spatial, temporal, ...)
+def graph_agent_3d_feat_queries_general(
     *,
     model: Qwen3VLForConditionalGeneration,
     processor: Qwen3VLProcessor,
     graph_dir: Path | str,
-    clip_gt: Dict[str, Any],
     clip: DictConfig,
     cfg: DictConfig,
+    queries: List[str],
+    timesteps: List[tuple[int, int]],
+    frame_numbers: List[tuple[int, int]],
+    system_prompts: List[str],
+    prompt_template: str,
+    query_metadata: List[Dict[str, Any]],
 ):
-    """Run spatial queries with 3D Gaussian-to-grid positional encoding.
+    """Run queries with 3D Gaussian-to-grid positional encoding.
 
     Uses custom positional encodings based on Gaussian spatial positions, enabling
     spatial queries over 3D Gaussian splatting data with many-to-one grid mapping.
@@ -391,9 +423,14 @@ def graph_agent_3d_feat_queries(
         model: CustomQwen3VLForConditionalGeneration3D model instance
         processor: Qwen3VLProcessor instance
         graph_dir: Path to graph directory containing Gaussian data
-        clip_gt: Ground truth queries per timestep
         clip: Clip configuration
         cfg: Evaluation configuration
+        queries: List of query strings. If prompt_template is "{substring}", these can be full prompts.
+        timesteps: List of inclusive timestep ranges (start, end) per query
+        frame_numbers: List of inclusive frame-number ranges (start, end) per query
+        system_prompts: System prompts for the queries
+        prompt_template: Prompt template used as prompt_template.format(substring=query)
+        query_metadata: Metadata per query for downstream postprocessing
 
     Returns:
         Dictionary of results per timestep
@@ -479,10 +516,8 @@ def graph_agent_3d_feat_queries(
     )
     train_cameras = scene_info.train_cameras
 
-    system_prompt = cfg.eval.spatial.graph_agent_system_prompt
-    prompt_template = cfg.eval.spatial.graph_agent_prompt_template
-
     # Configuration for 3D Gaussian-to-grid mapping
+    # TODO: this does not just concern spatial, should be in general eval config
     patch_size = cfg.eval.spatial.gaussian_patch_size
     gaussian_sample_ratio = cfg.eval.spatial.gaussian_sample_ratio
 
@@ -490,175 +525,275 @@ def graph_agent_3d_feat_queries(
     rr.init("custom positional encodings")
     rr.save(graph_dir / "custom_positional_encoding.rrd")
 
-    results: Dict[str, Any] = {}
-    for timestep, timestep_queries in clip_gt.items():
-        t = int(timestep)
-        frame_number = int(timestep_queries["frame_number"])
-        logger.info(f"Processing timestep {timestep} with frame number {frame_number}")
+    assert len(queries) == len(timesteps) == len(frame_numbers) == len(query_metadata)
+    results: List[Dict[str, Any]] = []
+    for query_idx, query in enumerate(queries):
+        t1, t2 = int(timesteps[query_idx][0]), int(timesteps[query_idx][1])
+        if t1 == t2:
+            video_mode = False
+        else:
+            video_mode = True
+        logger.info(f"Processing query {query_idx} in video mode: {video_mode}")
 
-        # Get Gaussian means for this timestep
-        gaussian_means_t = positions[t]  # (N, 3) in world coordinates
-        logger.info(f"Gaussian means for timestep {timestep} have shape: {gaussian_means_t.shape}")
-        logger.info(f"First 5 Gaussian means: {gaussian_means_t[:5]}")
+        f1, f2 = int(frame_numbers[query_idx][0]), int(frame_numbers[query_idx][1])
+        logger.info(f"Processing timesteps {t1} to {t2} with corresponding frame numbers {f1} to {f2}")
 
-        # Apply perspective projection to get pixel coordinates for each Gaussian
-        frame_name = f"frame_{int(frame_number):06d}.jpg"
-        proj_matrix, img_width, img_height = get_proj_matrix_from_timestep(
-            int(frame_number), train_cameras, frame_name
-        )
-        gaussian_means_t_projected = project_3d_to_2d(gaussian_means_t, proj_matrix, img_width, img_height)
-        # Make homogeneous, downstream will discard z anyways
-        gaussian_means_t_projected = np.hstack((gaussian_means_t_projected, np.ones((gaussian_means_t_projected.shape[0], 1))))
-        logger.info(f"First 5 Projected Gaussian means (homogeneous): {gaussian_means_t_projected[:5]}")
+        if video_mode:
+            # TODO: should go into hydra
+            processor.video_processor.video_metadata = VideoMetadata(
+                total_num_frames=(t2 - t1 + 1) * 2,
+                fps=6.25 * 2,
+                frames_indices=list(range(t1,  (t2 * 2) + 1)),
+            )
+
+        # Aggregate all relevant info for downstream inference
+        gaussian_means_all = []
+        gaussian_means_projected_all = []
+        gaussian_features_all = []
+        gaussian_to_grid_mapping_all = []
+        frame_grid_thw_all = []
+
+        # TODO: later, we may want to experiment with a fixed view, fixed projection plane, and fixed image grid
+        # image_grid_thw_cached = None
+        # proj_matrix_cached = None
+        # img_width_cached = None
+        # img_height_cached = None
+
+        # TODO: the way we deal with frame numbers here is hacky; if it works it must become part of hydra config
+        frame_numbers_step = 4
+        for t, frame_number in zip(range(t1, t2 + 1), range(f1, f2 + 1, frame_numbers_step)):
+
+            # Get Gaussian means for this timestep
+            gaussian_means_t = positions[t]  # (N, 3) in world coordinates
+            # Apply perspective projection to get pixel coordinates for each Gaussian
+            frame_name = f"frame_{int(frame_number):06d}.jpg"
+
+            # TODO: decide on approach here, fixed projection plane or dynamic; currently working with dynamic for various reasons
+            # # working with a fixed image plane by fixing to the first view
+            # if proj_matrix_cached is None:
+            #     proj_matrix, img_width, img_height = get_proj_matrix_from_timestep(
+            #         int(frame_number), train_cameras, frame_name
+            #     )
+            #     proj_matrix_cached = proj_matrix
+            #     img_width_cached = img_width
+            #     img_height_cached = img_height
+            # else:
+            #     proj_matrix = proj_matrix_cached
+            #     img_width = img_width_cached
+            #     img_height = img_height_cached
+            proj_matrix, img_width, img_height = get_proj_matrix_from_timestep(
+                int(frame_number), train_cameras, frame_name
+            )
+
+            gaussian_means_t_projected = project_3d_to_2d(gaussian_means_t, proj_matrix, img_width, img_height)
+            # Make homogeneous
+            gaussian_means_t_projected = np.hstack((gaussian_means_t_projected, np.ones((gaussian_means_t_projected.shape[0], 1))))
         
+            # TODO: this should happen much further below! decoding only what we need, not all Gaussians
+            # Decode latents for this timestep on-demand (much faster than decoding all timesteps)
+            logger.info(f"Decoding patch latents for timestep {t}...")
+            patch_latents_t = patch_latents[t]  # (N, lang_dim)
+            logger.info(f"Patch latents shape before decoding: {patch_latents_t.shape}")
+            # Decode in batches
+            decoded_t_list = []
+            with torch.no_grad():
+                for batch_start in range(0, len(patch_latents_t), decode_batch_size):
+                    batch = torch.tensor(
+                        patch_latents_t[batch_start : batch_start + decode_batch_size],
+                        device=model.device,
+                        dtype=torch.float32,
+                    )
+                    decoded_batch = autoencoder.decode(batch)  # (batch_size, full_dim)
+                    decoded_t_list.append(decoded_batch.detach().cpu().numpy())
+            decoded_main_t = np.concatenate(decoded_t_list, axis=0)  # (N, full_dim)
+            logger.info(f"Decoded features for timestep {t} have shape: {decoded_main_t.shape}")
+            # This is already in the [main | ds0 | ds1 | ds2] format
+            gaussian_feats_t = torch.tensor(decoded_main_t, dtype=torch.float32, device=model.device)
+            logger.info(f"Gaussian features for timestep {t} after accounting for deepstack features have shape: {gaussian_feats_t.shape}")
 
-        # Decode latents for this timestep on-demand (much faster than decoding all timesteps)
-        logger.info(f"Decoding patch latents for timestep {timestep}...")
-        patch_latents_t = patch_latents[t]  # (N, lang_dim)
-        logger.info(f"Patch latents shape before decoding: {patch_latents_t.shape}")
-        
-        # Decode in batches
-        decoded_t_list = []
-        with torch.no_grad():
-            for i in range(0, len(patch_latents_t), decode_batch_size):
-                batch = torch.tensor(
-                    patch_latents_t[i : i + decode_batch_size],
-                    device=model.device,
-                    dtype=torch.float32,
-                )
-                decoded_batch = autoencoder.decode(batch)  # (batch_size, full_dim)
-                decoded_t_list.append(decoded_batch.detach().cpu().numpy())
-        
-        decoded_main_t = np.concatenate(decoded_t_list, axis=0)  # (N, full_dim)
-        logger.info(f"Decoded features for timestep {timestep} have shape: {decoded_main_t.shape}")
+            logger.info(f"Sampling Gaussians for timestep {t}...")
+            # Sample Gaussians if needed (deterministic sampling, same for all frames)
+            # Keep features on the current device to avoid unnecessary CPU transfers.
+            # This is all happening on the 3D Gaussians
+            gaussian_means_sampled, gaussian_feats_sampled, sample_indices = sample_gaussians(
+                gaussian_means_t,
+                gaussian_features=gaussian_feats_t,
+                sample_ratio=gaussian_sample_ratio,
+                seed=42,  # Fixed seed for consistency across frames
+            )
 
-        # This is already in the [main | ds0 | ds1 | ds2] format
-        gaussian_feats_t = torch.tensor(decoded_main_t, dtype=torch.float32, device=model.device)
-        logger.info(f"Gaussian features for timestep {timestep} after accounting for deepstack features have shape: {gaussian_feats_t.shape}")
+            # Apply same sampling also in 2D on the projected Gaussians
+            gaussian_means_sampled_projected = gaussian_means_t_projected[sample_indices]
+            logger.info(f"Sampled Gaussian means for timestep {t} have shape: {gaussian_means_sampled.shape}")
+            logger.info(f"Sampled Gaussian features for timestep {t} have shape: {gaussian_feats_sampled.shape}")
 
-        logger.info(f"Sampling Gaussians for timestep {timestep}...")
-        # Sample Gaussians if needed (deterministic sampling, same for all frames)
-        # Keep features on the current device to avoid unnecessary CPU transfers.
-        # This is all happening on the 3D Gaussians
-        gaussian_means_sampled, gaussian_feats_sampled, sample_indices = sample_gaussians(
-            gaussian_means_t,
-            gaussian_features=gaussian_feats_t,
-            sample_ratio=gaussian_sample_ratio,
-            seed=42,  # Fixed seed for consistency across frames
-        )
+            # Subsample colors with the same indices so visualization matches sampled Gaussians
+            gaussian_colors_sampled = gaussian_colors[sample_indices]
 
-        # Apply same sampling also in 2D on the projected Gaussians
-        gaussian_means_sampled_projected = gaussian_means_t_projected[sample_indices]
-        logger.info(f"Sampled Gaussian means for timestep {timestep} have shape: {gaussian_means_sampled.shape}")
-        logger.info(f"Sampled Gaussian features for timestep {timestep} have shape: {gaussian_feats_sampled.shape}")
+            # TODO: decide on approach here, again fixed grid vs potentially dynamic (depends on which extents we choose etc.)
+            # if image_grid_thw_cached is None:
+            #     logger.info(f"Computing image_grid_thw for timestep {t}...")
+            #     # Compute image_grid_thw from Gaussian extents
+            #     # TODO: making this simplification with the exact image plane; not happy about this but should fix the tokens inconsistencies for now
+            #     # TODO: if we find a better solution, may want to remove the reliance on the actual image height and width
+            #     image_grid_thw, min_x, min_y = compute_gaussian_grid_thw(
+            #         gaussian_means_sampled_projected, img_height, img_width, patch_size=patch_size
+            #     )
+            #     image_grid_thw_cached = image_grid_thw
+            # else:
+            #     logger.info("Reusing existing image_grid_thw...")
+            #     image_grid_thw = image_grid_thw_cached
+            #     # TODO: computing extent, should only be used in debug vis below
+            #     min_x, min_y = gaussian_means_sampled_projected[:, :2].min(axis=0)
+            image_grid_thw, min_x, min_y = compute_gaussian_grid_thw(
+                gaussian_means_sampled_projected, img_height, img_width, patch_size=patch_size
+            )
 
-        # Subsample colors with the same indices so visualization matches sampled Gaussians
-        gaussian_colors_sampled = gaussian_colors[sample_indices]
+            logger.info(f"Creating Gaussian-to-grid mapping for timestep {t}...")
+            logger.info(f"Warning ⚠️: currently enforcing image extent in projection plane")
+            # Create Gaussian-to-grid mapping
+            gaussian_to_grid_mapping, sorted_indices = create_gaussian_to_grid_mapping(
+                gaussian_means_sampled_projected,
+                image_grid_thw,
+                patch_size=patch_size,
+                # TODO: only using this when forcing it to the image extent
+                min_x=0,
+                min_y=0,
+                max_x=img_width - 1,
+                max_y=img_height - 1,
+            )
 
-        logger.info(f"Computing image_grid_thw for timestep {timestep}...")
-        # Compute image_grid_thw from Gaussian extents
-        image_grid_thw, min_x, min_y = compute_gaussian_grid_thw(
-            gaussian_means_sampled_projected, patch_size=patch_size
-        )
+            # Sort everything acoording to the sorted indices, they are a byproduct of the gaussian <-> grid mapping
+            # Essentially sorting Gaussians by their mapping to the grid, left to right top to bottom
+            gaussian_to_grid_mapping = gaussian_to_grid_mapping[sorted_indices]
+            gaussian_means_sampled_sorted = gaussian_means_sampled[sorted_indices]
+            gaussian_means_sampled_projected_sorted = gaussian_means_sampled_projected[sorted_indices]
+            gaussian_feats_sampled = gaussian_feats_sampled[sorted_indices]
+            gaussian_colors_sampled = gaussian_colors_sampled[sorted_indices]
 
-        logger.info(f"Creating Gaussian-to-grid mapping for timestep {timestep}...")
-        # Create Gaussian-to-grid mapping
-        gaussian_to_grid_mapping, sorted_indices = create_gaussian_to_grid_mapping(
-            gaussian_means_sampled_projected,
-            image_grid_thw,
-            patch_size=patch_size,
-        )
+            # Depth from orginial means
+            depth = gaussian_means_sampled_sorted[:, 2]
+            # Opacities
+            opacity = opacities[t][sorted_indices]
 
-        # Sort everything acoording to the sorted indices, they are a byproduct of the gaussian <-> grid mapping
-        # Essentially sorting Gaussians by their mapping to the grid, left to right top to bottom
-        gaussian_to_grid_mapping = gaussian_to_grid_mapping[sorted_indices]
-        gaussian_means_sampled_sorted = gaussian_means_sampled[sorted_indices]
-        gaussian_means_sampled_projected_sorted = gaussian_means_sampled_projected[sorted_indices]
-        gaussian_feats_sampled = gaussian_feats_sampled[sorted_indices]
-        gaussian_colors_sampled = gaussian_colors_sampled[sorted_indices]
+            # Further filtering (depth, opacities, grid assignment, ...)
+            filtered_indices = filter_gaussian_tokens(gaussian_to_grid_mapping, depth, opacity, image_grid_thw[0, 1], image_grid_thw[0, 2])
+            # Get the filtered values
+            gaussian_to_grid_mapping = gaussian_to_grid_mapping[filtered_indices]
+            gaussian_means_sampled_sorted = gaussian_means_sampled_sorted[filtered_indices]
+            gaussian_means_sampled_projected_sorted = gaussian_means_sampled_projected_sorted[filtered_indices]
+            gaussian_feats_sampled = gaussian_feats_sampled[filtered_indices]
+            gaussian_colors_sampled = gaussian_colors_sampled[filtered_indices]
 
-        # Depth from orginial means
-        depth = gaussian_means_sampled_sorted[:, 2]
-        # Opacities
-        opacity = opacities[t][sorted_indices]
+            # TODO: feature decoding should happen here, once filtering is done
 
-        filtered_indices = filter_gaussian_tokens(gaussian_to_grid_mapping, depth, opacity)
-        # Get the filtered values
-        gaussian_to_grid_mapping = gaussian_to_grid_mapping[filtered_indices]
-        gaussian_means_sampled_sorted = gaussian_means_sampled_sorted[filtered_indices]
-        gaussian_means_sampled_projected_sorted = gaussian_means_sampled_projected_sorted[filtered_indices]
-        gaussian_feats_sampled = gaussian_feats_sampled[filtered_indices]
-        gaussian_colors_sampled = gaussian_colors_sampled[filtered_indices]
+            gaussian_means_all.append(gaussian_means_sampled_sorted)
+            gaussian_means_projected_all.append(gaussian_means_sampled_projected_sorted)
+            gaussian_features_all.append(gaussian_feats_sampled)
+            gaussian_to_grid_mapping_all.append(gaussian_to_grid_mapping)
+            frame_grid_thw_all.append(image_grid_thw)
 
-        # Visualization for debugging
-        # Rerun visualization: log sampled projected colored Gaussian positions in XY (z=0)
-        sampled_means_xy = np.column_stack(
-            (gaussian_means_sampled_projected_sorted[:, 0], gaussian_means_sampled_projected_sorted[:, 1], gaussian_means_sampled_projected_sorted[:, 2])
-        )
-        rr.set_time_sequence("frame", t)
-        rr.log(
-            "world/sampled_gaussians",
-            rr.Points3D(
-                positions=sampled_means_xy,
-                colors=gaussian_colors_sampled,
-                radii=4.0,
-            ),
-        )
-        # For all points on the grid, put a red point in rerun
-        grid_positions = torch.tensor([[i * patch_size + min_x, j * patch_size + min_y, 0] for i in range(image_grid_thw[0, 2]) for j in range(image_grid_thw[0, 1])])
-        rr.log(
-            "world/grid_points",
-            rr.Points3D(
-                positions=grid_positions,
-                colors=torch.tensor([255, 0, 0]),
-                radii=1.0,
-            ),
-        )
+            # Visualization for debugging
+            # Rerun visualization: log sampled projected colored Gaussian positions in XY (z=0)
+            sampled_means_xy = np.column_stack(
+                (gaussian_means_sampled_projected_sorted[:, 0], gaussian_means_sampled_projected_sorted[:, 1], gaussian_means_sampled_projected_sorted[:, 2])
+            )
+            rr.set_time_sequence("frame", t)
+            rr.log(
+                "world/sampled_gaussians",
+                rr.Points3D(
+                    positions=sampled_means_xy,
+                    colors=gaussian_colors_sampled,
+                    radii=4.0,
+                ),
+            )
+            # For all points on the grid, put a red point in rerun
+            grid_positions = torch.tensor([[i * patch_size + min_x, j * patch_size + min_y, 0] for i in range(image_grid_thw[0, 2] + 1) for j in range(image_grid_thw[0, 1] + 1)])
+            rr.log(
+                "world/grid_points",
+                rr.Points3D(
+                    positions=grid_positions,
+                    colors=torch.tensor([255, 0, 0]),
+                    radii=1.0,
+                ),
+            )
 
-        # Number of Gaussians (after sampling)
-        num_gaussians = len(gaussian_means_sampled_sorted)
-        gaussians_per_image = [num_gaussians]
+        outputs = []
 
-        results[timestep] = {"objects": [], "actions": []}
-        results[timestep]["objects"] = graph_agent_3d_predict_query_list(
-            timestep_queries.get("objects", []),
+        gaussian_features = gaussian_features_all
+        gaussians_per_image = [int(m.shape[0]) for m in gaussian_to_grid_mapping_all]
+        gaussian_to_grid_mapping = torch.cat(gaussian_to_grid_mapping_all, dim=0)
+        if video_mode:
+            video_grid_thw = torch.cat(frame_grid_thw_all, dim=0)
+            image_grid_thw_for_call = None
+        else:
+            video_grid_thw = None
+            image_grid_thw_for_call = frame_grid_thw_all[0]
+
+        # TODO: prompt template is pretty useless at the moment, may want to get rid of that later on
+        substring = query # Query from current iter, assuming this was passed correctly
+        question = prompt_template.format(substring=substring)
+
+        # Build messages
+        if video_mode:
+            # Do not matter that much, we are interfering after the video processor anyways, manipulating the input id sequence to match the Gaussian tokens
+            video_placeholders = [
+                f"frame_{int(frame_idx):06d}.jpg" for frame_idx in range(f1, f2 + 1)
+            ]
+            messages = [
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": system_prompts[query_idx]}],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "video", "video": video_placeholders},
+                        {"type": "text", "text": question},
+                    ],
+                },
+            ]
+        else:
+            messages = [
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": system_prompts[query_idx]}],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": None},
+                        {"type": "text", "text": question},
+                    ],
+                },
+            ]
+
+        logger.info(f"image grid before generate_with_vision_features_3d: {image_grid_thw_for_call}")
+        logger.info(f"video grid before generate_with_vision_features_3d: {video_grid_thw}")
+
+        # Generate response with 3D positional encoding
+        response = generate_with_vision_features_3d(
+            messages=messages,
+            vision_features=gaussian_features,
             model=model,
             processor=processor,
-            gaussian_features=[gaussian_feats_sampled],
-            gaussian_means=gaussian_means_sampled_sorted,
-            gaussian_means_projected=gaussian_means_sampled_projected_sorted,
-            train_cameras=train_cameras,
-            frame_number=frame_number,
-            system_prompt=system_prompt,
-            prompt_template=prompt_template,
-            point_o2n=point_o2n,
-            point_n2o=point_n2o,
-            image_grid_thw=image_grid_thw,
+            image_grid_thw=image_grid_thw_for_call,
+            video_grid_thw=video_grid_thw if video_mode else None,
             gaussian_to_grid_mapping=gaussian_to_grid_mapping,
             gaussians_per_image=gaussians_per_image,
-        )
-        results[timestep]["actions"] = graph_agent_3d_predict_query_list(
-            timestep_queries.get("actions", []),
-            model=model,
-            processor=processor,
-            gaussian_features=[gaussian_feats_sampled],
-            gaussian_means=gaussian_means_sampled_sorted,
-            gaussian_means_projected=gaussian_means_sampled_projected_sorted,
-            train_cameras=train_cameras,
-            frame_number=frame_number,
-            system_prompt=system_prompt,
-            prompt_template=prompt_template,
-            point_o2n=point_o2n,
-            point_n2o=point_n2o,
-            image_grid_thw=image_grid_thw,
-            gaussian_to_grid_mapping=gaussian_to_grid_mapping,
-            gaussians_per_image=gaussians_per_image,
+            zero_positional_encodings=False,
         )
 
-        # Clear VRAM after each timestep
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        result_item = {
+            "raw_response": response,
+        }
+
+        # Generally, postprocessing happens in task specific code, but we do need access to internal representations to convert back to pixels for spatial tasks
+        if query_metadata[query_idx]["task"] == "spatial":
+            result_item["gaussian_means"] = gaussian_means_sampled_sorted
+            result_item["gaussian_means_projected"] = gaussian_means_sampled_projected_sorted
+
+        results.append(result_item)
 
     # Clean up autoencoder
     del autoencoder
@@ -731,126 +866,3 @@ def _parse_coords_from_json_3d(
         coords.reshape(1, -1), min_x, max_x, min_y, max_y
     )
     return world_coords.flatten()
-
-
-def graph_agent_3d_predict_query_list(
-    queries_list,
-    *,
-    model: Qwen3VLForConditionalGeneration,
-    processor: Qwen3VLProcessor,
-    gaussian_features: List[torch.Tensor],
-    gaussian_means: np.ndarray,
-    gaussian_means_projected: np.ndarray,
-    train_cameras,
-    frame_number: int,
-    system_prompt: str,
-    prompt_template: str,
-    point_o2n,
-    point_n2o,
-    image_grid_thw: torch.Tensor,
-    gaussian_to_grid_mapping: torch.Tensor,
-    gaussians_per_image: List[int],
-):
-    """Query model with 3D Gaussian-to-grid positional encoding.
-
-    Directly queries the model with Gaussian features and spatial positional encoding,
-    no tools involved. Parses response coordinates from [0, 1000] range to world coordinates.
-    """
-    outputs = []
-
-    # Get grid extents from token positions; important to go back from Qwen3's [0, 1000] range to desired range
-    # Coordinate system: +x is right, +y is down, +z is away from camera (right-handed)
-    xy = gaussian_means_projected[:, :2]  # (N, 2)
-    min_x, min_y = xy.min(axis=0)
-    max_x, max_y = xy.max(axis=0)
-
-    # Precompute projection for this frame; need this to project located 3D position back to 2D image space where we have ground truth for eval later
-    frame_name = f"frame_{int(frame_number):06d}.jpg"
-    proj_matrix, img_width, img_height = get_proj_matrix_from_timestep(
-        int(frame_number), train_cameras, frame_name
-    )
-
-    for query_idx, query in enumerate(queries_list):
-        substring = query["query"]
-        question = prompt_template.format(substring=substring)
-
-        logger.info("=" * 80)
-        logger.info(f"QUERY #{query_idx + 1}: {substring}")
-        logger.info(f"Question: {question}")
-        logger.info("=" * 80)
-
-        # Build messages
-        messages = [
-            {
-                "role": "system",
-                "content": [{"type": "text", "text": system_prompt}],
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": None},
-                    {"type": "text", "text": question},
-                ],
-            },
-        ]
-
-        logger.info(f"System prompt length: {len(system_prompt)} chars")
-        logger.info(f"User question length: {len(question)} chars")
-        logger.info(f"Number of vision features: {len(gaussian_features)}")
-        logger.info(f"Gaussians per image: {gaussians_per_image}")
-
-        # Generate response with 3D positional encoding
-        response = generate_with_vision_features_3d(
-            messages=messages,
-            vision_features=gaussian_features,
-            model=model,
-            processor=processor,
-            image_grid_thw=image_grid_thw,
-            gaussian_to_grid_mapping=gaussian_to_grid_mapping,
-            gaussians_per_image=gaussians_per_image,
-            zero_positional_encodings=False,  # Use spatial encodings
-        )
-
-        # Parse response to extract coordinates from response and map back to desired range defined by token extent
-        world_xy = _parse_coords_from_json_3d(
-            response, min_x, max_x, min_y, max_y
-        )
-
-        # Coordinates are now in the projected plane; locate nearest projected Gaussian token
-        # Compute distances in XY plane only
-        query_xy = world_xy.reshape(1, 2)  # (1, 2)
-        gaussian_xy = gaussian_means_projected[:, :2]  # (N, 2)
-        
-        # Compute Euclidean distances in XY plane
-        distances_xy = np.linalg.norm(gaussian_xy - query_xy, axis=1)  # (N,)
-        nearest_idx = np.argmin(distances_xy)
-
-        # Use index to retrieve original Gaussian mean in 3D space
-        world_pos = gaussian_means[nearest_idx]
-        print(f"predicted world position: {world_pos}")
-
-        # Project back to 2D image for proper evaluation later
-        world_pos_reshaped = world_pos.reshape(1, 3)
-        pixels = project_3d_to_2d(
-            world_pos_reshaped, proj_matrix, img_width, img_height
-        )
-
-        # TODO: not sure why we would call this "normalized", just converting between m and cm?
-        world_pos_normalized = point_o2n(world_pos_reshaped)
-
-        out_item = {
-            "query": substring,
-            "predictions": {},
-            "raw_response": response,
-        }
-        out_item["predictions"]["0"] = {
-            "pixel_coords": pixels.tolist(),
-            "positions": world_pos_normalized.tolist(),
-        }
-        outputs.append(out_item)
-        
-        logger.info(f"Response: {response}")
-        logger.info(f"Parsed world_xy: {world_xy}")
-        logger.info(f"Final world_pos: {world_pos}")
-
-    return outputs
