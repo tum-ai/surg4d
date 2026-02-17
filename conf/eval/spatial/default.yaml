@@ -68,10 +68,6 @@ graph_agent_use_global_autoencoder: ${autoencoder.global_mode}
 graph_agent_global_autoencoder_checkpoint_dir: ${autoencoder.global_checkpoint_dir}
 graph_agent_max_iterations: 20
 
-# TODO: this might move to general eval parameters, applies to more than just spatial
-# Gaussian token spatial query configuration
-gaussian_patch_size: 16 # Size of each grid patch
-gaussian_sample_ratio: 1.0  # Fraction of Gaussians to use (0.0 to 1.0)
 graph_agent_tools:
   - name: node_overlap_position_at_time
     max_calls: null  # infinite

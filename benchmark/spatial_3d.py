@@ -356,7 +356,7 @@ def generate_with_vision_features_3d(
     return output_text[0]
 
 
-def filter_gaussian_tokens(gaussian_to_grid_mapping: np.ndarray, depth: np.ndarray, opacity: np.ndarray, grid_h: int, grid_w: int) -> np.ndarray:
+def filter_gaussian_tokens(gaussian_to_grid_mapping: np.ndarray, depth: np.ndarray, opacity: np.ndarray, opacity_threshold: float, grid_h: int, grid_w: int) -> np.ndarray:
     """Filter Gaussians based on depth, opacity, and grid assignment.
 
     Args:
@@ -370,9 +370,8 @@ def filter_gaussian_tokens(gaussian_to_grid_mapping: np.ndarray, depth: np.ndarr
         filtered_indices: (M,) array of indices of the filtered Gaussians
     """
 
-    # TODO: if we keep using this, threshold must go into hydra configs
     filtered_depth = depth.copy()
-    filtered_depth[opacity < 0.8] = np.inf
+    filtered_depth[opacity < opacity_threshold] = np.inf
 
     # Get the unique mappings to grid indices
     _, unique_start_indices, unique_counts = np.unique(gaussian_to_grid_mapping, axis=0, return_index=True, return_counts=True)
@@ -517,9 +516,12 @@ def graph_agent_3d_feat_queries_general(
     train_cameras = scene_info.train_cameras
 
     # Configuration for 3D Gaussian-to-grid mapping
-    # TODO: this does not just concern spatial, should be in general eval config
-    patch_size = cfg.eval.spatial.gaussian_patch_size
-    gaussian_sample_ratio = cfg.eval.spatial.gaussian_sample_ratio
+    patch_size = cfg.eval.gaussian_patch_size
+    gaussian_sample_ratio = cfg.eval.gaussian_sample_ratio
+
+    # Metadata stuff for video processor
+    temporal_patch_size = cfg.eval.temporal_patch_size
+    fps_timesteps = cfg.eval.fps_timesteps
 
     # Init rerun logging
     rr.init("custom positional encodings")
@@ -539,11 +541,13 @@ def graph_agent_3d_feat_queries_general(
         logger.info(f"Processing timesteps {t1} to {t2} with corresponding frame numbers {f1} to {f2}")
 
         if video_mode:
-            # TODO: should go into hydra
+            # Need to account for temporal patch size here! We are passing raw Gaussian tokens on our desired temporal resolution, but in order for the model's processor
+            #   to generate the correct amount of placeholders for frames, we need to multiply by its internal temporal patch size as it will assume that temporal patches
+            #   are merged to arrive at its final amount of video frames to consider
             processor.video_processor.video_metadata = VideoMetadata(
-                total_num_frames=(t2 - t1 + 1) * 2,
-                fps=6.25 * 2,
-                frames_indices=list(range(t1,  (t2 * 2) + 1)),
+                total_num_frames=(t2 - t1 + 1) * temporal_patch_size,
+                fps=fps_timesteps * temporal_patch_size,
+                frames_indices=list(range(t1,  (t2 * temporal_patch_size) + 1)),
             )
 
         # Aggregate all relevant info for downstream inference
@@ -559,8 +563,8 @@ def graph_agent_3d_feat_queries_general(
         # img_width_cached = None
         # img_height_cached = None
 
-        # TODO: the way we deal with frame numbers here is hacky; if it works it must become part of hydra config
-        frame_numbers_step = 4
+        # More detail on the relationship between frame numbers and timesteps and this factor in the corresponding config file
+        frame_numbers_step = cfg.eval.fps_downsampling_factor
         for t, frame_number in zip(range(t1, t2 + 1), range(f1, f2 + 1, frame_numbers_step)):
 
             # Get Gaussian means for this timestep
@@ -589,27 +593,7 @@ def graph_agent_3d_feat_queries_general(
             # Make homogeneous
             gaussian_means_t_projected = np.hstack((gaussian_means_t_projected, np.ones((gaussian_means_t_projected.shape[0], 1))))
         
-            # TODO: this should happen much further below! decoding only what we need, not all Gaussians
-            # Decode latents for this timestep on-demand (much faster than decoding all timesteps)
-            logger.info(f"Decoding patch latents for timestep {t}...")
-            patch_latents_t = patch_latents[t]  # (N, lang_dim)
-            logger.info(f"Patch latents shape before decoding: {patch_latents_t.shape}")
-            # Decode in batches
-            decoded_t_list = []
-            with torch.no_grad():
-                for batch_start in range(0, len(patch_latents_t), decode_batch_size):
-                    batch = torch.tensor(
-                        patch_latents_t[batch_start : batch_start + decode_batch_size],
-                        device=model.device,
-                        dtype=torch.float32,
-                    )
-                    decoded_batch = autoencoder.decode(batch)  # (batch_size, full_dim)
-                    decoded_t_list.append(decoded_batch.detach().cpu().numpy())
-            decoded_main_t = np.concatenate(decoded_t_list, axis=0)  # (N, full_dim)
-            logger.info(f"Decoded features for timestep {t} have shape: {decoded_main_t.shape}")
-            # This is already in the [main | ds0 | ds1 | ds2] format
-            gaussian_feats_t = torch.tensor(decoded_main_t, dtype=torch.float32, device=model.device)
-            logger.info(f"Gaussian features for timestep {t} after accounting for deepstack features have shape: {gaussian_feats_t.shape}")
+            gaussian_feats_t = torch.tensor(patch_latents[t], dtype=torch.float32, device=model.device)  # (N, lang_dim)
 
             logger.info(f"Sampling Gaussians for timestep {t}...")
             # Sample Gaussians if needed (deterministic sampling, same for all frames)
@@ -677,7 +661,8 @@ def graph_agent_3d_feat_queries_general(
             opacity = opacities[t][sorted_indices]
 
             # Further filtering (depth, opacities, grid assignment, ...)
-            filtered_indices = filter_gaussian_tokens(gaussian_to_grid_mapping, depth, opacity, image_grid_thw[0, 1], image_grid_thw[0, 2])
+            opacity_threshold = cfg.eval.opacity_threshold
+            filtered_indices = filter_gaussian_tokens(gaussian_to_grid_mapping, depth, opacity, opacity_threshold, image_grid_thw[0, 1], image_grid_thw[0, 2])
             # Get the filtered values
             gaussian_to_grid_mapping = gaussian_to_grid_mapping[filtered_indices]
             gaussian_means_sampled_sorted = gaussian_means_sampled_sorted[filtered_indices]
@@ -685,7 +670,20 @@ def graph_agent_3d_feat_queries_general(
             gaussian_feats_sampled = gaussian_feats_sampled[filtered_indices]
             gaussian_colors_sampled = gaussian_colors_sampled[filtered_indices]
 
-            # TODO: feature decoding should happen here, once filtering is done
+            # Decode features once filtering is complete
+            logger.info(f"Gaussian features shape before decoding: {gaussian_feats_sampled.shape}")
+            # Decode in batches
+            decoded_t_list = []
+            with torch.no_grad():
+                for batch_start in range(0, len(gaussian_feats_sampled), decode_batch_size):
+                    batch = gaussian_feats_sampled[batch_start : batch_start + decode_batch_size]
+                    decoded_batch = autoencoder.decode(batch)  # (batch_size, full_dim)
+                    decoded_t_list.append(decoded_batch.detach().cpu().numpy())
+            decoded_main_t = np.concatenate(decoded_t_list, axis=0)  # (N, full_dim)
+            logger.info(f"Decoded features for timestep {t} have shape: {decoded_main_t.shape}")
+            # This is already in the [main | ds0 | ds1 | ds2] format
+            gaussian_feats_sampled = torch.tensor(decoded_main_t, dtype=torch.float32, device=model.device)
+            logger.info(f"Gaussian features for timestep {t} after accounting for deepstack features have shape: {gaussian_feats_sampled.shape}")
 
             gaussian_means_all.append(gaussian_means_sampled_sorted)
             gaussian_means_projected_all.append(gaussian_means_sampled_projected_sorted)

@@ -13,6 +13,11 @@ qwen_version: qwen3  # Version identifier: "qwen25" or "qwen3"
 
 # Video metadata for all evaluations
 video_fps: 25  # Original video framerate (Cholec80 is 25 fps)
+# TODO: this is actually more dataset specific, may want to define this elsewhere; this comes from having video_fps but only using a subset to actually store splats and graphs
+fps_downsampling_factor: 4
+fps_timesteps: 6.25  # 25 / 4 = 6.25
+# Video mode metadata
+temporal_patch_size: 2
 
 # Quantization settings for the evaluation model (used across all eval stages)
 use_bnb_4bit: false
@@ -35,3 +40,8 @@ paths:
   
   # Can override these per evaluation type if needed
   # e.g., different graph subdirs for different ablations
+
+# Gaussian token query configuration
+gaussian_patch_size: 16 # Size of each grid patch
+gaussian_sample_ratio: 1.0  # Fraction of Gaussians to use (0.0 to 1.0)
+opacity_threshold: 0.8
