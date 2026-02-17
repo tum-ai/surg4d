@@ -42,8 +42,9 @@ QWEN_CONSTANTS = {
 
 QWEN_VERSIONS = tuple(QWEN_CONSTANTS.keys())
 
+# Make sure they are not equal, if thinking budget is used up, model cannot respond anymore, need some delta
 THINKING_TOKEN_LIMIT = 1000
-NEW_TOKEN_LIMIT = 1000
+NEW_TOKEN_LIMIT = 1500
 
 
 def timestep_to_seconds_str(timestep: int, fps: float) -> str:

@@ -32,6 +32,7 @@ from benchmark.temporal import (
     parse_single_frame,
     parse_frame_ranges,
     seconds_to_timestep,
+    get_num_timesteps_from_graph,
 )
 
 
@@ -399,7 +400,6 @@ def evaluate_temporal(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    # TODO: this whole postprocessing logic was taken from temporal.py in the mutliview case, make sure to remove it there in order to avoid duplications
     parser_map = {
         'action_onset': parse_single_frame,
         'action_duration': parse_frame_ranges,
@@ -407,23 +407,26 @@ def evaluate_temporal(
     # Parse responses
     parsed_results = []
 
+    # Load graph to determine stride for frame sampling
+    num_ts = get_num_timesteps_from_graph(graph_path)
+    effective_fps = cfg.eval.fps_timesteps
+
     for query_anno, result in zip(annotations, results):
         response = result["raw_response"]
         predicted = parser_map[query_anno['query_type']](response, query_anno['query_type'])
         
-        # TODO: this no longer works, fix if needed
-        # # Convert seconds to timesteps if using Qwen3 format
-        # if predicted and 'second' in predicted:
-        #     # Convert single second to timestep
-        #     predicted['timestep'] = seconds_to_timestep(predicted['second'], num_ts, effective_fps)
-        # elif predicted and 'second_ranges' in predicted:
-        #     # Convert second ranges to timestep ranges
-        #     timestep_ranges = []
-        #     for start_sec, end_sec in predicted['second_ranges']:
-        #         start_timestep = seconds_to_timestep(start_sec, num_ts, effective_fps)
-        #         end_timestep = seconds_to_timestep(end_sec, num_ts, effective_fps)
-        #         timestep_ranges.append([start_timestep, end_timestep])
-        #     predicted['ranges'] = timestep_ranges
+        # Convert seconds to timesteps if using Qwen3 format
+        if predicted and 'second' in predicted:
+            # Convert single second to timestep
+            predicted['timestep'] = seconds_to_timestep(predicted['second'], num_ts, effective_fps)
+        elif predicted and 'second_ranges' in predicted:
+            # Convert second ranges to timestep ranges
+            timestep_ranges = []
+            for start_sec, end_sec in predicted['second_ranges']:
+                start_timestep = seconds_to_timestep(start_sec, num_ts, effective_fps)
+                end_timestep = seconds_to_timestep(end_sec, num_ts, effective_fps)
+                timestep_ranges.append([start_timestep, end_timestep])
+            predicted['ranges'] = timestep_ranges
         # Build message history for consistency with graph_agent
         # (multiframe doesn't support tools, so this is just the initial query and response)
         # message_history = [
