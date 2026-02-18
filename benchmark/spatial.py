@@ -195,7 +195,7 @@ def graph_agent_feat_queries(
         autoencoder_use_global_autoencoder = cfg.eval.spatial.graph_agent_semantics_use_global_autoencoder
         global_autoencoder_checkpoint_dir = cfg.eval.spatial.graph_agent_semantics_global_autoencoder_checkpoint_dir
         max_iterations = cfg.eval.spatial.graph_agent_semantics_max_iterations
-        tools = cfg.eval.spatial.graph_agent_semantics_tools
+        tool_config = cfg.eval.spatial.graph_agent_semantics_tools
         system_prompt = cfg.eval.spatial.graph_agent_semantics_system_prompt
         prompt_template = cfg.eval.spatial.graph_agent_semantics_prompt_template
     else:
@@ -205,7 +205,7 @@ def graph_agent_feat_queries(
         autoencoder_use_global_autoencoder = cfg.eval.spatial.graph_agent_use_global_autoencoder
         global_autoencoder_checkpoint_dir = cfg.eval.spatial.graph_agent_global_autoencoder_checkpoint_dir
         max_iterations = cfg.eval.spatial.graph_agent_max_iterations
-        tools = cfg.eval.spatial.graph_agent_tools
+        tool_config = cfg.eval.spatial.graph_agent_tools
         system_prompt = cfg.eval.spatial.graph_agent_system_prompt
         prompt_template = cfg.eval.spatial.graph_agent_prompt_template
 
@@ -249,10 +249,10 @@ def graph_agent_feat_queries(
         tool_viz_dir = Path(cfg.eval.spatial.tool_viz_dir) / clip.name
         tool_viz_dir.mkdir(parents=True, exist_ok=True)
 
-    # Parse graph_agent_tools config (objects with name and max_calls)
+    # Parse selected graph-agent tool config (objects with name and max_calls)
     tool_names = []
     tool_call_limits = {}
-    for tool_entry in cfg.eval.spatial.graph_agent_tools:
+    for tool_entry in tool_config:
         tool_name = tool_entry.name
         tool_names.append(tool_name)
         max_calls = getattr(tool_entry, "max_calls", None)
@@ -271,10 +271,6 @@ def graph_agent_feat_queries(
         Path(cfg.preprocessed_root) / clip.name, images=None, eval=False
     )
     train_cameras = scene_info.train_cameras
-
-    system_prompt = cfg.eval.spatial.graph_agent_system_prompt
-    prompt_template = cfg.eval.spatial.graph_agent_prompt_template
-    max_iterations = cfg.eval.spatial.graph_agent_max_iterations
 
     results = []
     for annotation in clip_gt:
