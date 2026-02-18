@@ -407,6 +407,41 @@ def get_proj_matrix_from_timestep(
     return full_proj_matrix, camera.image_width, camera.image_height
 
 
+def get_w2c_and_projection_matrices_from_timestep(
+    timestep: int, train_cameras: list, frame: str
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # Get the camera parameters for the timestep
+    camera_info = train_cameras[timestep]
+    assert isinstance(camera_info, CameraInfo), (
+        "camera_info must be a CameraInfo object"
+    )
+
+    # Instantiate a Camera object from the camera info
+    image = camera_info.image
+    R = camera_info.R
+    T = camera_info.T
+    FovX = camera_info.FovX
+    FovY = camera_info.FovY
+    time = camera_info.time
+    mask = camera_info.mask
+    camera = Camera(
+        colmap_id=timestep,
+        R=R,
+        T=T,
+        FoVx=FovX,
+        FoVy=FovY,
+        image=image,
+        gt_alpha_mask=None,
+        image_name=f"{frame}",
+        uid=timestep,
+        data_device=torch.device("cuda"),
+        time=time,
+        mask=mask,
+    )
+
+    return camera.world_view_transform, camera.projection_matrix
+
+
 def splat_predict_query_list(
     queries_list,
     *,

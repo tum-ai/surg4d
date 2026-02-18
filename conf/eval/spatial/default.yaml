@@ -119,4 +119,4 @@ graph_agent_system_prompt: |
 graph_agent_prompt_template: |
   Locate '{substring}' in the image.
 
-  Your final answer has to contain exactly one 2D point in the image's pixel coordinate system as a JSON object in the format (example) {{"x": X, "y": Y}} where X and Y would be the integer pixel coordinates. Do not use other keys or format. If the points is at X = 10, Y = 300, you should return {{"x": 10, "y": 300}}. Do not attach any extract characters behind your reply.
+  Your final answer has to contain exactly one 2D point in the image's pixel coordinate system as a JSON object in the format (example) {{"x": X, "y": Y}} where X and Y would be the integer pixel coordinates. Do not use other keys or format. If the points is at X = 10, Y = 300, you should return {{"x": 10, "y": 300}} and do not attach any extract characters behind your reply, not even a period.

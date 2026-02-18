@@ -565,8 +565,16 @@ def evaluate_spatial(
     out_dir = Path(cfg.eval.spatial.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     predictions_file = out_dir / f"{clip.name}.json"
-    with open(predictions_file, "w") as f:
-        json.dump(all_results, f, indent=4)
+    # Check if prediction file exists, if yes only update instead of overwriting fully
+    if predictions_file.exists():
+        with open(predictions_file, "r") as f:
+            existing_data = json.load(f)
+        existing_data.update(all_results)
+        with open(predictions_file, "w") as f:
+            json.dump(existing_data, f, indent=4)
+    else:
+        with open(predictions_file, "w") as f:
+            json.dump(all_results, f, indent=4)
 
     # Optional: dump per-(query, layer) visualizations of top-k points on the frame
     if cfg.eval.spatial.dump_visualizations:

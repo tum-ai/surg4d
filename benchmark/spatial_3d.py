@@ -19,6 +19,7 @@ from loguru import logger
 from benchmark.spatial import (
     get_coord_transformations,
     get_proj_matrix_from_timestep,
+    get_w2c_and_projection_matrices_from_timestep,
     project_3d_to_2d,
 )
 from typing import List, Dict, Any
@@ -383,15 +384,52 @@ def filter_gaussian_tokens(gaussian_to_grid_mapping: np.ndarray, depth: np.ndarr
         if (current_mapping[:, 0] < 0).any() or (current_mapping[:, 0] >= grid_h).any() or (current_mapping[:, 1] < 0).any() or (current_mapping[:, 1] >= grid_w).any():
             continue
 
-        relevant_depths = filtered_depth[unique_start_index:unique_start_index+unique_count]
+        # Approximate blending weights as a proxy for most important token!
+        relevant_depths = depth[unique_start_index:unique_start_index+unique_count]
+        relevant_opacities = opacity[unique_start_index:unique_start_index+unique_count]
+        # Sort depth in increasing order
+        sorted_indices = np.argsort(relevant_depths)
+        relevant_depths_sorted = relevant_depths[sorted_indices]
+        relevant_opacities_sorted = relevant_opacities[sorted_indices]
+        print(f"sorted depths: {relevant_depths_sorted}")
+        print(f"sorted opacities: {relevant_opacities_sorted}")
 
-        # If all depths are infinity, we take the shallowest depth from the original depth
-        if np.all(relevant_depths == np.inf):
-            shallowest_depth_index = np.argmin(depth[unique_start_index:unique_start_index+unique_count])
-        else:
-            shallowest_depth_index = np.argmin(relevant_depths)
+        # transmittance is T_0 = 1, T_1 = 1 - o_0, T_2 = T_1 * (1 - o_1), ...
+        transmittance = []
+        for i in range(len(relevant_opacities_sorted)):
+            if i == 0:
+                transmittance.append(1)
+            else:
+                transmittance.append(transmittance[-1] * (1 - relevant_opacities_sorted[i - 1]))
+        print(f"transmittance: {transmittance}")
 
-        final_indices.append(unique_start_index + shallowest_depth_index)
+        # Blend weights are the transmittance values * opacities; 3DGS blending works similar just that it does not directly use opacity but opacity times evaluated 2D gaussian
+        weights_approx = transmittance * relevant_opacities_sorted
+        print(f"weights_approx: {weights_approx}")
+
+        # Create a 1:1 mapping by picking the most important token per grid cell
+        max_weight_index = np.argmax(weights_approx)
+        print(f"max weight index: {max_weight_index}")
+        print(f"max weight: {weights_approx[max_weight_index]}")
+        final_indices.append(unique_start_index + sorted_indices[max_weight_index])
+
+        # Have tried this, but clustered tokens tend to dominate heavily, no benefit?
+        # # Create a many : 1 mapping by picking the best x (or as many as possible); since sorting is ascending, we need last
+        # best_x = 1
+        # if len(weights_approx) >= best_x:
+        #     best_x_indices = np.argsort(weights_approx)[-best_x:]
+        #     for best_x_index in best_x_indices:
+        #         final_indices.append(unique_start_index + sorted_indices[best_x_index])
+        # else:
+        #     for index in sorted_indices:
+        #         final_indices.append(unique_start_index + index)
+
+        # Have also used this for a many : 1 mapping to avoid the weight-based local clustering effects, also does not seem to help
+        # # Just randomly sample up to n tokens in that cell
+        # n = 10
+        # random_indices = np.random.choice(range(unique_count), size=np.minimum(n, unique_count), replace=False)
+        # for random_index in random_indices:
+        #     final_indices.append(unique_start_index + random_index)
 
     return np.array(final_indices)
 
@@ -569,6 +607,7 @@ def graph_agent_3d_feat_queries_general(
 
             # Get Gaussian means for this timestep
             gaussian_means_t = positions[t]  # (N, 3) in world coordinates
+
             # Apply perspective projection to get pixel coordinates for each Gaussian
             frame_name = f"frame_{int(frame_number):06d}.jpg"
 
@@ -589,11 +628,22 @@ def graph_agent_3d_feat_queries_general(
                 int(frame_number), train_cameras, frame_name
             )
 
+            # Note that the proj matrix above is the full transform including camera pose (w2c); here, we are getting the individual components of
+            #   world to cam transform and the separation matrix based on that
+            world_view_transform, projection_matrix = get_w2c_and_projection_matrices_from_timestep(
+                int(frame_number), train_cameras, frame_name
+            )
+
             gaussian_means_t_projected = project_3d_to_2d(gaussian_means_t, proj_matrix, img_width, img_height)
             # Make homogeneous
             gaussian_means_t_projected = np.hstack((gaussian_means_t_projected, np.ones((gaussian_means_t_projected.shape[0], 1))))
         
             gaussian_feats_t = torch.tensor(patch_latents[t], dtype=torch.float32, device=model.device)  # (N, lang_dim)
+
+            # Apply w2c to the 3D gaussian means; want their depths relative to camera
+            gaussian_means_t_homogeneous = np.hstack((gaussian_means_t, np.ones((gaussian_means_t.shape[0], 1))))
+            gaussian_means_t_homogeneous_transformed = (world_view_transform.T @ gaussian_means_t_homogeneous.T).T
+            gaussian_means_t = gaussian_means_t_homogeneous_transformed[:, :3]
 
             logger.info(f"Sampling Gaussians for timestep {t}...")
             # Sample Gaussians if needed (deterministic sampling, same for all frames)
@@ -657,12 +707,12 @@ def graph_agent_3d_feat_queries_general(
 
             # Depth from orginial means
             depth = gaussian_means_sampled_sorted[:, 2]
-            # Opacities
-            opacity = opacities[t][sorted_indices]
+            # Opacities, sampled and sorted
+            opacity = opacities[t][sample_indices][sorted_indices]
 
             # Further filtering (depth, opacities, grid assignment, ...)
             opacity_threshold = cfg.eval.opacity_threshold
-            filtered_indices = filter_gaussian_tokens(gaussian_to_grid_mapping, depth, opacity, opacity_threshold, image_grid_thw[0, 1], image_grid_thw[0, 2])
+            filtered_indices = filter_gaussian_tokens(gaussian_to_grid_mapping, depth.numpy(), opacity, opacity_threshold, image_grid_thw[0, 1], image_grid_thw[0, 2])
             # Get the filtered values
             gaussian_to_grid_mapping = gaussian_to_grid_mapping[filtered_indices]
             gaussian_means_sampled_sorted = gaussian_means_sampled_sorted[filtered_indices]
@@ -853,7 +903,14 @@ def _parse_coords_from_json_3d(
         World coordinates [x, y]
     """
     import json as _json
-    
+
+    print(f"receiving text (should be raw response): {text}")
+    # Disregard anything in the thinking trace
+    think_string = "<think>"
+    len_think_string = len(think_string)
+    end_thinking_trace = text.find(think_string)
+    text = text[end_thinking_trace + len_think_string + 1:]
+    print(f"text after disregarding thinking trace: {text}")
     first_brace = text.find("{")
     last_brace = text.rfind("}")
     candidate = text[first_brace : last_brace + 1]
