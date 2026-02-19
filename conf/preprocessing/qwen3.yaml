@@ -34,7 +34,7 @@ cotracker_n_points_per_frame: 4096 # number of random control points per query f
 cotracker_depth_jump_threshold: 0.1 # absolute depth change threshold in meters for killing points that jump between surfaces. Set to null to disable.
 
 # Instance merging settings (across views)
-instance_merge_containment_threshold: 0.2 # minimum containment ratio to merge instances across views
+instance_merge_containment_threshold: 0.1 # minimum containment ratio to merge instances across views
 instance_merge_containment_radius: 2.5 # multiplier for avg neighbor distance to determine containment
 
 only_update_annotations: true # write nothing but translated spatial annotations

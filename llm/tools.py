@@ -13,6 +13,9 @@ from rerun_utils import _compute_scene_extent
 
 IMAGE_PLACEHOLDER = "<image/>"
 
+# Percentile used to select boundary gaussians for KDTree contact/overlap calculations.
+# Lower values (e.g. 2) make the "boundary" smaller and reduce influence from outliers.
+BOUNDARY_PERCENTILE = 2.0
 
 # helpers
 
@@ -83,7 +86,7 @@ def node_distances_through_time(
     """Compute minimum distances between two nodes through time.
     
     Uses KDTree for efficient pairwise distance computation and takes the mean
-    of the lowest 5 percentile distances for robustness (similar to overlap_position).
+    of the lowest BOUNDARY_PERCENTILE percentile distances for robustness (see `BOUNDARY_PERCENTILE`).
     
     Args:
         positions: Gaussian positions (T, n_gaussians, 3)
@@ -132,8 +135,8 @@ def node_distances_through_time(
         dists2, _ = tree1.query(pos2)  # For each point in cluster 2, dist to closest in cluster 1
 
         # Take points in bottom percentile of distances (closest to contact)
-        threshold1 = np.percentile(dists1, 5)
-        threshold2 = np.percentile(dists2, 5)
+        threshold1 = np.percentile(dists1, BOUNDARY_PERCENTILE)
+        threshold2 = np.percentile(dists2, BOUNDARY_PERCENTILE)
 
         boundary_mask1 = dists1 <= threshold1
         boundary_mask2 = dists2 <= threshold2
@@ -470,8 +473,8 @@ def node_overlap_position_at_time(
     dists2, _ = tree1.query(pos2)
 
     # Take points in bottom percentile of distances (closest to contact)
-    threshold1 = np.percentile(dists1, 5)
-    threshold2 = np.percentile(dists2, 5)
+    threshold1 = np.percentile(dists1, BOUNDARY_PERCENTILE)
+    threshold2 = np.percentile(dists2, BOUNDARY_PERCENTILE)
 
     boundary1 = pos1[dists1 <= threshold1]
     boundary2 = pos2[dists2 <= threshold2]

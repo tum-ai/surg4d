@@ -97,9 +97,9 @@ graph_agent_semantics_tools:
     max_calls: null
   - name: node_overlap_position_at_time
     max_calls: null
-  - name: node_movement
+  - name: node_movement_through_time
     max_calls: null
-  - name: relative_movement
+  - name: relative_node_movement_through_time
     max_calls: null
 graph_agent_semantics_system_prompt: |
   # Task

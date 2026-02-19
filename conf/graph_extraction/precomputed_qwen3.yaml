@@ -34,7 +34,7 @@ temporal_lof_outlier_filter:
   n_neighbors: 20
   contamination: 0.1
   min_cluster_points: 20
-  strong_negative_outlier_factor_threshold: -1.2
+  strong_negative_outlier_factor_threshold: -1.0
 
 # # spectral clustering
 # spectral_clustering:

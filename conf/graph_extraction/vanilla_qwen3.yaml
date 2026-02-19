@@ -31,6 +31,12 @@ precluster_opacity_threshold: 0.05
 cluster_method: spectral # one of: [spectral, precomputed, hdbscan, full_hdbscan]
 min_cluster_size: -1
 
+temporal_lof_outlier_filter:
+  n_neighbors: 20
+  contamination: 0.1
+  min_cluster_points: 20
+  strong_negative_outlier_factor_threshold: -4.0
+
 full_hdbscan_clustering:
   soft_clustering: true
   hdbscan_args:
