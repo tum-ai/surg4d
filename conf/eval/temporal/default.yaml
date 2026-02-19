@@ -1,5 +1,4 @@
-methods: ["graph_agent_semantics"] #"multiframe", "graph_agent"]
-# methods: ["splat_grid"]
+methods: ["graph_agent_semantics", "multiframe"]
 output_dir: ${eval.output_dir}/temporal
 tool_viz_dir: ${eval.output_dir}/tool_viz/temporal # null to disable
 

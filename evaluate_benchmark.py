@@ -20,7 +20,10 @@ from benchmark.spatial import (
     frame_direct_feat_queries,
     graph_agent_feat_queries,
 )
-from benchmark.directional import graph_agent_directional_queries
+from benchmark.directional import (
+    graph_agent_directional_queries,
+    multiframe_directional_queries,
+)
 from benchmark.spatial_3d import splat_grid_feat_queries, splat_grid_temporal_queries
 
 
@@ -257,6 +260,11 @@ def evaluate_directional(
 
     methods_to_run = set(cfg.eval.directional.methods)
     graph_path = Path(cfg.output_root) / str(clip.name) / cfg.eval.paths.graph_subdir
+    video_dir = Path(cfg.preprocessed_root) / str(clip.name)
+
+    video_frames = None
+    if "multiframe" in methods_to_run:
+        video_frames, _ = load_video_frames(video_dir, cfg.eval.paths.images_subdir)
 
     directional_anno_file = Path(cfg.eval.annotations_root) / "directional" / f"{clip.name}.json"
     with open(directional_anno_file) as f:
@@ -264,6 +272,7 @@ def evaluate_directional(
     annotations = directional_data["annotations"]
 
     method_map = {
+        "multiframe": multiframe_directional_queries,
         "graph_agent": graph_agent_directional_queries,
         "graph_agent_semantics": graph_agent_directional_queries,
     }
@@ -277,6 +286,7 @@ def evaluate_directional(
         results = strategy_fn(
             model=model,
             processor=processor,
+            video_frames=video_frames,
             graph_path=graph_path,
             annotations=annotations,
             clip=clip,
@@ -340,7 +350,7 @@ def main(cfg: DictConfig):
 
     if cfg.eval is not None and cfg.eval.directional is not None:
         directional_methods = set(cfg.eval.directional.methods)
-        if directional_methods & {"graph_agent", "graph_agent_semantics"}:
+        if directional_methods & {"multiframe", "graph_agent", "graph_agent_semantics"}:
             needs_normal_model = True
 
     model, processor = None, None

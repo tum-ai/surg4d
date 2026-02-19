@@ -11,7 +11,11 @@ from omegaconf import DictConfig
 from autoencoder.model_qwen import QwenAutoencoder
 from benchmark.graph_utils import get_coord_transformations
 from benchmark.serialization_utils import parse_json, sanitize_tool_calls
-from llm.qwen_utils import prompt_graph_agent, prompt_graph_agent_with_semantic_labels
+from llm.qwen_utils import (
+    prompt_graph_agent,
+    prompt_graph_agent_with_semantic_labels,
+    prompt_with_video_frames,
+)
 from llm.tools import GraphTools
 
 
@@ -24,6 +28,78 @@ def _parse_axis_class(value: Any) -> int | None:
     return int(numeric_value)
 
 
+def multiframe_directional_queries(
+    model,
+    processor,
+    video_frames: List[Path],
+    graph_path: Path,
+    annotations: List[Dict[str, Any]],
+    clip: DictConfig,
+    cfg: DictConfig,
+    use_semantic_labels: bool = False,
+) -> List[Dict[str, Any]]:
+    sampled_frames = video_frames[::cfg.eval.annotation_stride]
+    effective_fps = cfg.eval.video_fps / cfg.eval.annotation_stride
+
+    system_prompt = cfg.eval.directional.multiframe_system_prompt
+    prompt_template = cfg.eval.directional.multiframe_prompt_template
+
+    results = []
+    for query_anno in annotations:
+        query_id = query_anno["id"]
+        query = query_anno["query"]
+        temporal_range = query_anno["range"]
+
+        selected_frames = sampled_frames[temporal_range[0] : temporal_range[1] + 1]
+
+        prompt = prompt_template.format(
+            question=query,
+        )
+
+        response = prompt_with_video_frames(
+            question=prompt,
+            image_paths=selected_frames,
+            model=model,
+            processor=processor,
+            system_prompt=system_prompt,
+            fps=effective_fps,
+        )
+
+        json_data = parse_json(response)
+        if json_data is None or "x" not in json_data or "y" not in json_data or "z" not in json_data:
+            prediction = None
+        else:
+            x_class = _parse_axis_class(json_data["x"])
+            y_class = _parse_axis_class(json_data["y"])
+            z_class = _parse_axis_class(json_data["z"])
+            if x_class is None or y_class is None or z_class is None:
+                prediction = None
+            else:
+                prediction = {
+                    "x": x_class,
+                    "y": y_class,
+                    "z": z_class,
+                }
+
+        results.append(
+            {
+                "id": query_id,
+                "query": query,
+                "range": temporal_range,
+                "predicted": prediction,
+                "raw_response": response,
+                "message_history": [],
+                "tool_calls": [],
+            }
+        )
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    return results
+
+
 def graph_agent_directional_queries(
     model,
     processor,
@@ -32,6 +108,7 @@ def graph_agent_directional_queries(
     clip: DictConfig,
     cfg: DictConfig,
     use_semantic_labels: bool = True,
+    video_frames: List[Path] = None,
 ) -> List[Dict[str, Any]]:
     """Run directional graph-agent queries with tools.
 

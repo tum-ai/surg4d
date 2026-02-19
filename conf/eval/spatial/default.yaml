@@ -1,11 +1,9 @@
+methods: ["graph_agent_semantics", "frame_direct"]
 gt_filename: ${preprocessing.spatial_labels_output_filename}
 output_dir: ${eval.output_dir}/spatial
 dump_visualizations: true
 visualizations_dir: ${eval.output_dir}/spatial_viz
 tool_viz_dir: ${eval.output_dir}/tool_viz/spatial
-
-methods: ["graph_agent_semantics"] #, "frame_direct", "graph_agent"]
-# methods: ["splat_grid"]
 
 # frame direct
 frame_direct_system_prompt: |
