@@ -1,42 +1,20 @@
 import torch
-import math
 import json
 import re
 import time
 import numpy as np
 from PIL import Image
 from transformers import (
-    Qwen2_5_VLForConditionalGeneration,
-    Qwen2_5_VLProcessor,
     Qwen3VLForConditionalGeneration,
     Qwen3VLProcessor,
 )
 from transformers.generation import LogitsProcessorList
-from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 from transformers.video_utils import VideoMetadata
 from typing import Dict, List, Literal, Optional, Union, Any, Callable, Tuple
-from functools import lru_cache
 from qwen_vl_utils import process_vision_info
 
-from .patched_qwen import (
-    PatchedQwen3VLForConditionalGeneration,
-)
 from .thinking_budget_processor import ThinkingTokenBudgetProcessor
 from .tools import IMAGE_PLACEHOLDER
-
-# Qwen vision encoder constants by version
-# Note: Both Qwen2.5 and Qwen3 use smart_resize() which resizes (not crops/pads)
-# images to dimensions divisible by (patch_size × spatial_merge).
-# The main difference: Qwen2.5 has an extra-patch quirk when (dim // patch_size) % 4 == 3.
-QWEN_CONSTANTS = {
-    "qwen3": {
-        "patch_size": 16,
-        "spatial_merge": 2,
-        "effective_patch_size": 32,  # 16 * 2
-        "num_deepstack_layers": 3,
-        "temporal_patch_size": 2
-    },
-}
 
 THINKING_TOKEN_LIMIT = 8000
 NEW_TOKEN_LIMIT = 10000
@@ -56,82 +34,8 @@ def timestep_to_seconds_str(timestep: int, fps: float) -> str:
     return f'time="<{seconds:.1f} seconds>"'
 
 
-def qwen3_deepstack_to_cat(
-    main_feats: torch.Tensor,
-    deepstack_feats: List[torch.Tensor],
-) -> torch.Tensor:
-    """Concatenate main features with deepstack features for storage/autoencoder.
 
-    Args:
-        main_feats: Main vision features, shape (N, hidden_dim)
-        deepstack_feats: List of 3 deepstack feature tensors, each (N, hidden_dim)
-
-    Returns:
-        Concatenated tensor of shape (N, hidden_dim * 4)
-        Layout: [main | d0 | d1 | d2]
-    """
-    num_deepstack = QWEN_CONSTANTS["qwen3"]["num_deepstack_layers"]
-    assert len(deepstack_feats) == num_deepstack, (
-        f"Expected {num_deepstack} deepstack tensors, got {len(deepstack_feats)}"
-    )
-    return torch.cat([main_feats, *deepstack_feats], dim=-1)
-
-
-def qwen3_cat_to_deepstack(
-    concat_feats: torch.Tensor,
-) -> Tuple[torch.Tensor, List[torch.Tensor]]:
-    """Split concatenated features back into main + deepstack for inference.
-
-    Args:
-        concat_feats: Concatenated tensor of shape (N, hidden_dim * 4)
-                      Layout: [main | d0 | d1 | d2]
-
-    Returns:
-        Tuple of (main_feats, deepstack_feats) where:
-            main_feats: shape (N, hidden_dim)
-            deepstack_feats: list of 3 tensors, each (N, hidden_dim)
-    """
-    num_deepstack = QWEN_CONSTANTS["qwen3"]["num_deepstack_layers"]
-    chunks = concat_feats.chunk(num_deepstack + 1, dim=-1)
-    main_feats = chunks[0]
-    deepstack_feats = list(chunks[1:])
-    return main_feats, deepstack_feats
-
-
-def qwen3_cat_to_deepstack_multiple(
-    vision_features: List[torch.Tensor],
-) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-    """Prepare Qwen3 vision features for multiple images.
-
-    Takes a list of concatenated feature tensors (one per image) and splits them
-    into the format expected by the Qwen3 model forward pass.
-
-    Args:
-        vision_features: List of tensors, each (N_i, hidden_dim * 4) containing
-                        [main | ds0 | ds1 | ds2] for each image
-
-    Returns:
-        Tuple of (main_features, deepstack_features) where:
-            main_features: List of tensors (one per image), each (N_i, hidden_dim)
-            deepstack_features: List of 3 tensors (one per layer), each containing
-                               ALL visual tokens from ALL images concatenated
-    """
-    main_features = []
-    all_deepstack = [[] for _ in range(QWEN_CONSTANTS["qwen3"]["num_deepstack_layers"])]
-
-    for feat in vision_features:
-        main, deepstack_list = qwen3_cat_to_deepstack(feat)
-        main_features.append(main)
-        for i, ds in enumerate(deepstack_list):
-            all_deepstack[i].append(ds)
-
-    # Concatenate deepstack features across all images per layer
-    deepstack_features = [torch.cat(ds_list, dim=0) for ds_list in all_deepstack]
-
-    return main_features, deepstack_features
-
-
-def get_patched_qwen3(
+def get_qwen3(
     size: Literal["8B", "32B"] = "8B",
     use_fp8: bool = False,
     attn_implementation: str = "sdpa",  # "flash_attention_2" or "sdpa"
@@ -141,10 +45,9 @@ def get_patched_qwen3(
     repetition_penalty: float = None,
     compile: bool = False,
 ):
-    """Get a patched Qwen3VL model/processor that supports raw patch features.
+    """Get a Qwen3VL model/processor.
 
-    Uses inheritance-based patching via __class__ swapping after from_pretrained.
-    Parameters allow enabling weight quantization and optimized attention without editing Transformers.
+    Parameters allow enabling weight quantization and optimized attention.
     """
     model_path = f"Qwen/Qwen3-VL-{size.upper()}-Thinking"
     if use_fp8:
@@ -159,7 +62,7 @@ def get_patched_qwen3(
     if max_memory is not None:
         fp_kwargs["max_memory"] = max_memory
 
-    model = PatchedQwen3VLForConditionalGeneration.from_pretrained(
+    model = Qwen3VLForConditionalGeneration.from_pretrained(
         model_path,
         **fp_kwargs,
     )
@@ -175,37 +78,6 @@ def get_patched_qwen3(
     return model, processor
 
 
-def qwen_encode_image(
-    image: Image.Image,
-    model,
-    processor,
-    return_hw = False,
-):
-    """Encode an image through a Qwen vision encoder.
-
-    Args:
-        image: PIL Image to encode
-        model: Qwen model (Qwen3-VL)
-        processor: Corresponding processor
-
-    Returns:
-        Concatenated tensor of shape (N, hidden_dim * 4) containing
-        [main | deepstack0 | deepstack1 | deepstack2]
-    """
-    image_inputs = processor.image_processor(images=[image], return_tensors="pt")
-    pixel_values = image_inputs["pixel_values"].to(model.device).to(torch.bfloat16)
-    image_grid_thw = image_inputs["image_grid_thw"].to(model.device)
-
-    with torch.no_grad():
-        main_embeds_tuple, deepstack_embeds = model.get_image_features(
-            pixel_values, image_grid_thw
-        )
-        main_feats = torch.cat(main_embeds_tuple, dim=0)
-        cat = qwen3_deepstack_to_cat(main_feats, deepstack_embeds)
-        if return_hw:
-            return cat, (image_grid_thw[0, 1].item(), image_grid_thw[0, 2].item())
-        return cat
-
 
 def _set_generation_seed(seed: int) -> None:
     torch.manual_seed(seed)
@@ -213,7 +85,7 @@ def _set_generation_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def ask_qwen_about_image(
+def prompt_with_image(
     image: Image.Image,
     prompt: str,
     model: Qwen3VLForConditionalGeneration,
@@ -281,179 +153,6 @@ def ask_qwen_about_image(
     return output_text[0]
 
 
-@lru_cache(maxsize=1000)
-def closest_factor_pair(n: int) -> tuple[int, int]:
-    """Find width, height factors for n tokens."""
-    root = int(math.isqrt(n))
-    for a in range(root, 0, -1):
-        if n % a == 0:
-            return a, n // a
-    return 1, n
-
-
-# This function takes in the **patch features** of an image and a prompt
-def ask_qwen_about_image_features(
-    image_features: torch.Tensor,
-    prompt: str,
-    model: Qwen2_5_VLForConditionalGeneration,
-    processor: Qwen2_5_VLProcessor,
-    system_prompt: str = "You are a medical assistant designed to aid medical practitioners during a cholecystectomy procedure. The surgeon user will ask you a question and show you their current situation, and you give a concise answer.",
-    seed: int = 42,
-    max_new_tokens: int = NEW_TOKEN_LIMIT,
-    max_thinking_tokens: Optional[int] = THINKING_TOKEN_LIMIT,
-    zero_positional_encodings: bool = True,
-):
-    messages = [
-        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": None},
-                {"type": "text", "text": prompt},
-            ],
-        },
-    ]
-    return generate_with_vision_features(
-        messages,
-        [image_features],
-        model,
-        processor,
-        max_new_tokens=max_new_tokens,
-        seed=seed,
-        max_thinking_tokens=max_thinking_tokens,
-        zero_positional_encodings=zero_positional_encodings,
-    )
-
-
-def model_inputs(
-    messages: List[Dict[str, Any]],
-    vision_features: List[torch.Tensor],
-    processor: Qwen3VLProcessor,
-    tools: List[Dict[str, Any]] = [],
-    raw_images: Optional[List[Image.Image]] = None,
-):
-    """Prepare model inputs from messages and vision features."""
-    if raw_images is None:
-        raw_images = []
-    # make sure number of messages and vision feature sets match
-    n_msg_images = sum(
-        1
-        for msg in messages
-        if msg["role"] == "user"
-        for part in msg.get("content", [])
-        if part.get("type") == "image"
-    )
-    expected_images = len(vision_features) + len(raw_images)
-    assert n_msg_images == expected_images, (
-        f"number of image messages ({n_msg_images}) and provided images ({expected_images}) must match"
-    )
-
-    # create actual text template from messages dict
-    text = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True, tools=tools
-    )
-
-    # create mock images such that their size corresponds to
-    # the correct number of tokens after tokenizing and spatial merging
-    # (we cannot just overwrite image_grid_thw because
-    # input ids already contains placeholder vision tokens)
-    effective_patch_size = QWEN_CONSTANTS["qwen3"]["effective_patch_size"]
-    mock_images: List[Image.Image] = []
-    for feat in vision_features:
-        n = int(feat.shape[0])
-        w, h = closest_factor_pair(n)
-        img_w = w * effective_patch_size
-        img_h = h * effective_patch_size
-        mock_img = Image.new("RGB", (img_w, img_h), color="red")
-        mock_images.append(mock_img)
-
-    # Only pass images parameter if there are actual images
-    processor_kwargs = {
-        "text": text,
-        "padding": True,
-        "return_tensors": "pt",
-        "do_resize": False,
-    }
-    all_images = mock_images + raw_images
-    if all_images:
-        processor_kwargs["images"] = all_images
-
-    inputs = processor(**processor_kwargs)
-
-    return inputs
-
-
-def generate_with_vision_features(
-    messages: List[Dict[str, Any]],
-    vision_features: List[torch.Tensor],
-    model: Qwen3VLForConditionalGeneration,
-    processor: Qwen3VLProcessor,
-    seed: int = 42,
-    max_new_tokens: int = NEW_TOKEN_LIMIT,
-    max_thinking_tokens: Optional[int] = THINKING_TOKEN_LIMIT,
-    zero_positional_encodings: bool = True,
-):
-    """Generate text from vision features.
-
-    Args:
-        messages: Chat messages with image placeholders
-        vision_features: List of vision feature tensors.
-            Each tensor is (N, hidden_dim * 4) containing [main | d0 | d1 | d2]
-        model: Qwen model (patched version)
-        processor: Qwen processor
-        max_new_tokens: Maximum tokens to generate
-        seed: Random seed for deterministic sampling
-        max_thinking_tokens: Maximum tokens for thinking phase (Qwen3 only).
-            If None, no limit is applied. If 0, thinking is disabled immediately.
-        zero_positional_encodings: Whether to zero out h and w for positional encodings
-    Returns:
-        Generated text response
-    """
-    # Build logits processor for thinking budget (Qwen3 only)
-    logits_processor = None
-    if max_thinking_tokens is not None:
-        thinking_processor = ThinkingTokenBudgetProcessor(
-            processor.tokenizer, max_thinking_tokens=max_thinking_tokens
-        )
-        logits_processor = LogitsProcessorList([thinking_processor])
-
-    main_features, deepstack_features = qwen3_cat_to_deepstack_multiple(vision_features)
-
-    # preprocess and generate
-    inputs = model_inputs(
-        messages, main_features, processor
-    ).to(model.device)
-
-    has_images = len(vision_features) > 0
-    effective_zero_positional_encodings = (
-        False if has_images else zero_positional_encodings
-    )
-
-    _set_generation_seed(seed)
-    generate_kwargs = {
-        "max_new_tokens": max_new_tokens,
-        "custom_patch_features": main_features,
-        "custom_deepstack_features": deepstack_features,
-        "zero_image_hw": effective_zero_positional_encodings,
-    }
-    if logits_processor is not None:
-        generate_kwargs["logits_processor"] = logits_processor
-    generated_ids = model.generate(**inputs, **generate_kwargs)
-
-    # remove prefix tokens (model input) and decode
-    generated_ids_trimmed = [
-        out_ids[len(in_ids) :]
-        for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-    ]
-    output_text = processor.batch_decode(
-        generated_ids_trimmed,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False,
-    )
-    response = output_text[0]
-    return response
-
-
 def _parse_tool_calls(response: str) -> List[Dict[str, Any]]:
     """Parse tool calls from Qwen's response.
 
@@ -483,12 +182,12 @@ def _extract_final_answer(response: str) -> str:
 
 def build_tool_response_message(
     tool_results: List[Dict[str, Any]],
-) -> Tuple[Dict[str, Any], List[torch.Tensor], List[Image.Image]]:
+) -> Tuple[Dict[str, Any], List[Image.Image]]:
     """Build a user message containing tool responses with interleaved text and images.
 
     Takes a list of tool result records and constructs a message in the format expected
     by Qwen's chat template. Each tool result is wrapped in <tool_response> tags.
-    Vision features are inserted at positions marked by IMAGE_PLACEHOLDER in the text.
+    Tool images are inserted at positions marked by IMAGE_PLACEHOLDER in the text.
 
     Args:
         tool_results: List of tool result records, each containing:
@@ -496,35 +195,17 @@ def build_tool_response_message(
             - "arguments" (dict): Arguments passed to the tool
             - "result" (dict): Tool return value with:
                 - "text" (str): Text content, may contain IMAGE_PLACEHOLDER markers
-                - "vision_features" (List[torch.Tensor], optional): Feature tensors to insert
-                  at IMAGE_PLACEHOLDER positions. Each tensor is (N, hidden_dim * 4) in
-                  concatenated format [main | d0 | d1 | d2].
+                                - "images" (List[PIL.Image], optional): Raw images to insert at
+                                    IMAGE_PLACEHOLDER positions.
 
         Returns:
-                Tuple of (message, vision_features, images) where:
+                                Tuple of (message, images) where:
             - message: Dict with "role": "user" and "content" list containing interleaved
               {"type": "text", "text": ...} and {"type": "image", "image": None} entries
-                        - vision_features: List of all vision feature tensors from all tools,
-                            in the order they appear in the message (matching image placeholder order)
-                        - images: List of raw PIL images from all tools, in the order they
-                            appear in the message (after vision_features per tool)
-
-    Example:
-        Tool returns: {"text": '{"node": "<image/>"}', "vision_features": [tensor]}
-
-        Generated content list:
-        [
-            {"type": "text", "text": '<tool_response>\\n{"name": "my_tool", "content": "{\\"node\\": \\"'},
-            {"type": "image", "image": None},
-            {"type": "text", "text": '\\"}"}\\n</tool_response>'},
-        ]
-
-    Raises:
-        AssertionError: If number of IMAGE_PLACEHOLDER markers doesn't match
-            number of media items (vision_features + images) for any tool.
+                                                - images: List of raw PIL images from all tools, in the order they
+                                                        appear in the message
     """
     content = []
-    all_vision_features = []
     all_images = []
 
     for record in tool_results:
@@ -536,23 +217,18 @@ def build_tool_response_message(
             f"</tool_response>"
         )
 
-        tool_features = result.get("vision_features", [])
-        if not isinstance(tool_features, list):
-            tool_features = [tool_features]
-
         tool_images = result.get("images", [])
         if not isinstance(tool_images, list):
             tool_images = [tool_images]
 
-        if tool_features or tool_images:
-            n_tool_media = len(tool_features) + len(tool_images)
-            tool_media = tool_features + tool_images
+        if tool_images:
+            n_tool_images = len(tool_images)
 
             # Split text by IMAGE_PLACEHOLDER and interleave with image placeholders
             parts = tool_response_text.split(IMAGE_PLACEHOLDER)
             n_markers = len(parts) - 1
-            assert n_markers == n_tool_media, (
-                f"Tool {record['tool_name']} returned {n_tool_media} media items "
+            assert n_markers == n_tool_images, (
+                f"Tool {record['tool_name']} returned {n_tool_images} images "
                 f"but text contains {n_markers} IMAGE_PLACEHOLDER markers"
             )
 
@@ -561,17 +237,16 @@ def build_tool_response_message(
             for i, part in enumerate(parts):
                 if part:
                     content.append({"type": "text", "text": part})
-                if i < len(tool_media):
+                if i < len(tool_images):
                     content.append({"type": "image", "image": None})
 
-            all_vision_features.extend(tool_features)
             all_images.extend(tool_images)
         else:
-            # No vision features - just add the text
+            # No images - just add the text
             content.append({"type": "text", "text": tool_response_text})
 
     message = {"role": "user", "content": content}
-    return message, all_vision_features, all_images
+    return message, all_images
 
 
 def _filter_tensors_for_debug(obj: Any) -> Any:
@@ -624,7 +299,7 @@ def _format_message_trace_for_debug(
                         text = text[:500] + "... [truncated]"
                     lines.append(f"  Content[{j}]: text = {repr(text)}")
                 elif item_type == "image":
-                    lines.append(f"  Content[{j}]: image (vision feature)")
+                    lines.append(f"  Content[{j}]: image")
                 else:
                     lines.append(f"  Content[{j}]: {item_type} = {str(item)[:200]}")
         else:
@@ -667,11 +342,10 @@ def _format_message_trace_for_debug(
     return "\n".join(lines)
 
 
-def generate_with_vision_features_agentic(
+def generate_agentic(
     messages: List[Dict[str, Any]],
-    vision_features: List[torch.Tensor],
-    model: Union[Qwen2_5_VLForConditionalGeneration, Qwen3VLForConditionalGeneration],
-    processor: Union[Qwen2_5_VLProcessor, Qwen3VLProcessor],
+    model: Qwen3VLForConditionalGeneration,
+    processor: Qwen3VLProcessor,
     tools: Dict[str, Tuple[Callable, Dict[str, Any]]],
     max_iterations: int = 10,
     tool_call_limits: Optional[Dict[str, Optional[int]]] = None,
@@ -679,15 +353,11 @@ def generate_with_vision_features_agentic(
     seed: int = 42,
     max_new_tokens: int = NEW_TOKEN_LIMIT,
     max_thinking_tokens: Optional[int] = THINKING_TOKEN_LIMIT,
-    zero_positional_encodings: bool = True,
 ) -> Dict[str, Any]:
-    """Generate with vision features in an agentic loop, executing tools until done.
+    """Generate in an agentic loop, executing tools until done.
 
     Args:
-        messages: Chat messages (same format as generate_with_vision_features)
-        vision_features: List of vision feature tensors.
-            For qwen25: each tensor is (N, hidden_dim)
-            For qwen3: each tensor is (N, hidden_dim * 4) containing [main | d0 | d1 | d2]
+        messages: Chat messages in Qwen chat-template format
         model: The Qwen model
         processor: The Qwen processor
         tools: Dict mapping tool_name -> (callable, json_spec)
@@ -695,10 +365,8 @@ def generate_with_vision_features_agentic(
                {"type": "function", "function": {"name": ..., "description": ..., "parameters": ...}}
                Tools must return a dict with:
                    - "text" (str): Text content of the result (required). Use IMAGE_PLACEHOLDER
-                     markers to indicate where vision features should be inserted.
-                   - "vision_features" (List[torch.Tensor], optional): List of feature tensors,
-                     each (N, hidden_dim * 4) in concatenated format [main | d0 | d1 | d2].
-                     Must have exactly as many tensors as IMAGE_PLACEHOLDER markers in text.
+                                         markers to indicate where images should be inserted.
+                                     - "images" (List[PIL.Image], optional): Images for IMAGE_PLACEHOLDER markers.
         max_iterations: Maximum number of tool-calling iterations
         tool_call_limits: Optional dict mapping tool_name -> max_calls (int or None for infinite).
             If None, all tools have infinite calls. If a tool is not in the dict, it defaults to infinite.
@@ -708,7 +376,6 @@ def generate_with_vision_features_agentic(
         max_thinking_tokens: Maximum tokens for thinking phase per iteration (Qwen3 only).
             If None, no limit is applied. If 0, thinking is disabled immediately.
             A new processor is created each iteration since it has internal state.
-        zero_positional_encodings: Whether to zero out h and w for positional encodings
     Returns:
         Dict with keys:
             - "final_answer" (str): The extracted final answer from the model's last response.
@@ -751,9 +418,7 @@ def generate_with_vision_features_agentic(
         for tool_name in tools.keys():
             remaining_calls[tool_name] = None
 
-    # Track all vision features (initial + those added by tools)
-    # Keep in concatenated format, convert to deepstack before each generation
-    all_vision_features = list(vision_features)
+    # Track raw images added by tools
     all_raw_images: List[Image.Image] = []
 
     # Track generation timing and tokens for tok/s calculation
@@ -765,23 +430,18 @@ def generate_with_vision_features_agentic(
             timestamp = time.strftime("%H:%M:%S")
             print(f"\n[{timestamp}] --- Iteration {iteration} ---", flush=True)
 
-        # Convert accumulated features to deepstack format for this iteration
-        if all_vision_features:
-            main_features, deepstack_features = qwen3_cat_to_deepstack_multiple(
-                all_vision_features
-            )
-        else:
-            # Handle empty vision features case
-            main_features = []
-            deepstack_features = []
-
         # Generate response with tools
-        inputs = model_inputs(
+        text = processor.apply_chat_template(  # type: ignore
             current_messages,
-            main_features,
-            processor,
+            tokenize=False,
+            add_generation_prompt=True,
             tools=tool_specs,
-            raw_images=all_raw_images,
+        )
+        inputs = processor(
+            text=text,
+            images=all_raw_images if all_raw_images else None,
+            padding=True,
+            return_tensors="pt",
         ).to(model.device)
 
         # Build logits processor for thinking budget (new each iteration due to internal state)
@@ -795,21 +455,9 @@ def generate_with_vision_features_agentic(
         try:
             _set_generation_seed(seed + iteration)
             gen_start_time = time.time()
-            has_images = (len(all_vision_features) > 0) or (len(all_raw_images) > 0)
-            effective_zero_positional_encodings = (
-                False if has_images else zero_positional_encodings
-            )
             generate_kwargs = {
                 "max_new_tokens": max_new_tokens,
-                "zero_image_hw": effective_zero_positional_encodings,
             }
-            if main_features:
-                assert not all_raw_images, (
-                    "Mixed custom vision features and raw tool images are not supported in one context. "
-                    "Use raw images with semantic-label graph agent mode (no initial feature images)."
-                )
-                generate_kwargs["custom_patch_features"] = main_features
-                generate_kwargs["custom_deepstack_features"] = deepstack_features
             if logits_processor is not None:
                 generate_kwargs["logits_processor"] = logits_processor
             generated_ids = model.generate(**inputs, **generate_kwargs)
@@ -957,10 +605,9 @@ def generate_with_vision_features_agentic(
             tool_call_history.append(tool_call_record)
             tool_results.append(tool_call_record)
 
-        # Build tool response message and collect vision features
-        tool_response_message, new_features, new_images = build_tool_response_message(tool_results)
+        # Build tool response message and collect images
+        tool_response_message, new_images = build_tool_response_message(tool_results)
         current_messages.append(tool_response_message)
-        all_vision_features.extend(new_features)
         all_raw_images.extend(new_images)
 
     # Max iterations reached - try to extract any answer from the last response
@@ -981,139 +628,6 @@ def generate_with_vision_features_agentic(
     }
 
 
-def prompt_graph_agent(
-    question: str,
-    node_feats: np.lib.npyio.NpzFile,
-    initial_timestep_idx: int,
-    node_centers: np.ndarray,
-    node_centroids: np.ndarray,
-    node_extents: np.ndarray,
-    model: Union[Qwen2_5_VLForConditionalGeneration, Qwen3VLForConditionalGeneration],
-    processor: Union[Qwen2_5_VLProcessor, Qwen3VLProcessor],
-    tools: Dict[str, Tuple[Callable, Dict[str, Any]]],
-    system_prompt: str = None,
-    max_iterations: int = 20,
-    tool_call_limits: Optional[Dict[str, Optional[int]]] = None,
-    verbose: bool = False,
-    seed: int = 42,
-    max_new_tokens: int = 8192,
-    max_thinking_tokens: Optional[int] = None,
-    zero_positional_encodings: bool = True,
-):
-    """
-    node_feats: np.lib.npyio.NpzFile - npz file containing node features for each timestep
-    timestep_idx: int - index of the timestep to use for the node features
-    adjacency_matrices: np.ndarray - adjacency matrices through time - weights are bhattacharyya coefficients (timesteps, n_clusters, n_clusters)
-    node_centers: np.ndarray - cluster centers through time (timesteps, n_clusters, 3)
-    node_centroids: np.ndarray - cluster centroids through time (timesteps, n_clusters, 3)
-    node_extents: np.ndarray - cluster extents through time (timesteps, n_clusters, 3)
-    model: Qwen2_5_VLForConditionalGeneration - model to use
-    processor: Qwen2_5_VLProcessor - processor to use
-    system_prompt: str - system prompt to use
-    tools: Dict[str, Tuple[Callable, Dict[str, Any]]] - tools to use
-    verbose: If True, prints message and tool results at each iteration.
-    max_new_tokens: int - maximum number of new tokens to generate
-    max_thinking_tokens: int - maximum tokens for thinking phase per iteration (Qwen3 only).
-        If None, no limit is applied. If 0, thinking is disabled immediately.
-    zero_positional_encodings: Whether to zero out h and w for positional encodings
-    """
-    assert tools is not None and len(tools) > 0, (
-        "tools are required for graph agentic prompting"
-    )
-    assert len(node_centers) == len(node_centroids) == len(node_extents), (
-        "timestep mismatch"
-    )
-
-    # node feat indices correspond to cluster ids
-    node_feat_indices = sorted(list(node_feats.keys()), key=lambda x: int(x))
-    node_feats = [node_feats[idx] for idx in node_feat_indices]
-    node_feats = [i[initial_timestep_idx] for i in node_feats]
-    centroids = node_centroids[initial_timestep_idx]
-    extents = node_extents[initial_timestep_idx]
-    centers = node_centers[initial_timestep_idx]
-
-    # Build JSON structure with IMAGE_PLACEHOLDER markers for nodes
-    nodes_data = []
-    for n in range(centroids.shape[0]):
-        nodes_data.append(
-            {
-                "node_id": int(n),
-                "rough_image": IMAGE_PLACEHOLDER,
-                "centroid": {
-                    "x": round(float(centroids[n][0]), 2),
-                    "y": round(float(centroids[n][1]), 2),
-                    "z": round(float(centroids[n][2]), 2),
-                },
-                "bbox_center": {
-                    "x": round(float(centers[n][0]), 2),
-                    "y": round(float(centers[n][1]), 2),
-                    "z": round(float(centers[n][2]), 2),
-                },
-                "bbox_extent": {
-                    "x": round(float(extents[n][0]), 2),
-                    "y": round(float(extents[n][1]), 2),
-                    "z": round(float(extents[n][2]), 2),
-                },
-            }
-        )
-
-    graph_data = {
-        "timestep": int(initial_timestep_idx),
-        "nodes": nodes_data,
-    }
-
-    # Serialize to JSON and split by IMAGE_PLACEHOLDER to interleave images
-    graph_json = json.dumps(graph_data, indent=2)
-    graph_parts = graph_json.split(IMAGE_PLACEHOLDER)
-
-    # Build interleaved content: text, image, text, image, ..., text
-    graph_content = []
-    for i, part in enumerate(graph_parts):
-        if part:
-            graph_content.append({"type": "text", "text": part})
-        if i < len(nodes_data):
-            graph_content.append({"type": "image", "image": None})
-
-    # Add tool call limits information to the prompt (as JSON)
-    tool_limits_content = []
-    if tool_call_limits is not None:
-        tool_limits_data = {}
-        for tool_name in tools.keys():
-            limit = tool_call_limits.get(tool_name, None)
-            tool_limits_data[tool_name] = "infinite" if limit is None else limit
-
-        tool_limits_json = json.dumps({"tool_call_limits": tool_limits_data}, indent=2)
-        tool_limits_content.append({"type": "text", "text": tool_limits_json + "\n\n"})
-
-    messages = [
-        {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
-        {
-            "role": "user",
-            "content": [
-                *graph_content,
-                {"type": "text", "text": "\n\n"},
-                *tool_limits_content,
-                {"type": "text", "text": question},
-            ],
-        },
-    ]
-
-    return generate_with_vision_features_agentic(
-        messages=messages,
-        vision_features=[torch.Tensor(f) for f in node_feats],
-        model=model,
-        processor=processor,
-        tools=tools,
-        max_iterations=max_iterations,
-        tool_call_limits=tool_call_limits,
-        verbose=verbose,
-        seed=seed,
-        max_new_tokens=max_new_tokens,
-        max_thinking_tokens=max_thinking_tokens,
-        zero_positional_encodings=zero_positional_encodings,
-    )
-
-
 def prompt_graph_agent_with_semantic_labels(
     question: str,
     initial_timestep_idx: int,
@@ -1121,8 +635,8 @@ def prompt_graph_agent_with_semantic_labels(
     node_centroids: np.ndarray,
     node_extents: np.ndarray,
     node_semantic_labels: dict[int, str],
-    model: Union[Qwen2_5_VLForConditionalGeneration, Qwen3VLForConditionalGeneration],
-    processor: Union[Qwen2_5_VLProcessor, Qwen3VLProcessor],
+    model: Qwen3VLForConditionalGeneration,
+    processor: Qwen3VLProcessor,
     tools: Dict[str, Tuple[Callable, Dict[str, Any]]],
     system_prompt: str = None,
     max_iterations: int = 20,
@@ -1131,7 +645,6 @@ def prompt_graph_agent_with_semantic_labels(
     seed: int = 42,
     max_new_tokens: int = 8192,
     max_thinking_tokens: Optional[int] = None,
-    zero_positional_encodings: bool = True,
 ):
     """
     node_feats: np.lib.npyio.NpzFile - npz file containing node features for each timestep
@@ -1148,7 +661,6 @@ def prompt_graph_agent_with_semantic_labels(
     max_new_tokens: int - maximum number of new tokens to generate
     max_thinking_tokens: int - maximum tokens for thinking phase per iteration (Qwen3 only).
         If None, no limit is applied. If 0, thinking is disabled immediately.
-    zero_positional_encodings: Whether to zero out h and w for positional encodings
     """
     assert tools is not None and len(tools) > 0, (
         "tools are required for graph agentic prompting"
@@ -1220,9 +732,8 @@ def prompt_graph_agent_with_semantic_labels(
         },
     ]
 
-    return generate_with_vision_features_agentic(
+    return generate_agentic(
         messages=messages,
-        vision_features=[],
         model=model,
         processor=processor,
         tools=tools,
@@ -1232,15 +743,14 @@ def prompt_graph_agent_with_semantic_labels(
         seed=seed,
         max_new_tokens=max_new_tokens,
         max_thinking_tokens=max_thinking_tokens,
-        zero_positional_encodings=zero_positional_encodings,
     )
 
 
-def prompt_with_video_frames(
+def prompt_with_video(
     question: str,
     image_paths: List[Any],
-    model: Union[Qwen2_5_VLForConditionalGeneration, Qwen3VLForConditionalGeneration],
-    processor: Union[Qwen2_5_VLProcessor, Qwen3VLProcessor],
+    model: Qwen3VLForConditionalGeneration,
+    processor: Qwen3VLProcessor,
     system_prompt: str = None,
     fps: float = None,
     seed: int = 42,
@@ -1352,57 +862,3 @@ def prompt_with_video_frames(
     )[0]
 
     return output_text
-
-
-def crop_patch_features(patch_feat: torch.Tensor, cw, ch, cx1, cx2, cy1, cy2):
-    return patch_feat.reshape(ch, cw, -1)[cy1 : cy2 + 1, cx1 : cx2 + 1].flatten(
-        end_dim=1
-    )
-
-
-def get_patch_hw(im_height: int, im_width: int) -> Tuple[int, int]:
-    """Get patchgrid dimensions for given image dimensions.
-
-    Uses smart_resize logic: round(dim / factor) * factor to get resized dimensions,
-    then divide by factor to get patch count.
-
-    Args:
-        im_height: Image height in pixels
-        im_width: Image width in pixels
-
-    Returns:
-        Tuple of (patches_height, patches_width)
-    """
-    factor = QWEN_CONSTANTS["qwen3"]["effective_patch_size"]
-    resized_h, resized_w = smart_resize(
-        im_height, im_width, factor=factor, min_pixels=1, max_pixels=10**9
-    )
-    return resized_h // factor, resized_w // factor
-
-
-def get_patch_segmasks(
-    im_height: int, im_width: int
-) -> torch.Tensor:
-    """Generate an instance segmentation mask where each instance corresponds to one vision encoder patch.
-
-    Args:
-        im_height: Image height in pixels
-        im_width: Image width in pixels
-
-    Returns:
-        Tensor of shape (resized_H, resized_W) with patch indices at each pixel
-    """
-    factor = QWEN_CONSTANTS["qwen3"]["effective_patch_size"]
-    resized_h, resized_w = smart_resize(
-        im_height, im_width, factor=factor, min_pixels=1, max_pixels=10**9
-    )
-    rowcol = torch.stack(
-        torch.meshgrid(
-            torch.arange(resized_h),
-            torch.arange(resized_w),
-            indexing="ij",
-        )
-    )
-    patch_coords = torch.floor_divide(rowcol, factor)
-    patches_per_row = resized_w // factor
-    return patch_coords[0] * patches_per_row + patch_coords[1]

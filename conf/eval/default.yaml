@@ -1,18 +1,18 @@
 defaults:
-  - temporal: default
+  # - temporal: default
   - spatial: default
-  # - directional: default
+  - directional: default
   - _self_
 
-# temporal: null
+temporal: null
 # spatial: null
-directional: null
+# directional: null
 
 annotations_root: data/annotations
 
 # qwen
-qwen3_size: ${feature_extraction.qwen3_size}
-qwen3_use_fp8: ${feature_extraction.qwen3_use_fp8}
+qwen3_size: 32B
+qwen3_use_fp8: false
 
 # Video metadata for all evaluations
 video_fps: 25  # Original video framerate (Cholec80 is 25 fps)
@@ -21,9 +21,6 @@ n_timesteps: 20
 
 # Required output directory for benchmark results
 output_dir: ${output_root}/pred_tmp
-
-# Optional output override for benchmark results
-output: null
 
 # Path configuration for evaluations
 # These define the directory structure for preprocessed data and outputs

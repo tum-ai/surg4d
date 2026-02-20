@@ -9,13 +9,11 @@ import numpy as np
 import torch
 from omegaconf import DictConfig
 
-from autoencoder.model_qwen import QwenAutoencoder
 from benchmark.graph_utils import get_coord_transformations
 from benchmark.serialization_utils import parse_json, sanitize_tool_calls
 from llm.qwen_utils import (
-    prompt_graph_agent,
     prompt_graph_agent_with_semantic_labels,
-    prompt_with_video_frames,
+    prompt_with_video,
 )
 from llm.tools import GraphTools
 
@@ -33,11 +31,12 @@ def multiframe_directional_queries(
     model,
     processor,
     video_frames: List[Path],
-    graph_path: Path,
+    graph_path: Path, # mock
     annotations: List[Dict[str, Any]],
-    clip: DictConfig,
+    clip: DictConfig, # mock
     cfg: DictConfig,
-    use_semantic_labels: bool = False,
+    use_semantic_labels: bool = False, # mock
+    semantic_method_name: str = "", # mock
 ) -> List[Dict[str, Any]]:
     sampled_frames = video_frames[::cfg.eval.annotation_stride]
     effective_fps = cfg.eval.video_fps / cfg.eval.annotation_stride
@@ -60,7 +59,7 @@ def multiframe_directional_queries(
             question=query,
         )
 
-        response = prompt_with_video_frames(
+        response = prompt_with_video(
             question=prompt,
             image_paths=selected_frames,
             model=model,
@@ -119,23 +118,19 @@ def graph_agent_directional_queries(
 
     Mirrors temporal/spatial graph-agent benchmark style for directional labels.
     """
-    node_feats_npz_path = graph_path / "c_qwen_feats.npz"
     centers_path = graph_path / "c_centers.npy"
     centroids_path = graph_path / "c_centroids.npy"
     extents_path = graph_path / "c_extents.npy"
     positions_path = graph_path / "positions.npy"
     clusters_path = graph_path / "clusters.npy"
-    patch_latents_path = graph_path / "patch_latents_through_time.npy"
     adjacency_path = graph_path / "graph.npy"
     bhattacharyya_path = graph_path / "bhattacharyya_coeffs.npy"
 
-    node_feats_npz = np.load(node_feats_npz_path)
     node_centers = np.load(centers_path)
     node_centroids = np.load(centroids_path)
     node_extents = np.load(extents_path)
     positions = np.load(positions_path)
     clusters = np.load(clusters_path)
-    patch_latents_through_time = np.load(patch_latents_path)
     adjacency = np.load(adjacency_path)
     bhattacharyya_coeffs = np.load(bhattacharyya_path)
 
@@ -146,52 +141,16 @@ def graph_agent_directional_queries(
 
     point_o2n, _, distance_o2n, _ = get_coord_transformations(positions)
 
-    if use_semantic_labels:
-        if semantic_method_name == "graph_agent_semantics_vision":
-            autoencoder_checkpoint_subdir = cfg.eval.directional.graph_agent_semantics_vision_autoencoder_checkpoint_subdir
-            autoencoder_full_dim = cfg.eval.directional.graph_agent_semantics_vision_autoencoder_full_dim
-            autoencoder_latent_dim = cfg.eval.directional.graph_agent_semantics_vision_autoencoder_latent_dim
-            autoencoder_use_global_autoencoder = cfg.eval.directional.graph_agent_semantics_vision_use_global_autoencoder
-            global_autoencoder_checkpoint_dir = cfg.eval.directional.graph_agent_semantics_vision_global_autoencoder_checkpoint_dir
-            max_iterations = cfg.eval.directional.graph_agent_semantics_vision_max_iterations
-            tool_config = cfg.eval.directional.graph_agent_semantics_vision_tools
-            system_prompt = cfg.eval.directional.graph_agent_semantics_vision_system_prompt
-            prompt_template = cfg.eval.directional.graph_agent_semantics_vision_prompt_template
-        elif semantic_method_name == "graph_agent_semantics":
-            autoencoder_checkpoint_subdir = cfg.eval.directional.graph_agent_semantics_autoencoder_checkpoint_subdir
-            autoencoder_full_dim = cfg.eval.directional.graph_agent_semantics_autoencoder_full_dim
-            autoencoder_latent_dim = cfg.eval.directional.graph_agent_semantics_autoencoder_latent_dim
-            autoencoder_use_global_autoencoder = cfg.eval.directional.graph_agent_semantics_use_global_autoencoder
-            global_autoencoder_checkpoint_dir = cfg.eval.directional.graph_agent_semantics_global_autoencoder_checkpoint_dir
-            max_iterations = cfg.eval.directional.graph_agent_semantics_max_iterations
-            tool_config = cfg.eval.directional.graph_agent_semantics_tools
-            system_prompt = cfg.eval.directional.graph_agent_semantics_system_prompt
-            prompt_template = cfg.eval.directional.graph_agent_semantics_prompt_template
-        else:
-            raise ValueError(f"Unsupported semantic method: {semantic_method_name}")
-    else:
-        autoencoder_checkpoint_subdir = cfg.eval.directional.graph_agent_autoencoder_checkpoint_subdir
-        autoencoder_full_dim = cfg.eval.directional.graph_agent_autoencoder_full_dim
-        autoencoder_latent_dim = cfg.eval.directional.graph_agent_autoencoder_latent_dim
-        autoencoder_use_global_autoencoder = cfg.eval.directional.graph_agent_use_global_autoencoder
-        global_autoencoder_checkpoint_dir = cfg.eval.directional.graph_agent_global_autoencoder_checkpoint_dir
-        max_iterations = cfg.eval.directional.graph_agent_max_iterations
-        tool_config = cfg.eval.directional.graph_agent_tools
-        system_prompt = cfg.eval.directional.graph_agent_system_prompt
-        prompt_template = cfg.eval.directional.graph_agent_prompt_template
-
-    if autoencoder_use_global_autoencoder:
-        autoencoder_path = Path(cfg.preprocessed_root) / global_autoencoder_checkpoint_dir / "best_ckpt.pth"
-    else:
-        clip_dir = Path(cfg.preprocessed_root) / clip.name
-        autoencoder_path = clip_dir / autoencoder_checkpoint_subdir / "best_ckpt.pth"
-
-    autoencoder = QwenAutoencoder(
-        input_dim=autoencoder_full_dim,
-        latent_dim=autoencoder_latent_dim,
-    ).to(model.device)
-    autoencoder.load_state_dict(torch.load(autoencoder_path, map_location=model.device))
-    autoencoder.eval()
+    if semantic_method_name == "graph_agent_semantics_vision":
+        max_iterations = cfg.eval.directional.graph_agent_semantics_vision_max_iterations
+        tool_config = cfg.eval.directional.graph_agent_semantics_vision_tools
+        system_prompt = cfg.eval.directional.graph_agent_semantics_vision_system_prompt
+        prompt_template = cfg.eval.directional.graph_agent_semantics_vision_prompt_template
+    elif semantic_method_name == "graph_agent_semantics":
+        max_iterations = cfg.eval.directional.graph_agent_semantics_max_iterations
+        tool_config = cfg.eval.directional.graph_agent_semantics_tools
+        system_prompt = cfg.eval.directional.graph_agent_semantics_system_prompt
+        prompt_template = cfg.eval.directional.graph_agent_semantics_prompt_template
 
     graph_tools = GraphTools(
         positions=positions,
@@ -201,9 +160,6 @@ def graph_agent_directional_queries(
         extents=node_extents,
         adjacency=adjacency,
         bhattacharyya_coeffs=bhattacharyya_coeffs,
-        qwen_feats=node_feats_npz,
-        patch_latents_through_time=patch_latents_through_time,
-        autoencoder=autoencoder,
         video_frames=video_frames,
         annotation_stride=cfg.eval.annotation_stride,
     )
@@ -253,36 +209,20 @@ def graph_agent_directional_queries(
         )
 
         initial_timestep_idx = temporal_range[0]
-        if use_semantic_labels:
-            agent_result = prompt_graph_agent_with_semantic_labels(
-                question=prompt,
-                initial_timestep_idx=initial_timestep_idx,
-                node_centers=point_o2n(node_centers),
-                node_centroids=point_o2n(node_centroids),
-                node_extents=distance_o2n(node_extents),
-                node_semantic_labels=node_semantic_labels,
-                model=model,
-                processor=processor,
-                tools=tools,
-                system_prompt=system_prompt,
-                max_iterations=max_iterations,
-                tool_call_limits=tool_call_limits,
-            )
-        else:
-            agent_result = prompt_graph_agent(
-                question=prompt,
-                node_feats=node_feats_npz,
-                initial_timestep_idx=initial_timestep_idx,
-                node_centers=point_o2n(node_centers),
-                node_centroids=point_o2n(node_centroids),
-                node_extents=distance_o2n(node_extents),
-                model=model,
-                processor=processor,
-                tools=tools,
-                system_prompt=system_prompt,
-                max_iterations=max_iterations,
-                tool_call_limits=tool_call_limits,
-            )
+        agent_result = prompt_graph_agent_with_semantic_labels(
+            question=prompt,
+            initial_timestep_idx=initial_timestep_idx,
+            node_centers=point_o2n(node_centers),
+            node_centroids=point_o2n(node_centroids),
+            node_extents=distance_o2n(node_extents),
+            node_semantic_labels=node_semantic_labels,
+            model=model,
+            processor=processor,
+            tools=tools,
+            system_prompt=system_prompt,
+            max_iterations=max_iterations,
+            tool_call_limits=tool_call_limits,
+        )
 
         if tool_viz_enabled:
             graph_tools.stop_recording()
@@ -318,10 +258,5 @@ def graph_agent_directional_queries(
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-
-    del autoencoder
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
 
     return results

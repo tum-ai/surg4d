@@ -9,18 +9,16 @@ from typing import Dict, Any
 import cv2
 import re
 from PIL import Image
+import pycolmap
 
 from benchmark.graph_utils import get_coord_transformations
 from benchmark.serialization_utils import sanitize_tool_calls, parse_json
 from llm.qwen_utils import (
-    prompt_graph_agent,
-    ask_qwen_about_image,
+    prompt_with_image,
     prompt_graph_agent_with_semantic_labels,
 )
 from llm.tools import GraphTools
-from autoencoder.model_qwen import QwenAutoencoder
-from scene.dataset_readers import CameraInfo, readColmapSceneInfo
-from scene.cameras import Camera
+from utils.graphics_utils import getWorld2View2, getProjectionMatrix, focal2fov
 
 
 def project_3d_to_2d(
@@ -90,43 +88,71 @@ def project_3d_to_2d_and_mask(
     return pixels.detach().cpu().numpy(), in_frame
 
 
+def load_colmap_cams(colmap_sparse_dir: Path) -> dict:
+    reconstruction = pycolmap.Reconstruction(str(colmap_sparse_dir))
+    camera_index = {}
+
+    for _, image in reconstruction.images.items():
+        camera = reconstruction.cameras[image.camera_id]
+
+        model_name = str(camera.model)
+        params = np.asarray(camera.params)
+        if "PINHOLE" in model_name or "OPENCV" in model_name:
+            fx = float(params[0])
+            fy = float(params[1])
+        elif "SIMPLE_PINHOLE" in model_name or "SIMPLE_RADIAL" in model_name:
+            fx = float(params[0])
+            fy = float(params[0])
+        else:
+            raise ValueError(f"Unsupported COLMAP camera model: {model_name}")
+
+        fovx = focal2fov(fx, camera.width)
+        fovy = focal2fov(fy, camera.height)
+
+        cam_from_world = image.cam_from_world()
+        r_w2c = np.asarray(cam_from_world.rotation.matrix())
+        t_w2c = np.asarray(cam_from_world.translation)
+
+        camera_info = {
+            "R": r_w2c.T,
+            "T": t_w2c,
+            "FovX": fovx,
+            "FovY": fovy,
+            "width": int(camera.width),
+            "height": int(camera.height),
+        }
+
+        image_name = Path(image.name).name
+        image_stem = Path(image.name).stem
+        camera_index[image_name] = camera_info
+        camera_index[image_stem] = camera_info
+
+    return camera_index
+
+
 def get_proj_matrix_from_timestep(
-    timestep: int, train_cameras: list, frame: str
+    timestep: int, camera_index: dict, frame: str
 ) -> torch.Tensor:
-    # Get the camera parameters for the timestep
-    camera_info = train_cameras[timestep]
-    assert isinstance(camera_info, CameraInfo), (
-        "camera_info must be a CameraInfo object"
-    )
+    del timestep
+    frame_stem = Path(frame).stem
+    camera_info = camera_index[frame] if frame in camera_index else camera_index[frame_stem]
 
-    # Instantiate a Camera object from the camera info
-    image = camera_info.image
-    R = camera_info.R
-    T = camera_info.T
-    FovX = camera_info.FovX
-    FovY = camera_info.FovY
-    time = camera_info.time
-    mask = camera_info.mask
-    camera = Camera(
-        colmap_id=timestep,
-        R=R,
-        T=T,
-        FoVx=FovX,
-        FoVy=FovY,
-        image=image,
-        gt_alpha_mask=None,
-        image_name=f"{frame}",
-        uid=timestep,
-        data_device=torch.device("cuda"),
-        time=time,
-        mask=mask,
-    )
+    world_view_transform = torch.tensor(
+        getWorld2View2(camera_info["R"], camera_info["T"]), dtype=torch.float32
+    ).transpose(0, 1)
+    projection_matrix = getProjectionMatrix(
+        znear=0.01,
+        zfar=100.0,
+        fovX=camera_info["FovX"],
+        fovY=camera_info["FovY"],
+    ).transpose(0, 1)
 
-    # Get projection matrix from camera object
-    # full_proj_transform includes the world to cam as well, seems to be correct
-    # projection_matrix = camera.projection_matrix
-    full_proj_matrix = camera.full_proj_transform
-    return full_proj_matrix, camera.image_width, camera.image_height
+    full_proj_matrix = (
+        world_view_transform.unsqueeze(0)
+        .bmm(projection_matrix.unsqueeze(0))
+        .squeeze(0)
+    )
+    return full_proj_matrix, camera_info["width"], camera_info["height"]
 
 def qwen3_coords_to_pixels(
     x: float, y: float, img_width: int, img_height: int
@@ -165,23 +191,19 @@ def graph_agent_feat_queries(
     graph_dir = Path(graph_dir)
 
     # Required static graph artifacts
-    node_feats_npz_path = graph_dir / "c_qwen_feats.npz"
     centers_path = graph_dir / "c_centers.npy"
     centroids_path = graph_dir / "c_centroids.npy"
     extents_path = graph_dir / "c_extents.npy"
     positions_path = graph_dir / "positions.npy"
     clusters_path = graph_dir / "clusters.npy"
-    patch_latents_path = graph_dir / "patch_latents_through_time.npy"
     adjacency_path = graph_dir / "graph.npy"
     bhattacharyya_path = graph_dir / "bhattacharyya_coeffs.npy"
 
-    node_feats_npz = np.load(node_feats_npz_path)
     node_centers = np.load(centers_path)
     node_centroids = np.load(centroids_path)
     node_extents = np.load(extents_path)
     positions = np.load(positions_path)
     clusters = np.load(clusters_path)
-    patch_latents_through_time = np.load(patch_latents_path)
     adjacency = np.load(adjacency_path)
     bhattacharyya_coeffs = np.load(bhattacharyya_path)
 
@@ -190,58 +212,20 @@ def graph_agent_feat_queries(
         with open(semantic_labels_path, "r") as f:
             node_semantic_labels = json.load(f)
 
-    if use_semantic_labels:
-        if semantic_method_name == "graph_agent_semantics_vision":
-            autoencoder_checkpoint_subdir = cfg.eval.spatial.graph_agent_semantics_vision_autoencoder_checkpoint_subdir
-            autoencoder_full_dim = cfg.eval.spatial.graph_agent_semantics_vision_autoencoder_full_dim
-            autoencoder_latent_dim = cfg.eval.spatial.graph_agent_semantics_vision_autoencoder_latent_dim
-            autoencoder_use_global_autoencoder = cfg.eval.spatial.graph_agent_semantics_vision_use_global_autoencoder
-            global_autoencoder_checkpoint_dir = cfg.eval.spatial.graph_agent_semantics_vision_global_autoencoder_checkpoint_dir
-            max_iterations = cfg.eval.spatial.graph_agent_semantics_vision_max_iterations
-            tool_config = cfg.eval.spatial.graph_agent_semantics_vision_tools
-            system_prompt = cfg.eval.spatial.graph_agent_semantics_vision_system_prompt
-            prompt_template = cfg.eval.spatial.graph_agent_semantics_vision_prompt_template
-        elif semantic_method_name == "graph_agent_semantics":
-            autoencoder_checkpoint_subdir = cfg.eval.spatial.graph_agent_semantics_autoencoder_checkpoint_subdir
-            autoencoder_full_dim = cfg.eval.spatial.graph_agent_semantics_autoencoder_full_dim
-            autoencoder_latent_dim = cfg.eval.spatial.graph_agent_semantics_autoencoder_latent_dim
-            autoencoder_use_global_autoencoder = cfg.eval.spatial.graph_agent_semantics_use_global_autoencoder
-            global_autoencoder_checkpoint_dir = cfg.eval.spatial.graph_agent_semantics_global_autoencoder_checkpoint_dir
-            max_iterations = cfg.eval.spatial.graph_agent_semantics_max_iterations
-            tool_config = cfg.eval.spatial.graph_agent_semantics_tools
-            system_prompt = cfg.eval.spatial.graph_agent_semantics_system_prompt
-            prompt_template = cfg.eval.spatial.graph_agent_semantics_prompt_template
-        else:
-            raise ValueError(f"Unsupported semantic method: {semantic_method_name}")
-    else:
-        autoencoder_checkpoint_subdir = cfg.eval.spatial.graph_agent_autoencoder_checkpoint_subdir
-        autoencoder_full_dim = cfg.eval.spatial.graph_agent_autoencoder_full_dim
-        autoencoder_latent_dim = cfg.eval.spatial.graph_agent_autoencoder_latent_dim
-        autoencoder_use_global_autoencoder = cfg.eval.spatial.graph_agent_use_global_autoencoder
-        global_autoencoder_checkpoint_dir = cfg.eval.spatial.graph_agent_global_autoencoder_checkpoint_dir
-        max_iterations = cfg.eval.spatial.graph_agent_max_iterations
-        tool_config = cfg.eval.spatial.graph_agent_tools
-        system_prompt = cfg.eval.spatial.graph_agent_system_prompt
-        prompt_template = cfg.eval.spatial.graph_agent_prompt_template
+    if semantic_method_name == "graph_agent_semantics_vision":
+        max_iterations = cfg.eval.spatial.graph_agent_semantics_vision_max_iterations
+        tool_config = cfg.eval.spatial.graph_agent_semantics_vision_tools
+        system_prompt = cfg.eval.spatial.graph_agent_semantics_vision_system_prompt
+        prompt_template = cfg.eval.spatial.graph_agent_semantics_vision_prompt_template
+    elif semantic_method_name == "graph_agent_semantics":
+        max_iterations = cfg.eval.spatial.graph_agent_semantics_max_iterations
+        tool_config = cfg.eval.spatial.graph_agent_semantics_tools
+        system_prompt = cfg.eval.spatial.graph_agent_semantics_system_prompt
+        prompt_template = cfg.eval.spatial.graph_agent_semantics_prompt_template
 
     # Keep agent context/tool responses in the same normalized space; convert
     # final model prediction back to original space right before projection/logging.
     point_o2n, point_n2o, distance_o2n, _ = get_coord_transformations(positions)
-
-    # Load autoencoder for inspect_highres_node_at_time tool
-    if autoencoder_use_global_autoencoder:
-        autoencoder_path = Path(cfg.preprocessed_root) / global_autoencoder_checkpoint_dir / "best_ckpt.pth"
-    else:
-        clip_dir = Path(cfg.preprocessed_root) / clip.name
-        autoencoder_path = clip_dir / autoencoder_checkpoint_subdir / "best_ckpt.pth"
-    autoencoder = QwenAutoencoder(
-        input_dim=autoencoder_full_dim,
-        latent_dim=autoencoder_latent_dim,
-    ).to(model.device)
-    autoencoder.load_state_dict(
-        torch.load(autoencoder_path, map_location=model.device)
-    )
-    autoencoder.eval()
 
     # Create GraphTools instance for tool management
     images_dir = Path(cfg.preprocessed_root) / clip.name / cfg.eval.paths.images_subdir
@@ -255,9 +239,6 @@ def graph_agent_feat_queries(
         extents=node_extents,
         adjacency=adjacency,
         bhattacharyya_coeffs=bhattacharyya_coeffs,
-        qwen_feats=node_feats_npz,
-        patch_latents_through_time=patch_latents_through_time,
-        autoencoder=autoencoder,
         video_frames=video_frames,
         annotation_stride=cfg.eval.annotation_stride,
     )
@@ -286,11 +267,9 @@ def graph_agent_feat_queries(
     if len(tool_call_limits) == 0:
         tool_call_limits = None
 
-    # Cameras for projection
-    scene_info = readColmapSceneInfo(
-        Path(cfg.preprocessed_root) / clip.name, images=None, eval=False
-    )
-    train_cameras = scene_info.train_cameras
+    # Cameras for projection (directly from COLMAP sparse/0)
+    colmap_sparse_dir = Path(cfg.preprocessed_root) / clip.name / "sparse" / "0"
+    camera_index = load_colmap_cams(colmap_sparse_dir)
 
     results = []
     for annotation in clip_gt:
@@ -303,7 +282,7 @@ def graph_agent_feat_queries(
         frame_number = timestep * cfg.eval.annotation_stride
         frame_name = f"frame_{frame_number:06d}.png"
         proj_matrix, img_width, img_height = get_proj_matrix_from_timestep(
-            int(frame_number), train_cameras, frame_name
+            int(frame_number), camera_index, frame_name
         )
         question = annotation["query"]
         prompt = prompt_template.format(question=question)
@@ -317,30 +296,13 @@ def graph_agent_feat_queries(
             rrd_file = tool_viz_dir / rrd_filename
             graph_tools.start_recording(str(rrd_file))
 
-        # llm answer
-        if use_semantic_labels:
-            agent_result = prompt_graph_agent_with_semantic_labels(
-                question=prompt,
-                initial_timestep_idx=timestep,
-                node_centers=point_o2n(node_centers),
-                node_centroids=point_o2n(node_centroids),
-                node_extents=distance_o2n(node_extents),
-                node_semantic_labels=node_semantic_labels,
-                model=model,
-                processor=processor,
-                tools=tools,
-                system_prompt=system_prompt,
-                max_iterations=max_iterations,
-                tool_call_limits=tool_call_limits,
-            )
-        else:
-            agent_result = prompt_graph_agent(
+        agent_result = prompt_graph_agent_with_semantic_labels(
             question=prompt,
-            node_feats=node_feats_npz,
             initial_timestep_idx=timestep,
             node_centers=point_o2n(node_centers),
             node_centroids=point_o2n(node_centroids),
             node_extents=distance_o2n(node_extents),
+            node_semantic_labels=node_semantic_labels,
             model=model,
             processor=processor,
             tools=tools,
@@ -391,12 +353,6 @@ def graph_agent_feat_queries(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    # Clean up autoencoder before returning
-    del autoencoder
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
     return results
 
 
@@ -430,7 +386,7 @@ def frame_direct_feat_queries(
         prompt = prompt_template.format(question=annotation["query"])
 
         # llm answer
-        response = ask_qwen_about_image(
+        response = prompt_with_image(
             image=image,
             prompt=prompt,
             model=model,

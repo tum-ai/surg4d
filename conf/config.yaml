@@ -1,9 +1,6 @@
 defaults:
   - clips: final_dataset
   - preprocessing: qwen3
-  - feature_extraction: qwen3
-  - autoencoder: qwen3
-  - splat: no_densify
   - graph_extraction: precomputed_qwen3
   - eval: default
   - compute_metrics: default
@@ -12,9 +9,6 @@ defaults:
 
 # for run_pipeline.py
 skip_preprocessing: true
-skip_feature_extraction: true
-skip_autoencoder: false
-skip_splat: false
 skip_graph_extraction: true
 skip_eval: true
 skip_compute_metrics: true

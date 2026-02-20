@@ -8,8 +8,7 @@ import hydra
 import numpy as np
 import torch
 
-from llm.qwen_utils import get_patched_qwen3
-from llm.qwen_utils_3d import get_custom_qwen3_3d
+from llm.qwen_utils import get_qwen3
 from benchmark.temporal import (
     load_video_frames,
     multiframe_queries,
@@ -24,7 +23,6 @@ from benchmark.directional import (
     graph_agent_directional_queries,
     multiframe_directional_queries,
 )
-from benchmark.spatial_3d import splat_grid_feat_queries, splat_grid_temporal_queries
 
 
 def evaluate_temporal(
@@ -32,16 +30,12 @@ def evaluate_temporal(
     cfg: DictConfig,
     model,
     processor,
-    model_3d=None,
-    processor_3d=None,
 ):
     """Run temporal action localization evaluation for a single clip.
 
     Args:
       model: Pre-loaded patched Qwen model (for multiframe / graph_agent)
       processor: Pre-loaded Qwen processor (for multiframe / graph_agent)
-      model_3d: Pre-loaded 3D patched Qwen model (for splat_grid)
-      processor_3d: Pre-loaded Qwen processor (for splat_grid)
     """
     if cfg.eval is None or cfg.eval.temporal is None:
         return
@@ -60,7 +54,6 @@ def evaluate_temporal(
     # Methods using the normal model
     method_map = {
         "multiframe": multiframe_queries,
-        "graph_agent": graph_agent_queries,
         "graph_agent_semantics": graph_agent_queries,
         "graph_agent_semantics_vision": graph_agent_queries,
     }
@@ -69,9 +62,6 @@ def evaluate_temporal(
     all_results = {}
     
     for method_name in cfg.eval.temporal.methods:
-        if method_name == "splat_grid":
-            # splat_grid uses the 3D model, handled separately below
-            continue
         if method_name not in method_map:
             continue
         
@@ -89,19 +79,6 @@ def evaluate_temporal(
         )
         all_results[method_name] = results
         
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    if "splat_grid" in cfg.eval.temporal.methods:
-        all_results["splat_grid"] = splat_grid_temporal_queries(
-            model=model_3d,
-            processor=processor_3d,
-            graph_path=graph_path,
-            annotations=annotations,
-            clip=clip,
-            cfg=cfg,
-        )
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -144,8 +121,6 @@ def evaluate_spatial(
     cfg: DictConfig,
     model,
     processor,
-    model_3d=None,
-    processor_3d=None,
 ):
     """Run spatial grounding evaluation using frame-based and graph-based methods.
 
@@ -157,8 +132,6 @@ def evaluate_spatial(
     Args:
       model: Pre-loaded patched Qwen model (for frame_direct / graph_agent)
       processor: Pre-loaded Qwen processor (for frame_direct / graph_agent)
-      model_3d: Pre-loaded 3D patched Qwen model (for splat_grid)
-      processor_3d: Pre-loaded Qwen processor (for splat_grid)
     """
     # skip this if no eval config is set
     if cfg.eval is None or cfg.eval.spatial is None:
@@ -190,18 +163,6 @@ def evaluate_spatial(
             cfg=cfg,
         )
 
-    if "graph_agent" in methods_to_run:
-        # Graph agent with tools (requires qwen3)
-        all_results["graph_agent"] = graph_agent_feat_queries(
-            model=model,
-            processor=processor,
-            graph_dir=graph_dir,
-            clip_gt=gt_data,
-            clip=clip,
-            cfg=cfg,
-            use_semantic_labels=False,
-        )
-
     if "graph_agent_semantics" in methods_to_run:
         all_results["graph_agent_semantics"] = graph_agent_feat_queries(
             model=model,
@@ -226,17 +187,6 @@ def evaluate_spatial(
             semantic_method_name="graph_agent_semantics_vision",
         )
 
-    if "splat_grid" in methods_to_run:
-        # 3D Gaussian-to-grid positional encoding (requires 3D patched model)
-        all_results["splat_grid"] = splat_grid_feat_queries(
-            model=model_3d,
-            processor=processor_3d,
-            graph_dir=graph_dir,
-            clip_gt=gt_data,
-            clip=clip,
-            cfg=cfg,
-        )
-
     out_dir = Path(cfg.eval.spatial.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     predictions_file = out_dir / f"{clip.name}.json"
@@ -247,10 +197,8 @@ def evaluate_spatial(
     if cfg.eval.spatial.dump_visualizations:
         viz_method_names = {
             "frame_direct": "frame_direct",
-            "graph_agent": "graph_agent",
             "graph_agent_semantics": "graph_agent_semantics",
             "graph_agent_semantics_vision": "graph_agent_semantics_vision",
-            "splat_grid": "splat_grid",
         }
         for method_key, viz_name in viz_method_names.items():
             if method_key in all_results:
@@ -274,13 +222,10 @@ def evaluate_directional(
     if cfg.eval is None or cfg.eval.directional is None:
         return
 
-    methods_to_run = set(cfg.eval.directional.methods)
     graph_path = Path(cfg.output_root) / str(clip.name) / cfg.eval.paths.graph_subdir
     video_dir = Path(cfg.preprocessed_root) / str(clip.name)
 
-    video_frames = None
-    if methods_to_run & {"multiframe", "graph_agent", "graph_agent_semantics", "graph_agent_semantics_vision"}:
-        video_frames, _ = load_video_frames(video_dir, cfg.eval.paths.images_subdir)
+    video_frames, _ = load_video_frames(video_dir, cfg.eval.paths.images_subdir)
 
     directional_anno_file = Path(cfg.eval.annotations_root) / "directional" / f"{clip.name}.json"
     with open(directional_anno_file) as f:
@@ -289,7 +234,6 @@ def evaluate_directional(
 
     method_map = {
         "multiframe": multiframe_directional_queries,
-        "graph_agent": graph_agent_directional_queries,
         "graph_agent_semantics": graph_agent_directional_queries,
         "graph_agent_semantics_vision": graph_agent_directional_queries,
     }
@@ -348,54 +292,19 @@ def main(cfg: DictConfig):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(42)
 
-    # Determine which models are needed based on active methods
-    needs_normal_model = False
-    needs_3d_model = False
-
-    if cfg.eval is not None and cfg.eval.temporal is not None:
-        temporal_methods = set(cfg.eval.temporal.methods)
-        if temporal_methods & {"multiframe", "graph_agent", "graph_agent_semantics", "graph_agent_semantics_vision"}:
-            needs_normal_model = True
-        if "splat_grid" in temporal_methods:
-            needs_3d_model = True
-
-    if cfg.eval is not None and cfg.eval.spatial is not None:
-        spatial_methods = set(cfg.eval.spatial.methods)
-        if spatial_methods & {"frame_direct", "graph_agent", "graph_agent_semantics", "graph_agent_semantics_vision"}:
-            needs_normal_model = True
-        if "splat_grid" in spatial_methods:
-            needs_3d_model = True
-
-    if cfg.eval is not None and cfg.eval.directional is not None:
-        directional_methods = set(cfg.eval.directional.methods)
-        if directional_methods & {"multiframe", "graph_agent", "graph_agent_semantics", "graph_agent_semantics_vision"}:
-            needs_normal_model = True
-
-    model, processor = None, None
-    model_3d, processor_3d = None, None
-
-    if needs_normal_model:
-        model, processor = get_patched_qwen3(
-            size=cfg.eval.qwen3_size,
-            use_fp8=cfg.eval.qwen3_use_fp8,
-        )
-
-    if needs_3d_model:
-        model_3d, processor_3d = get_custom_qwen3_3d(
-            size=cfg.eval.qwen3_size,
-            use_fp8=cfg.eval.qwen3_use_fp8,
-        )
+    model, processor = get_qwen3(
+        size=cfg.eval.qwen3_size,
+        use_fp8=cfg.eval.qwen3_use_fp8,
+    )
 
     for clip in tqdm(cfg.clips, desc="Evaluating clips", unit="clip"):
         evaluate_temporal(
             clip=clip, cfg=cfg,
             model=model, processor=processor,
-            model_3d=model_3d, processor_3d=processor_3d,
         )
         evaluate_spatial(
             clip=clip, cfg=cfg,
             model=model, processor=processor,
-            model_3d=model_3d, processor_3d=processor_3d,
         )
         evaluate_directional(
             clip=clip,
