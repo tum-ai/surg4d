@@ -8,7 +8,7 @@ import hydra
 import numpy as np
 import torch
 
-from llm.qwen_utils import get_qwen3
+from llm.qwen_utils_vllm import get_qwen3
 from benchmark.temporal import (
     load_video_frames,
     multiframe_queries,
@@ -289,8 +289,6 @@ def main(cfg: DictConfig):
     torch.manual_seed(42)
     np.random.seed(42)
     random.seed(42)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(42)
 
     model, processor = get_qwen3(
         size=cfg.eval.qwen3_size,

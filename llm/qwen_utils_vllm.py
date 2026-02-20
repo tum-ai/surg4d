@@ -1,91 +1,201 @@
-import torch
 import json
+import inspect
+import os
 import re
+import sys
+import sysconfig
 import time
-import numpy as np
-from PIL import Image
-from transformers import (
-    Qwen3VLForConditionalGeneration,
-    Qwen3VLProcessor,
-)
-from transformers.generation import LogitsProcessorList
-from transformers.video_utils import VideoMetadata
-from typing import Dict, List, Literal, Optional, Union, Any, Callable, Tuple
-from qwen_vl_utils import process_vision_info
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
-from .thinking_budget_processor import ThinkingTokenBudgetProcessor
+import numpy as np
+import torch
+from PIL import Image
+from transformers import Qwen3VLProcessor
+from vllm import LLM, SamplingParams
+
 from .tools import IMAGE_PLACEHOLDER
 
 THINKING_TOKEN_LIMIT = 8000
 NEW_TOKEN_LIMIT = 10000
 
 
+@dataclass
+class VLLMQwen3Model:
+    llm: LLM
+    model_path: str
+
+
+
 def timestep_to_seconds_str(timestep: int, fps: float) -> str:
-    """Convert timestep index to Qwen3 temporal format.
-
-    Args:
-        timestep: Integer timestep index
-        fps: Frames per second
-
-    Returns:
-        Formatted string like "<3.0 seconds>"
-    """
     seconds = timestep / fps
     return f'time="<{seconds:.1f} seconds>"'
+
+
+
+def _build_model_path(size: Literal["8B", "32B"], use_fp8: bool) -> str:
+    model_path = f"Qwen/Qwen3-VL-{size.upper()}-Thinking"
+    if use_fp8:
+        model_path = model_path + "-FP8"
+    return model_path
+
+
+def _prepend_env_path(var_name: str, path_value: str) -> None:
+    existing = os.environ.get(var_name, "")
+    os.environ[var_name] = f"{path_value}:{existing}" if existing else path_value
+
+
+def _configure_runtime_build_env() -> None:
+    python_include = sysconfig.get_paths()["include"]
+    env_lib = str(Path(sys.prefix) / "lib")
+    env_lib_stubs = str(Path(sys.prefix) / "lib" / "stubs")
+    torch_lib = str(Path(torch.__file__).resolve().parent / "lib")
+
+    _prepend_env_path("LD_LIBRARY_PATH", torch_lib)
+    _prepend_env_path("LIBRARY_PATH", env_lib_stubs)
+    _prepend_env_path("LIBRARY_PATH", env_lib)
+    _prepend_env_path("C_INCLUDE_PATH", python_include)
+    _prepend_env_path("CPATH", python_include)
+
+
+def _patch_video_metadata_for_vllm() -> None:
+    from transformers import video_utils
+
+    video_metadata_cls = video_utils.VideoMetadata
+    if getattr(video_metadata_cls, "_vllm_video_metadata_compat", False):
+        return
+
+    init_signature = inspect.signature(video_metadata_cls.__init__)
+    if "total_num_frames" not in init_signature.parameters:
+        return
+
+    original_init = video_metadata_cls.__init__
+    valid_param_names = set(init_signature.parameters.keys())
+
+    def patched_init(self, *args, **kwargs):
+        if "num_frames" in kwargs and "total_num_frames" not in kwargs:
+            kwargs["total_num_frames"] = kwargs.pop("num_frames")
+
+        if "sample_frames" in kwargs and "total_num_frames" not in kwargs:
+            sample_frames = kwargs.get("sample_frames")
+            if isinstance(sample_frames, (list, tuple)):
+                kwargs["total_num_frames"] = len(sample_frames)
+
+        if "frames_indices" in kwargs and "total_num_frames" not in kwargs:
+            frames_indices = kwargs.get("frames_indices")
+            if isinstance(frames_indices, (list, tuple)) and len(frames_indices) > 0:
+                kwargs["total_num_frames"] = int(max(frames_indices)) + 1
+
+        if "duration" in kwargs and "fps" in kwargs and "total_num_frames" not in kwargs:
+            duration = kwargs.get("duration")
+            fps = kwargs.get("fps")
+            if duration is not None and fps is not None:
+                kwargs["total_num_frames"] = max(1, int(round(float(duration) * float(fps))))
+
+        if "total_num_frames" not in kwargs:
+            kwargs["total_num_frames"] = 1
+
+        kwargs["total_num_frames"] = max(1, int(kwargs["total_num_frames"]))
+
+        unexpected_keys = [k for k in kwargs.keys() if k not in valid_param_names]
+        for key in unexpected_keys:
+            kwargs.pop(key)
+
+        return original_init(self, *args, **kwargs)
+
+    video_metadata_cls.__init__ = patched_init
+    video_metadata_cls._vllm_video_metadata_compat = True
 
 
 
 def get_qwen3(
     size: Literal["8B", "32B"] = "8B",
     use_fp8: bool = False,
-    attn_implementation: str = "sdpa",  # "flash_attention_2" or "sdpa"
     torch_dtype: torch.dtype = torch.bfloat16,
-    device_map: Union[str, Dict[str, str]] = "auto",
-    max_memory: Optional[Dict[str, str]] = None,
-    compile: bool = False,
 ):
-    """Get a Qwen3VL model/processor.
+    model_path = _build_model_path(size=size, use_fp8=use_fp8)
+    os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    _configure_runtime_build_env()
+    _patch_video_metadata_for_vllm()
 
-    Parameters allow enabling weight quantization and optimized attention.
-    """
-    model_path = f"Qwen/Qwen3-VL-{size.upper()}-Thinking"
-    if use_fp8:
-        model_path = model_path + "-FP8"
+    dtype_str = "auto" if use_fp8 else ("bfloat16" if torch_dtype == torch.bfloat16 else "float16")
 
-    fp_kwargs: Dict[str, Any] = {
-        "dtype": torch_dtype,
-        "device_map": device_map,
-        "low_cpu_mem_usage": True,
-        "attn_implementation": attn_implementation,
-    }
-    if max_memory is not None:
-        fp_kwargs["max_memory"] = max_memory
-
-    model = Qwen3VLForConditionalGeneration.from_pretrained(
-        model_path,
-        **fp_kwargs,
+    llm = LLM(
+        model=model_path,
+        dtype=dtype_str,
     )
 
     processor = Qwen3VLProcessor.from_pretrained(model_path)
-    # Prefer new cache format for memory-efficient caches
-    model.generation_config.return_legacy_cache = False
-    model.eval()
-    if compile:
-        model = torch.compile(model, mode="reduce-overhead")
+    model = VLLMQwen3Model(
+        llm=llm,
+        model_path=model_path,
+    )
     return model, processor
 
 
 
 def _set_generation_seed(seed: int) -> None:
     torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+
+
+
+def _sampling_params(
+    seed: int,
+    max_new_tokens: int,
+) -> SamplingParams:
+    kwargs: Dict[str, Any] = {
+        "temperature": 0.8,
+        "top_p": 0.95,
+        "top_k": 20,
+        "max_tokens": max_new_tokens,
+        "seed": seed,
+    }
+    return SamplingParams(**kwargs)
+
+
+
+def _extract_text_from_request_output(request_output: Any) -> str:
+    return request_output.outputs[0].text
+
+
+
+def _extract_generated_token_count(request_output: Any) -> int:
+    return len(request_output.outputs[0].token_ids)
+
+
+
+def _generate_text(
+    model: VLLMQwen3Model,
+    prompt: str,
+    max_new_tokens: int,
+    seed: int,
+    multi_modal_data: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, int, float]:
+    params = _sampling_params(
+        seed=seed,
+        max_new_tokens=max_new_tokens,
+    )
+
+    llm_input: Dict[str, Any] = {"prompt": prompt}
+    if multi_modal_data is not None:
+        llm_input["multi_modal_data"] = multi_modal_data
+
+    start = time.time()
+    outputs = model.llm.generate([llm_input], sampling_params=params)
+    end = time.time()
+
+    output = outputs[0]
+    text = _extract_text_from_request_output(output)
+    num_tokens = _extract_generated_token_count(output)
+    return text, num_tokens, end - start
+
 
 
 def prompt_with_image(
     image: Image.Image,
     prompt: str,
-    model: Qwen3VLForConditionalGeneration,
+    model: VLLMQwen3Model,
     processor: Qwen3VLProcessor,
     system_prompt: str = "You are a medical assistant designed to aid medical practitioners during a cholecystectomy procedure. The surgeon user will ask you a question and show you their current situation, and you give a concise answer.",
     max_new_tokens: int = NEW_TOKEN_LIMIT,
@@ -95,12 +205,7 @@ def prompt_with_image(
     messages = [
         {
             "role": "system",
-            "content": [
-                {
-                    "type": "text",
-                    "text": system_prompt,
-                }
-            ],
+            "content": [{"type": "text", "text": system_prompt}],
         },
         {
             "role": "user",
@@ -110,54 +215,27 @@ def prompt_with_image(
             ],
         },
     ]
-    text = processor.apply_chat_template(  # type:ignore
-        messages, tokenize=False, add_generation_prompt=True
+
+    text_prompt = processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
     )
-    inputs = processor(
-        text=[text],
-        images=[image],
-        padding=True,
-        return_tensors="pt",
-    ).to(model.device)
+    _ = max_thinking_tokens
 
     _set_generation_seed(seed)
-    generate_kwargs = {
-        "max_new_tokens": max_new_tokens,
-    }
-
-    # thinking token limit processor
-    logits_processor = None
-    if max_thinking_tokens is not None:
-        thinking_processor = ThinkingTokenBudgetProcessor(
-            processor.tokenizer, max_thinking_tokens=max_thinking_tokens
-        )
-        logits_processor = LogitsProcessorList([thinking_processor])
-        generate_kwargs["logits_processor"] = logits_processor
-
-    generated_ids = model.generate(
-        **inputs,
-        **generate_kwargs,
+    output_text, _, _ = _generate_text(
+        model=model,
+        prompt=text_prompt,
+        max_new_tokens=max_new_tokens,
+        seed=seed,
+        multi_modal_data={"image": image},
     )
-    generated_ids_trimmed = [
-        out_ids[len(in_ids) :]
-        for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-    ]
-    output_text = processor.batch_decode(
-        generated_ids_trimmed,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False,
-    )
-    return output_text[0]
+    return output_text
+
 
 
 def _parse_tool_calls(response: str) -> List[Dict[str, Any]]:
-    """Parse tool calls from Qwen's response.
-
-    Qwen uses the format:
-    <tool_call>
-    {"name": "tool_name", "arguments": {...}}
-    </tool_call>
-    """
     tool_calls = []
     pattern = r"<tool_call>\s*({.*?})\s*</tool_call>"
     matches = re.findall(pattern, response, re.DOTALL)
@@ -170,38 +248,16 @@ def _parse_tool_calls(response: str) -> List[Dict[str, Any]]:
     return tool_calls
 
 
+
 def _extract_final_answer(response: str) -> str:
-    """Extract the final answer from the response (text outside tool calls)."""
-    # Remove tool call blocks
     cleaned = re.sub(r"<tool_call>.*?</tool_call>", "", response, flags=re.DOTALL)
     return cleaned.strip()
+
 
 
 def build_tool_response_message(
     tool_results: List[Dict[str, Any]],
 ) -> Tuple[Dict[str, Any], List[Image.Image]]:
-    """Build a user message containing tool responses with interleaved text and images.
-
-    Takes a list of tool result records and constructs a message in the format expected
-    by Qwen's chat template. Each tool result is wrapped in <tool_response> tags.
-    Tool images are inserted at positions marked by IMAGE_PLACEHOLDER in the text.
-
-    Args:
-        tool_results: List of tool result records, each containing:
-            - "tool_name" (str): Name of the tool that was called
-            - "arguments" (dict): Arguments passed to the tool
-            - "result" (dict): Tool return value with:
-                - "text" (str): Text content, may contain IMAGE_PLACEHOLDER markers
-                                - "images" (List[PIL.Image], optional): Raw images to insert at
-                                    IMAGE_PLACEHOLDER positions.
-
-        Returns:
-                                Tuple of (message, images) where:
-            - message: Dict with "role": "user" and "content" list containing interleaved
-              {"type": "text", "text": ...} and {"type": "image", "image": None} entries
-                                                - images: List of raw PIL images from all tools, in the order they
-                                                        appear in the message
-    """
     content = []
     all_images = []
 
@@ -220,8 +276,6 @@ def build_tool_response_message(
 
         if tool_images:
             n_tool_images = len(tool_images)
-
-            # Split text by IMAGE_PLACEHOLDER and interleave with image placeholders
             parts = tool_response_text.split(IMAGE_PLACEHOLDER)
             n_markers = len(parts) - 1
             assert n_markers == n_tool_images, (
@@ -229,8 +283,6 @@ def build_tool_response_message(
                 f"but text contains {n_markers} IMAGE_PLACEHOLDER markers"
             )
 
-            # Build interleaved content: text, image, text, image, ..., text
-            # Empty text parts (from markers at start/end) are skipped
             for i, part in enumerate(parts):
                 if part:
                     content.append({"type": "text", "text": part})
@@ -239,25 +291,24 @@ def build_tool_response_message(
 
             all_images.extend(tool_images)
         else:
-            # No images - just add the text
             content.append({"type": "text", "text": tool_response_text})
 
     message = {"role": "user", "content": content}
     return message, all_images
 
 
+
 def _filter_tensors_for_debug(obj: Any) -> Any:
-    """Recursively filter out tensors and numpy arrays from objects for debugging."""
     if isinstance(obj, (torch.Tensor, np.ndarray, np.generic)):
-        return None  # Skip tensors/arrays
+        return None
     elif isinstance(obj, Image.Image):
         return f"<PIL.Image size={obj.size}>"
     elif isinstance(obj, dict):
         filtered = {}
-        for k, v in obj.items():
-            filtered_val = _filter_tensors_for_debug(v)
+        for key, value in obj.items():
+            filtered_val = _filter_tensors_for_debug(value)
             if filtered_val is not None:
-                filtered[k] = filtered_val
+                filtered[key] = filtered_val
         return filtered if filtered else None
     elif isinstance(obj, (list, tuple)):
         filtered = [_filter_tensors_for_debug(item) for item in obj]
@@ -267,12 +318,12 @@ def _filter_tensors_for_debug(obj: Any) -> Any:
         return obj
 
 
+
 def _format_message_trace_for_debug(
     current_messages: List[Dict[str, Any]],
     tool_call_history: List[Dict[str, Any]],
     iteration: int,
 ) -> str:
-    """Format message trace and tool calls for debugging output."""
     lines = []
     lines.append("=" * 80)
     lines.append(
@@ -291,7 +342,6 @@ def _format_message_trace_for_debug(
                 item_type = item.get("type", "unknown")
                 if item_type == "text":
                     text = item.get("text", "")
-                    # Truncate very long text
                     if len(text) > 500:
                         text = text[:500] + "... [truncated]"
                     lines.append(f"  Content[{j}]: text = {repr(text)}")
@@ -310,7 +360,6 @@ def _format_message_trace_for_debug(
 
         lines.append(f"\n[{i}] Tool: {tool_name}")
 
-        # Filter out tensors before serializing
         filtered_args = _filter_tensors_for_debug(arguments)
         if filtered_args:
             try:
@@ -339,9 +388,10 @@ def _format_message_trace_for_debug(
     return "\n".join(lines)
 
 
+
 def generate_agentic(
     messages: List[Dict[str, Any]],
-    model: Qwen3VLForConditionalGeneration,
+    model: VLLMQwen3Model,
     processor: Qwen3VLProcessor,
     tools: Dict[str, Tuple[Callable, Dict[str, Any]]],
     max_iterations: int = 10,
@@ -351,48 +401,10 @@ def generate_agentic(
     max_new_tokens: int = NEW_TOKEN_LIMIT,
     max_thinking_tokens: Optional[int] = THINKING_TOKEN_LIMIT,
 ) -> Dict[str, Any]:
-    """Generate in an agentic loop, executing tools until done.
-
-    Args:
-        messages: Chat messages in Qwen chat-template format
-        model: The Qwen model
-        processor: The Qwen processor
-        tools: Dict mapping tool_name -> (callable, json_spec)
-               json_spec should be in OpenAI function calling format:
-               {"type": "function", "function": {"name": ..., "description": ..., "parameters": ...}}
-               Tools must return a dict with:
-                   - "text" (str): Text content of the result (required). Use IMAGE_PLACEHOLDER
-                                         markers to indicate where images should be inserted.
-                                     - "images" (List[PIL.Image], optional): Images for IMAGE_PLACEHOLDER markers.
-        max_iterations: Maximum number of tool-calling iterations
-        tool_call_limits: Optional dict mapping tool_name -> max_calls (int or None for infinite).
-            If None, all tools have infinite calls. If a tool is not in the dict, it defaults to infinite.
-        verbose: If True, prints message and tool results at each iteration.
-        seed: Random seed for deterministic sampling
-        max_new_tokens: Maximum number of new tokens to generate
-        max_thinking_tokens: Maximum tokens for thinking phase per iteration (Qwen3 only).
-            If None, no limit is applied. If 0, thinking is disabled immediately.
-            A new processor is created each iteration since it has internal state.
-    Returns:
-        Dict with keys:
-            - "final_answer" (str): The extracted final answer from the model's last response.
-            - "message_history" (List[Dict]): Complete conversation history. Each message has:
-                - "role": "system" | "user" | "assistant"
-                - "content": List of {"type": "text"|"image", "text": str} dicts
-            - "tool_calls" (List[Dict]): All tool calls made. Each entry has:
-                - "tool_name" (str): Name of the tool called
-                - "arguments" (dict): Arguments passed to the tool
-                - "result" (Any): Result returned by the tool (or error message string)
-            - "tok_per_sec" (float): Tokens generated per second across all iterations.
-            - "total_generation_time" (float): Total time spent in model.generate() calls (seconds).
-            - "total_time" (float): Total wall time for the entire agentic loop (seconds).
-    """
     fn_start_time = time.time()
-
-    # Extract tool specs for the model
+    _ = max_thinking_tokens
     tool_specs = [spec for _, spec in tools.values()]
 
-    # Copy messages to avoid mutating the original
     current_messages = [msg.copy() for msg in messages]
     for i, msg in enumerate(current_messages):
         if isinstance(msg.get("content"), list):
@@ -400,96 +412,63 @@ def generate_agentic(
 
     tool_call_history = []
 
-    # Initialize tool call limits tracking
-    # Track remaining calls (None means infinite, int means remaining count)
     remaining_calls: Dict[str, Optional[int]] = {}
     if tool_call_limits is not None:
         for tool_name in tools.keys():
             if tool_name in tool_call_limits:
                 limit = tool_call_limits[tool_name]
-                remaining_calls[tool_name] = limit  # None for infinite, int for limit
+                remaining_calls[tool_name] = limit
             else:
-                remaining_calls[tool_name] = None  # Default to infinite
+                remaining_calls[tool_name] = None
     else:
-        # No limits specified - all tools have infinite calls
         for tool_name in tools.keys():
             remaining_calls[tool_name] = None
 
-    # Track raw images added by tools
     all_raw_images: List[Image.Image] = []
 
-    # Track generation timing and tokens for tok/s calculation
     total_generation_time = 0.0
     total_generated_tokens = 0
 
+    response = ""
     for iteration in range(max_iterations):
         if verbose:
             timestamp = time.strftime("%H:%M:%S")
             print(f"\n[{timestamp}] --- Iteration {iteration} ---", flush=True)
 
-        # Generate response with tools
-        text = processor.apply_chat_template(  # type: ignore
+        text_prompt = processor.apply_chat_template(
             current_messages,
             tokenize=False,
             add_generation_prompt=True,
             tools=tool_specs,
         )
-        inputs = processor(
-            text=text,
-            images=all_raw_images if all_raw_images else None,
-            padding=True,
-            return_tensors="pt",
-        ).to(model.device)
-
-        # Build logits processor for thinking budget (new each iteration due to internal state)
-        logits_processor = None
-        if max_thinking_tokens is not None:
-            thinking_processor = ThinkingTokenBudgetProcessor(
-                processor.tokenizer, max_thinking_tokens=max_thinking_tokens
-            )
-            logits_processor = LogitsProcessorList([thinking_processor])
 
         try:
             _set_generation_seed(seed + iteration)
-            gen_start_time = time.time()
-            generate_kwargs = {
-                "max_new_tokens": max_new_tokens,
-            }
-            if logits_processor is not None:
-                generate_kwargs["logits_processor"] = logits_processor
-            generated_ids = model.generate(**inputs, **generate_kwargs)
-            gen_end_time = time.time()
-            total_generation_time += gen_end_time - gen_start_time
+            response, generated_tokens, generation_time = _generate_text(
+                model=model,
+                prompt=text_prompt,
+                max_new_tokens=max_new_tokens,
+                seed=seed + iteration,
+                multi_modal_data={"image": all_raw_images} if all_raw_images else None,
+            )
+            total_generation_time += generation_time
+            total_generated_tokens += generated_tokens
         except Exception:
-            # Print message trace for any exception during generation
             trace_output = _format_message_trace_for_debug(
-                current_messages, tool_call_history, iteration
+                current_messages,
+                tool_call_history,
+                iteration,
             )
             print("\n" + trace_output + "\n", flush=True)
-            # Re-raise the exception
             raise
-
-        generated_ids_trimmed = [
-            out_ids[len(in_ids) :]
-            for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-        ]
-        total_generated_tokens += sum(len(ids) for ids in generated_ids_trimmed)
-        response = processor.batch_decode(
-            generated_ids_trimmed,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
-        )[0]
 
         if verbose:
             timestamp = time.strftime("%H:%M:%S")
             print(f"[{timestamp}] [Assistant Response]:\n{response}\n", flush=True)
 
-        # Parse tool calls
         tool_calls = _parse_tool_calls(response)
 
         if not tool_calls:
-            # No tool calls - we have the final answer
-            # Add final assistant response to message history
             current_messages.append(
                 {"role": "assistant", "content": [{"type": "text", "text": response}]}
             )
@@ -509,12 +488,10 @@ def generate_agentic(
                 "total_time": total_time,
             }
 
-        # Add assistant message with the response
         current_messages.append(
             {"role": "assistant", "content": [{"type": "text", "text": response}]}
         )
 
-        # Execute each tool call and collect results
         tool_results = []
         for tool_call in tool_calls:
             tool_name = tool_call.get("name")
@@ -530,11 +507,9 @@ def generate_agentic(
             if tool_name not in tools:
                 result = {"text": json.dumps({"error": f"Unknown tool '{tool_name}'"})}
             else:
-                # Check remaining calls before executing
                 remaining = remaining_calls.get(tool_name, None)
 
                 if remaining is not None and remaining <= 0:
-                    # No calls left
                     result = {
                         "text": json.dumps(
                             {
@@ -545,33 +520,27 @@ def generate_agentic(
                         )
                     }
                 else:
-                    # Execute the tool
                     callable_fn, _ = tools[tool_name]
                     try:
                         result = callable_fn(**arguments)
 
-                        # Decrement remaining calls if not infinite
                         if remaining is not None:
                             remaining_calls[tool_name] = remaining - 1
                             remaining_after = remaining - 1
                         else:
                             remaining_after = None
 
-                        # Add remaining calls info to the result
                         result_data = json.loads(result["text"])
                         result_data["remaining_calls"] = (
-                            remaining_after
-                            if remaining_after is not None
-                            else "infinite"
+                            remaining_after if remaining_after is not None else "infinite"
                         )
                         result["text"] = json.dumps(result_data)
-                    except Exception as e:
+                    except Exception as exc:
                         result = {
                             "text": json.dumps(
-                                {"error": f"Error executing tool: {str(e)}"}
+                                {"error": f"Error executing tool: {str(exc)}"}
                             )
                         }
-                        # Still decrement on error to prevent infinite retries
                         if remaining is not None:
                             remaining_calls[tool_name] = max(0, remaining - 1)
                             remaining_after_error = remaining_calls[tool_name]
@@ -586,7 +555,6 @@ def generate_agentic(
                         result["text"] = json.dumps(result_data)
 
             if verbose:
-                # Filter for logging
                 log_result = _filter_tensors_for_debug(result)
                 timestamp = time.strftime("%H:%M:%S")
                 print(
@@ -602,17 +570,13 @@ def generate_agentic(
             tool_call_history.append(tool_call_record)
             tool_results.append(tool_call_record)
 
-        # Build tool response message and collect images
         tool_response_message, new_images = build_tool_response_message(tool_results)
         current_messages.append(tool_response_message)
         all_raw_images.extend(new_images)
 
-    # Max iterations reached - try to extract any answer from the last response
     final_answer = _extract_final_answer(response)
     tok_per_sec = (
-        total_generated_tokens / total_generation_time
-        if total_generation_time > 0
-        else 0.0
+        total_generated_tokens / total_generation_time if total_generation_time > 0 else 0.0
     )
     total_time = time.time() - fn_start_time
     return {
@@ -625,6 +589,7 @@ def generate_agentic(
     }
 
 
+
 def prompt_graph_agent_with_semantic_labels(
     question: str,
     initial_timestep_idx: int,
@@ -632,7 +597,7 @@ def prompt_graph_agent_with_semantic_labels(
     node_centroids: np.ndarray,
     node_extents: np.ndarray,
     node_semantic_labels: dict[int, str],
-    model: Qwen3VLForConditionalGeneration,
+    model: VLLMQwen3Model,
     processor: Qwen3VLProcessor,
     tools: Dict[str, Tuple[Callable, Dict[str, Any]]],
     system_prompt: str = None,
@@ -643,22 +608,6 @@ def prompt_graph_agent_with_semantic_labels(
     max_new_tokens: int = 8192,
     max_thinking_tokens: Optional[int] = None,
 ):
-    """
-    node_feats: np.lib.npyio.NpzFile - npz file containing node features for each timestep
-    timestep_idx: int - index of the timestep to use for the node features
-    adjacency_matrices: np.ndarray - adjacency matrices through time - weights are bhattacharyya coefficients (timesteps, n_clusters, n_clusters)
-    node_centers: np.ndarray - cluster centers through time (timesteps, n_clusters, 3)
-    node_centroids: np.ndarray - cluster centroids through time (timesteps, n_clusters, 3)
-    node_extents: np.ndarray - cluster extents through time (timesteps, n_clusters, 3)
-    model: Qwen2_5_VLForConditionalGeneration - model to use
-    processor: Qwen2_5_VLProcessor - processor to use
-    system_prompt: str - system prompt to use
-    tools: Dict[str, Tuple[Callable, Dict[str, Any]]] - tools to use
-    verbose: If True, prints message and tool results at each iteration.
-    max_new_tokens: int - maximum number of new tokens to generate
-    max_thinking_tokens: int - maximum tokens for thinking phase per iteration (Qwen3 only).
-        If None, no limit is applied. If 0, thinking is disabled immediately.
-    """
     assert tools is not None and len(tools) > 0, (
         "tools are required for graph agentic prompting"
     )
@@ -666,12 +615,10 @@ def prompt_graph_agent_with_semantic_labels(
         "timestep mismatch"
     )
 
-    # node feat indices correspond to cluster ids
     centroids = node_centroids[initial_timestep_idx]
     extents = node_extents[initial_timestep_idx]
     centers = node_centers[initial_timestep_idx]
 
-    # Build JSON structure (no image placeholders - semantic labels only)
     nodes_data = []
     for n in range(centroids.shape[0]):
         nodes_data.append(
@@ -701,11 +648,9 @@ def prompt_graph_agent_with_semantic_labels(
         "nodes": nodes_data,
     }
 
-    # Serialize to JSON (no image placeholders in this version)
     graph_json = json.dumps(graph_data, indent=2)
     graph_content = [{"type": "text", "text": graph_json}]
 
-    # Add tool call limits information to the prompt (as JSON)
     tool_limits_content = []
     if tool_call_limits is not None:
         tool_limits_data = {}
@@ -743,10 +688,20 @@ def prompt_graph_agent_with_semantic_labels(
     )
 
 
+
+def _load_video_frames(image_paths: List[Any]) -> List[np.ndarray]:
+    frames = []
+    for image_path in image_paths:
+        with Image.open(Path(image_path)) as frame_image:
+            frames.append(np.array(frame_image.convert("RGB")))
+    return frames
+
+
+
 def prompt_with_video(
     question: str,
     image_paths: List[Any],
-    model: Qwen3VLForConditionalGeneration,
+    model: VLLMQwen3Model,
     processor: Qwen3VLProcessor,
     system_prompt: str = None,
     fps: float = None,
@@ -754,33 +709,12 @@ def prompt_with_video(
     max_new_tokens: int = NEW_TOKEN_LIMIT,
     max_thinking_tokens: int = THINKING_TOKEN_LIMIT,
 ) -> str:
-    """Prompt model with video frames (list of images).
-
-    Args:
-        question: Question to ask about the video
-        image_paths: List of image file paths (as strings or Path objects)
-        model: Qwen VL model
-        processor: Qwen VL processor
-        system_prompt: Optional system prompt
-        max_new_tokens: Maximum tokens to generate
-        max_thinking_tokens: Maximum tokens for thinking phase (Qwen3 only).
-            If None, no limit is applied. If 0, thinking is disabled immediately.
-        fps: Optional frames per second for video metadata
-        max_new_tokens: Maximum tokens to generate
-        max_thinking_tokens: Maximum tokens for thinking phase (Qwen3 only).
-            If None, no limit is applied. If 0, thinking is disabled immediately.
-    Returns:
-        Model response text
-    """
-    # Convert paths to strings
     image_paths_str = [str(p) for p in image_paths]
+    _ = max_thinking_tokens
 
-    # Build messages with video content
     content = []
-    video_content = {"type": "video", "video": image_paths_str}
+    video_content: Dict[str, Any] = {"type": "video", "video": image_paths_str}
     if fps is not None:
-        # raw_fps: actual framerate used in video_metadata
-        # sample_fps: sampling rate passed to processor for frame selection
         video_content["raw_fps"] = fps
         video_content["sample_fps"] = fps
     content.append(video_content)
@@ -793,69 +727,39 @@ def prompt_with_video(
         )
     messages.append({"role": "user", "content": content})
 
-    # Apply chat template
-    text = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
+    text_prompt = processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
     )
 
-    # Process vision info to extract images and videos
-    # Note: raw_fps and sample_fps in video_content create metadata internally in qwen_vl_utils
-    image_inputs, video_inputs = process_vision_info(messages)
-
-    # Create VideoMetadata for explicit fps specification
-    # This ensures the model knows the correct temporal spacing between frames
-    video_metadata = None
-    if fps is not None and video_inputs is not None:
-        num_frames = len(image_paths)
-        video_metadata = [
-            VideoMetadata(
-                total_num_frames=num_frames,
-                fps=fps,
-                frames_indices=list(range(num_frames)),
+    video_frames = _load_video_frames(image_paths=image_paths)
+    multi_modal_video: Any = video_frames
+    if fps is not None:
+        first_frame = video_frames[0]
+        frame_height = int(first_frame.shape[0])
+        frame_width = int(first_frame.shape[1])
+        n_frames = len(video_frames)
+        multi_modal_video = [
+            (
+                video_frames,
+                {
+                    "fps": fps,
+                    "total_num_frames": n_frames,
+                    "frames_indices": list(range(n_frames)),
+                    "width": frame_width,
+                    "height": frame_height,
+                    "duration": float(n_frames) / float(fps),
+                },
             )
         ]
 
-    # Prepare inputs
-    # CRITICAL: Set do_sample_frames=False to prevent processor from resampling our pre-selected frames
-    # Pass video_metadata explicitly to ensure model gets correct fps
-    inputs = processor(
-        text=[text],
-        images=image_inputs,
-        videos=video_inputs,
-        video_metadata=video_metadata,
-        do_sample_frames=False,
-        padding=True,
-        return_tensors="pt",
-    ).to(model.device)
-
-    # thinking token limit processor
-    logits_processor = None
-    if max_thinking_tokens is not None:
-        thinking_processor = ThinkingTokenBudgetProcessor(
-            processor.tokenizer, max_thinking_tokens=max_thinking_tokens
-        )
-        logits_processor = LogitsProcessorList([thinking_processor])
-
-    generate_kwargs = {
-        "max_new_tokens": max_new_tokens,
-    }
-    if logits_processor is not None:
-        generate_kwargs["logits_processor"] = logits_processor
-
-    # Generate
     _set_generation_seed(seed)
-    with torch.no_grad():
-        generated_ids = model.generate(**inputs, **generate_kwargs)
-
-    # Decode
-    generated_ids_trimmed = [
-        out_ids[len(in_ids) :]
-        for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-    ]
-    output_text = processor.batch_decode(
-        generated_ids_trimmed,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False,
-    )[0]
-
+    output_text, _, _ = _generate_text(
+        model=model,
+        prompt=text_prompt,
+        max_new_tokens=max_new_tokens,
+        seed=seed,
+        multi_modal_data={"video": multi_modal_video},
+    )
     return output_text

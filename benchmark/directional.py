@@ -11,7 +11,11 @@ from omegaconf import DictConfig
 
 from benchmark.graph_utils import get_coord_transformations
 from benchmark.serialization_utils import parse_json, sanitize_tool_calls
-from llm.qwen_utils import (
+# from llm.qwen_utils import (
+#     prompt_graph_agent_with_semantic_labels,
+#     prompt_with_video,
+# )
+from llm.qwen_utils_vllm import (
     prompt_graph_agent_with_semantic_labels,
     prompt_with_video,
 )

@@ -13,7 +13,11 @@ import pycolmap
 
 from benchmark.graph_utils import get_coord_transformations
 from benchmark.serialization_utils import sanitize_tool_calls, parse_json
-from llm.qwen_utils import (
+# from llm.qwen_utils import (
+#     prompt_with_image,
+#     prompt_graph_agent_with_semantic_labels,
+# )
+from llm.qwen_utils_vllm import (
     prompt_with_image,
     prompt_graph_agent_with_semantic_labels,
 )

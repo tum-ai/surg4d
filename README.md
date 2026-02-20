@@ -7,9 +7,11 @@ This respository is based on 4DLangSplat.
 ### Environment setup
 Make sure to have [pixi](https://pixi.sh/latest/) installed.
 ```bash
-pixi install # install conda and pypi packages
-pixi run setup # build and install packages with cuda and pytorch deps
+pixi install
+pixi run setup
+pixi run test-install
 ```
+Note: Since we have to install vllm via uv, install all python packages with `pixi run uv pip install ...`
 
 ### Running the pipeline
 1. Download the Cholec80, CholecT50, and ColecSeg8k datasets and place

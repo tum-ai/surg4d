@@ -12,7 +12,7 @@ annotations_root: data/annotations
 
 # qwen
 qwen3_size: 32B
-qwen3_use_fp8: false
+qwen3_use_fp8: true
 
 # Video metadata for all evaluations
 video_fps: 25  # Original video framerate (Cholec80 is 25 fps)

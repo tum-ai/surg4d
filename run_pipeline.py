@@ -18,7 +18,7 @@ from compute_metrics import (
     compute_spatial_metrics,
     compute_temporal_metrics,
 )
-from llm.qwen_utils import get_patched_qwen3
+from llm.qwen_utils import get_qwen3
 
 @hydra.main(config_path="conf", config_name="config.yaml", version_base="1.3")
 def main(cfg: DictConfig):
@@ -40,7 +40,7 @@ def main(cfg: DictConfig):
         # Global AE pre-pass: need features from ALL clips before training AE
         if global_ae_mode:
             if not cfg.skip_feature_extraction:
-                model, processor = get_patched_qwen3(
+                model, processor = get_qwen3(
                     size=cfg.feature_extraction.qwen3_size,
                     use_fp8=cfg.feature_extraction.qwen3_use_fp8,
                 )
@@ -81,7 +81,7 @@ def main(cfg: DictConfig):
                 process_clip(clip, cfg)
 
             if not cfg.skip_feature_extraction and not global_ae_mode:
-                model, processor = get_patched_qwen3(
+                model, processor = get_qwen3(
                     size=cfg.feature_extraction.qwen3_size,
                     use_fp8=cfg.feature_extraction.qwen3_use_fp8,
                 )
@@ -104,7 +104,7 @@ def main(cfg: DictConfig):
             # TODO pass model and processor from outside
             if not cfg.skip_eval:
                 # load normal qwen
-                model, processor = get_patched_qwen3(
+                model, processor = get_qwen3(
                     size=cfg.eval.qwen3_size,
                     use_fp8=cfg.eval.qwen3_use_fp8,
                 )
@@ -135,7 +135,7 @@ def main(cfg: DictConfig):
                 process_clip(clip, cfg)
 
         if not cfg.skip_feature_extraction:
-            model, processor = get_patched_qwen3(
+            model, processor = get_qwen3(
                 size=cfg.feature_extraction.qwen3_size,
                 use_fp8=cfg.feature_extraction.qwen3_use_fp8,
             )
@@ -181,7 +181,7 @@ def main(cfg: DictConfig):
 
         if not cfg.skip_eval:
             # Load models for eval
-            model, processor = get_patched_qwen3(
+            model, processor = get_qwen3(
                 size=cfg.eval.qwen3_size,
                 use_fp8=cfg.eval.qwen3_use_fp8,
             )

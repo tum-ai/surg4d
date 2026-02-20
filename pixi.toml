@@ -1,93 +1,90 @@
 [workspace]
-channels = ["conda-forge"]
+authors = ["NicoStellwag <nico.stellwag@gmail.com>"]
+channels = ["conda-forge", "pytorch", "nvidia"]
 name = "surgery-scene-graphs"
 platforms = ["linux-64"]
 version = "0.1.0"
 
-[tasks]
-install-simple-knn = "python -m pip install --no-build-isolation -e submodules/simple-knn/ && echo 'from ._C import distCUDA2\n\n__all__ = [\"distCUDA2\"]' > submodules/simple-knn/simple_knn/__init__.py"
-install-rasterization = "python -m pip install --no-build-isolation -e submodules/4d-langsplat-rasterization/"
-install-deva = "python -m pip install -e submodules/4d-langsplat-tracking-anything-with-deva/"
-install-segment-anything = "python -m pip install git+https://github.com/facebookresearch/segment-anything.git"
-install-depth-anything-3 = "python -m pip install submodules/depth-anything-3/"
-install-cotracker = "python -m pip install git+https://github.com/facebookresearch/co-tracker.git"
-download-cotracker-checkpoint = "mkdir -p checkpoints && wget -O checkpoints/cotracker3_scaled_offline.pth https://huggingface.co/facebook/cotracker3/resolve/main/scaled_offline.pth || curl -L -o checkpoints/cotracker3_scaled_offline.pth https://huggingface.co/facebook/cotracker3/resolve/main/scaled_offline.pth"
-setup = { depends-on = ["install-simple-knn", "install-rasterization", "install-deva", "install-segment-anything", "install-depth-anything-3", "install-cotracker", "download-cotracker-checkpoint"] }
-# run pixi run setup after pixi install to install cuda extensions
+[system-requirements]
+linux = "5.10"
+cuda = "12.8"
 
 [activation.env]
-# some cuda extensions need to link against pytorch
-LD_LIBRARY_PATH = "$PIXI_PROJECT_ROOT/.pixi/envs/default/lib/python3.10/site-packages/torch/lib:$LD_LIBRARY_PATH"
 # LIBRARY_PATH needed for Triton to find libcuda.so at compile time
 LIBRARY_PATH = "$PIXI_PROJECT_ROOT/.pixi/envs/default/lib/stubs:$PIXI_PROJECT_ROOT/.pixi/envs/default/lib:$LIBRARY_PATH"
-# C_INCLUDE_PATH needed for Triton JIT to find crypt.h and other headers
+# C_INCLUDE_PATH/CPATH needed for Triton JIT to find crypt.h and other headers
 C_INCLUDE_PATH = "$PIXI_PROJECT_ROOT/.pixi/envs/default/include:$C_INCLUDE_PATH"
 CPATH = "$PIXI_PROJECT_ROOT/.pixi/envs/default/include:$CPATH"
-# ignore ~/.local packages in case someone accidentally installed stuff with system python
+TOKENIZERS_PARALLELISM = "false"
 PYTHONNOUSERSITE = "1"
-# CUDA_DEVICE_ORDER ensures GPU numbering matches nvidia-smi
-CUDA_DEVICE_ORDER = "PCI_BUS_ID"
-TOKENIZERS_PARALLELISM="false"
 
 [dependencies]
 python = "==3.10"
-cuda-toolkit = "12.4.*"
-cuda-version = "==12.4"
-cuda-driver-dev = "12.4.*"  # provides libcuda stub for Triton JIT compilation
+cuda-toolkit = "12.8.*"
+cuda-version = "==12.8"
+cuda-driver-dev = "12.8.*"
 libxcrypt = "*"
-colmap = ">=3.9.1,<4"
+uv = ">=0.1.0"
 
-[pypi-dependencies]
-pip = "*"
-torch = "==2.6.0"
-torchaudio = "==2.6.0"
-torchvision = "==0.21.0"
-transformers = ">=4.57.0, <5"
-accelerate = ">=1.10.1, <2"
-bitsandbytes = ">=0.44.0, <1"
-sentence-transformers = ">=5.1.1, <6"
-open-clip-torch = ">=3.2.0, <4"
-mmcv = "==1.6.0"
-opencv-python = ">=4.12.0.88, <5"
-imageio = { version = ">=2.37.0, <3", extras = ["ffmpeg"] }
-open3d = ">=0.18.0, <0.19"
-plyfile = ">=1.1.2, <2"
-qwen-vl-utils = { version = ">=0.0.14, <0.0.15", extras = ["decord"] }
-matplotlib = ">=3.10.7, <4"
-seaborn = ">=0.13.2, <0.14"
-mediapy = ">=1.2.4, <2"
-numpy = ">=2.2.6, <3"
-scipy = ">=1.15.3, <2"
-pandas = ">=2.3.3, <3"
-networkx = ">=3.4.2, <4"
-pyyaml = ">=6.0.3, <7"
-ipdb = ">=0.13.13, <0.14"
-loguru = ">=0.7.3, <0.8"
-wandb = ">=0.22.2, <0.23"
-roboflow = ">=1.2.10, <2"
-argparse = ">=1.4.0, <2"
-pathlib = ">=1.0.1, <2"
-tqdm = ">=4.67.1, <5"
-jaxtyping = ">=0.3.3, <0.4"
-jupyter = ">=1.1.1, <2"
-ipykernel = ">=6.30.1, <7"
-ipywidgets = ">=8.1.7, <9"
-pillow = ">=11.3.0, <12"
-requests = ">=2.32.5, <3"
-dataclasses-json = ">=0.6.7, <0.7"
-faiss-cpu = ">=1.12.0, <2"
-einops = ">=0.8.1, <0.9"
-lpips = ">=0.1.4, <0.2"
-rerun-sdk = ">=0.25.1, <0.26"
-tensorboard = ">=2.20.0, <3"
-hydra-core = ">=1.3.2, <2"
-openexr-numpy = ">=0.0.8, <0.0.9"
-scikit-learn = ">=1.7.2, <2"
-pynndescent = ">=0.5.13, <0.6"
-rich = ">=14.2.0, <15"
-xformers = ">=0.0.29.post3, <0.0.30"
-moviepy = ">=1.0.3, <2"
-flow-vis = "*"
-hdbscan = ">=0.8.41, <0.9"
-compressed-tensors = ">=0.13.0, <0.14"
-umap-learn = ">=0.5.9.post2, <0.6"
+[tasks]
+# Initialize git submodules
+init-submodules = "git submodule update --init --recursive"
+
+# PyTorch installation for CUDA 12.8
+install-pytorch = "uv pip install torch==2.9.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128"
+
+# vLLM installation from official PyPI
+install-vllm-deps = "uv pip install six && uv pip install 'setuptools<80'"
+
+install-vllm = "uv pip install vllm==0.15.1"
+
+# Install CoTracker from git (fixed commit)
+install-cotracker = "uv pip install git+https://github.com/facebookresearch/co-tracker.git@82e02e8029753ad4ef13cf06be7f4fc5facdda4d"
+
+# Install Depth Anything V3 from submodule
+install-depth-anything-3 = "cd submodules/depth-anything-3 && uv pip install -e . && cd ../.."
+
+download-cotracker-checkpoint = """
+mkdir -p checkpoints && \
+wget -O checkpoints/cotracker3_scaled_offline.pth https://huggingface.co/facebook/cotracker3/resolve/main/scaled_offline.pth || \
+curl -L -o checkpoints/cotracker3_scaled_offline.pth https://huggingface.co/facebook/cotracker3/resolve/main/scaled_offline.pth
+"""
+
+install-python-deps = """
+uv pip install \
+  hydra-core \
+  qwen-vl-utils==0.0.14 \
+  rerun-sdk \
+  accelerate \
+  transformers==4.57.1
+"""
+
+
+# Full setup - follows dependency order
+setup = { depends-on = ["init-submodules", "install-pytorch", "install-vllm-deps", "install-vllm", "install-cotracker", "install-depth-anything-3", "download-cotracker-checkpoint", "install-python-deps"] }
+
+# Test installation
+test-install = """
+python -c "import torch; print(f'PyTorch {torch.__version__} (CUDA: {torch.cuda.is_available()})')" && \
+python -c "import vllm; print(f'vLLM {vllm.__version__} imported successfully')" && \
+python -c "from depth_anything_3.api import DepthAnything3; print('Depth Anything V3 imported successfully')" && \
+python -c "import cotracker; print('CoTracker imported successfully')"
+"""
+
+# Dependency check
+check-deps = "uv pip list && python -m pip check"
+
+# Clean build artifacts
+clean = """
+find . -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true && \
+find . -type d -name '*.egg-info' -exec rm -rf {} + 2>/dev/null || true && \
+find . -type d -name 'build' -exec rm -rf {} + 2>/dev/null || true && \
+find . -type d -name 'dist' -exec rm -rf {} + 2>/dev/null || true
+"""
+
+# Reset submodules to clean state
+reset-submodules = """
+git submodule foreach --recursive git clean -fdx && \
+git submodule foreach --recursive git reset --hard && \
+git submodule update --init --recursive
+"""

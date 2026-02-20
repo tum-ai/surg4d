@@ -19,7 +19,11 @@ from typing import List, Dict, Any, Tuple
 
 import torch
 from omegaconf import DictConfig
-from llm.qwen_utils import (
+# from llm.qwen_utils import (
+#     prompt_with_video,
+#     prompt_graph_agent_with_semantic_labels,
+# )
+from llm.qwen_utils_vllm import (
     prompt_with_video,
     prompt_graph_agent_with_semantic_labels,
 )
