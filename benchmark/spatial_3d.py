@@ -7,6 +7,7 @@ No tools are used - the model directly processes Gaussian features with spatial 
 """
 
 import gc
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import numpy as np
@@ -914,6 +915,9 @@ def splat_grid_feat_queries(
     results = []
     for annotation in clip_gt:
         query_id = annotation["id"]
+        method_name = "splat_grid"
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] Running [{query_id}] with method [{method_name}]")
         timestep = annotation["timestep"]
         frame_number = timestep * cfg.eval.annotation_stride
         frame_name = f"frame_{frame_number:06d}.png"
@@ -1261,6 +1265,9 @@ def splat_grid_temporal_queries(
     for query_anno in annotations:
         query_type = query_anno["type"]
         query_id = query_anno["id"]
+        method_name = "splat_grid"
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] Running [{query_id}] with method [{method_name}]")
         question = query_anno["query"]
 
         # Select prompt template by query type

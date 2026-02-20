@@ -1,4 +1,5 @@
-methods: ["graph_agent_semantics", "multiframe"]
+# methods: ["graph_agent_semantics", "multiframe"]
+methods: ["graph_agent_semantics_vision"]
 output_dir: ${eval.output_dir}/directional
 tool_viz_dir: ${eval.output_dir}/tool_viz/directional
 
@@ -83,6 +84,69 @@ multiframe_prompt_template: |
 #   - y: -1 if significant movement upward, 0 if no significant movement, 1 if significant movement downward
 #   - z: -1 if significant movement toward the camera, 0 if no significant movement, 1 if significant movement away from the camera
 #   Example output (format only): ... {{"x": X, "y": Y, "z": Z}} ...
+
+# graph agent with semantic labels and frame fetching tool
+graph_agent_semantics_vision_autoencoder_checkpoint_subdir: ${autoencoder.checkpoint_subdir}
+graph_agent_semantics_vision_autoencoder_full_dim: ${autoencoder.full_dim}
+graph_agent_semantics_vision_autoencoder_latent_dim: ${autoencoder.latent_dim}
+graph_agent_semantics_vision_use_global_autoencoder: ${autoencoder.global_mode}
+graph_agent_semantics_vision_global_autoencoder_checkpoint_dir: ${autoencoder.global_checkpoint_dir}
+graph_agent_semantics_vision_max_iterations: 30
+graph_agent_semantics_vision_tools:
+  - name: node_distances_through_time
+    max_calls: null
+  - name: node_overlap_scores_through_time
+    max_calls: null
+  - name: node_overlap_position_at_time
+    max_calls: null
+  - name: node_movement_through_time
+    max_calls: null
+  - name: aggregated_node_movement
+    max_calls: null
+  - name: relative_node_movement_through_time
+    max_calls: null
+  - name: show_scene_at_timestep
+    max_calls: null
+graph_agent_semantics_vision_system_prompt: |
+  # Task
+  - You are an expert visceral surgeon analyzing a cholecystectomy scene.
+  - Your initial scene representation is a set of nodes from a single timestep.
+  - Use have access to tools to explore full scene.
+
+  # Scene representation
+  - The scene represents a brief (2-3 seconds) excerpt from a laparoscopic cholecystectomy.
+  - The scene consists of 20 timesteps.
+  - The scene is reconstructed from a laparoscopic camera view.
+  - Coordinate system:
+    - relative to the laparoscopic camera, which might be inserted into the abdomen from any direction
+    - laparoscopic camera looks in positive z direction
+    - the coordinate system is roughly metric in cm (although not perfectly so, distances tend to be overestimated a bit)
+    - increase in x means movement to the right
+    - increase in y means movement to the bottom
+    - increase in z means movement away from the camera
+
+  # Rules
+  - Strictly respect tool call limits. (Initially given by user prompt, updated by tool responses.)
+  - Think briefly, do not spend too much time on each turn.
+  - The questions are very specific, pay close attention to all of the questions' details.
+  - Reason via geometry first, then, in cases where geometry is not sufficient (does a grasper just touch something or grip it?, does a hook just cut something or apply electrical current?, etc.) look at video frames to check and refine your assumptions and answers.
+graph_agent_semantics_vision_prompt_template: |
+  The following question only concerns timesteps {range_start} to {range_end} (inclusive). Do not consider any other timesteps for your answer!
+
+  {question}
+
+  Definition of direction classes:
+  - You should indicate one direction for each axis (x, y, z).
+  - The direction can either be -1, 0, or 1:
+    - x: -1 if significant movement to the left, 0 if no significant movement, 1 if significant movement to the right
+    - y: -1 if significant movement upward, 0 if no significant movement, 1 if significant movement downward
+    - z: -1 if significant movement toward the camera, 0 if no significant movement, 1 if significant movement away from the camera
+  - Significant movement means the axis is relevant compared to the other axes. Examples:
+    - If an object moves 3cm to the left, 5cm towards the camera and 0.5cm downward, the direction class would be {{"x": -1, "y": 0, "z": -1}} because 0.5cm is very small compared to 5cm and 3cm.
+    - If an object moves 0.3cm to the left, 0.5cm towards the camera, and 0.4cm downward, the direction class would be {{"x": -1, "y": 1, "z": -1}} because movement in all axes has roughly the same magnitude.
+
+  Your final answer has to contain exactly one direction class vector as a JSON object. Do not refuse!
+  Example output (format only): ... {{"x": X, "y": Y, "z": Z}} ...
 
 # graph agent with semantic labels
 graph_agent_semantics_autoencoder_checkpoint_subdir: ${autoencoder.checkpoint_subdir}

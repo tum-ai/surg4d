@@ -819,6 +819,7 @@ def show_scene_at_timestep(
     video_frames: List[Path],
     annotation_stride: int,
     timestep_idx: int,
+    toolkit: Optional['GraphTools'] = None,
 ) -> Dict[str, Any]:
     """Return the RGB video frame corresponding to a graph timestep.
 
@@ -848,6 +849,16 @@ def show_scene_at_timestep(
     frame_path = Path(video_frames[frame_number])
     with Image.open(frame_path) as frame_img:
         rgb_frame = frame_img.convert("RGB").copy()
+
+    if toolkit is not None and toolkit.recording_active:
+        counter = toolkit.increase_logging_tool_counter()
+        prefix = f"tool_calls/{counter:02d}_t{int(timestep_idx):02d}_show_scene"
+
+        rr.set_time("timestep", sequence=int(timestep_idx))
+        rr.log(
+            f"{prefix}/frame",
+            rr.Image(np.array(rgb_frame)),
+        )
 
     payload = {
         "timestep_idx": int(timestep_idx),
@@ -1878,6 +1889,7 @@ class GraphTools:
                     show_scene_at_timestep,
                     video_frames=self.video_frames,
                     annotation_stride=self.annotation_stride,
+                    toolkit=self,
                 ),
                 spec_show_scene_at_timestep,
             ),

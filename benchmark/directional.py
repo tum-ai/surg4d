@@ -1,6 +1,7 @@
 import gc
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -47,6 +48,9 @@ def multiframe_directional_queries(
     results = []
     for query_anno in annotations:
         query_id = query_anno["id"]
+        method_name = "multiframe"
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] Running [{query_id}] with method [{method_name}]")
         query = query_anno["query"]
         temporal_range = query_anno["range"]
 
@@ -109,6 +113,7 @@ def graph_agent_directional_queries(
     cfg: DictConfig,
     video_frames: List[Path],
     use_semantic_labels: bool = True,
+    semantic_method_name: str = "graph_agent_semantics",
 ) -> List[Dict[str, Any]]:
     """Run directional graph-agent queries with tools.
 
@@ -142,15 +147,28 @@ def graph_agent_directional_queries(
     point_o2n, _, distance_o2n, _ = get_coord_transformations(positions)
 
     if use_semantic_labels:
-        autoencoder_checkpoint_subdir = cfg.eval.directional.graph_agent_semantics_autoencoder_checkpoint_subdir
-        autoencoder_full_dim = cfg.eval.directional.graph_agent_semantics_autoencoder_full_dim
-        autoencoder_latent_dim = cfg.eval.directional.graph_agent_semantics_autoencoder_latent_dim
-        autoencoder_use_global_autoencoder = cfg.eval.directional.graph_agent_semantics_use_global_autoencoder
-        global_autoencoder_checkpoint_dir = cfg.eval.directional.graph_agent_semantics_global_autoencoder_checkpoint_dir
-        max_iterations = cfg.eval.directional.graph_agent_semantics_max_iterations
-        tool_config = cfg.eval.directional.graph_agent_semantics_tools
-        system_prompt = cfg.eval.directional.graph_agent_semantics_system_prompt
-        prompt_template = cfg.eval.directional.graph_agent_semantics_prompt_template
+        if semantic_method_name == "graph_agent_semantics_vision":
+            autoencoder_checkpoint_subdir = cfg.eval.directional.graph_agent_semantics_vision_autoencoder_checkpoint_subdir
+            autoencoder_full_dim = cfg.eval.directional.graph_agent_semantics_vision_autoencoder_full_dim
+            autoencoder_latent_dim = cfg.eval.directional.graph_agent_semantics_vision_autoencoder_latent_dim
+            autoencoder_use_global_autoencoder = cfg.eval.directional.graph_agent_semantics_vision_use_global_autoencoder
+            global_autoencoder_checkpoint_dir = cfg.eval.directional.graph_agent_semantics_vision_global_autoencoder_checkpoint_dir
+            max_iterations = cfg.eval.directional.graph_agent_semantics_vision_max_iterations
+            tool_config = cfg.eval.directional.graph_agent_semantics_vision_tools
+            system_prompt = cfg.eval.directional.graph_agent_semantics_vision_system_prompt
+            prompt_template = cfg.eval.directional.graph_agent_semantics_vision_prompt_template
+        elif semantic_method_name == "graph_agent_semantics":
+            autoencoder_checkpoint_subdir = cfg.eval.directional.graph_agent_semantics_autoencoder_checkpoint_subdir
+            autoencoder_full_dim = cfg.eval.directional.graph_agent_semantics_autoencoder_full_dim
+            autoencoder_latent_dim = cfg.eval.directional.graph_agent_semantics_autoencoder_latent_dim
+            autoencoder_use_global_autoencoder = cfg.eval.directional.graph_agent_semantics_use_global_autoencoder
+            global_autoencoder_checkpoint_dir = cfg.eval.directional.graph_agent_semantics_global_autoencoder_checkpoint_dir
+            max_iterations = cfg.eval.directional.graph_agent_semantics_max_iterations
+            tool_config = cfg.eval.directional.graph_agent_semantics_tools
+            system_prompt = cfg.eval.directional.graph_agent_semantics_system_prompt
+            prompt_template = cfg.eval.directional.graph_agent_semantics_prompt_template
+        else:
+            raise ValueError(f"Unsupported semantic method: {semantic_method_name}")
     else:
         autoencoder_checkpoint_subdir = cfg.eval.directional.graph_agent_autoencoder_checkpoint_subdir
         autoencoder_full_dim = cfg.eval.directional.graph_agent_autoencoder_full_dim
@@ -212,6 +230,9 @@ def graph_agent_directional_queries(
     results = []
     for query_anno in annotations:
         query_id = query_anno["id"]
+        method_name = semantic_method_name if use_semantic_labels else "graph_agent"
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] Running [{query_id}] with method [{method_name}]")
         query = query_anno["query"]
         temporal_range = query_anno["range"]
 
@@ -219,7 +240,7 @@ def graph_agent_directional_queries(
             sanitized_question = re.sub(r"[^\w\s-]", "", query)
             sanitized_question = re.sub(r"\s+", "_", sanitized_question)
             sanitized_question = sanitized_question[:50]
-            rrd_file = tool_viz_dir / f"{query_id}_{sanitized_question}.rrd"
+            rrd_file = tool_viz_dir / f"{method_name}_{query_id}_{sanitized_question}.rrd"
             graph_tools.start_recording(str(rrd_file))
 
         num_ts = graph_tools.adjacency.shape[0]

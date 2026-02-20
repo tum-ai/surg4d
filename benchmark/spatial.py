@@ -1,5 +1,6 @@
 import gc
 import json
+from datetime import datetime
 from pathlib import Path
 from omegaconf import DictConfig
 import torch
@@ -154,6 +155,7 @@ def graph_agent_feat_queries(
     clip: DictConfig,
     cfg: DictConfig,
     use_semantic_labels: bool = False,
+    semantic_method_name: str = "graph_agent_semantics",
 ):
     """Run graph agent with tools across all queries for a clip.
 
@@ -189,15 +191,28 @@ def graph_agent_feat_queries(
             node_semantic_labels = json.load(f)
 
     if use_semantic_labels:
-        autoencoder_checkpoint_subdir = cfg.eval.spatial.graph_agent_semantics_autoencoder_checkpoint_subdir
-        autoencoder_full_dim = cfg.eval.spatial.graph_agent_semantics_autoencoder_full_dim
-        autoencoder_latent_dim = cfg.eval.spatial.graph_agent_semantics_autoencoder_latent_dim
-        autoencoder_use_global_autoencoder = cfg.eval.spatial.graph_agent_semantics_use_global_autoencoder
-        global_autoencoder_checkpoint_dir = cfg.eval.spatial.graph_agent_semantics_global_autoencoder_checkpoint_dir
-        max_iterations = cfg.eval.spatial.graph_agent_semantics_max_iterations
-        tool_config = cfg.eval.spatial.graph_agent_semantics_tools
-        system_prompt = cfg.eval.spatial.graph_agent_semantics_system_prompt
-        prompt_template = cfg.eval.spatial.graph_agent_semantics_prompt_template
+        if semantic_method_name == "graph_agent_semantics_vision":
+            autoencoder_checkpoint_subdir = cfg.eval.spatial.graph_agent_semantics_vision_autoencoder_checkpoint_subdir
+            autoencoder_full_dim = cfg.eval.spatial.graph_agent_semantics_vision_autoencoder_full_dim
+            autoencoder_latent_dim = cfg.eval.spatial.graph_agent_semantics_vision_autoencoder_latent_dim
+            autoencoder_use_global_autoencoder = cfg.eval.spatial.graph_agent_semantics_vision_use_global_autoencoder
+            global_autoencoder_checkpoint_dir = cfg.eval.spatial.graph_agent_semantics_vision_global_autoencoder_checkpoint_dir
+            max_iterations = cfg.eval.spatial.graph_agent_semantics_vision_max_iterations
+            tool_config = cfg.eval.spatial.graph_agent_semantics_vision_tools
+            system_prompt = cfg.eval.spatial.graph_agent_semantics_vision_system_prompt
+            prompt_template = cfg.eval.spatial.graph_agent_semantics_vision_prompt_template
+        elif semantic_method_name == "graph_agent_semantics":
+            autoencoder_checkpoint_subdir = cfg.eval.spatial.graph_agent_semantics_autoencoder_checkpoint_subdir
+            autoencoder_full_dim = cfg.eval.spatial.graph_agent_semantics_autoencoder_full_dim
+            autoencoder_latent_dim = cfg.eval.spatial.graph_agent_semantics_autoencoder_latent_dim
+            autoencoder_use_global_autoencoder = cfg.eval.spatial.graph_agent_semantics_use_global_autoencoder
+            global_autoencoder_checkpoint_dir = cfg.eval.spatial.graph_agent_semantics_global_autoencoder_checkpoint_dir
+            max_iterations = cfg.eval.spatial.graph_agent_semantics_max_iterations
+            tool_config = cfg.eval.spatial.graph_agent_semantics_tools
+            system_prompt = cfg.eval.spatial.graph_agent_semantics_system_prompt
+            prompt_template = cfg.eval.spatial.graph_agent_semantics_prompt_template
+        else:
+            raise ValueError(f"Unsupported semantic method: {semantic_method_name}")
     else:
         autoencoder_checkpoint_subdir = cfg.eval.spatial.graph_agent_autoencoder_checkpoint_subdir
         autoencoder_full_dim = cfg.eval.spatial.graph_agent_autoencoder_full_dim
@@ -281,6 +296,9 @@ def graph_agent_feat_queries(
     for annotation in clip_gt:
         # prompt and other data
         query_id = annotation["id"]
+        method_name = semantic_method_name if use_semantic_labels else "graph_agent"
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] Running [{query_id}] with method [{method_name}]")
         timestep = annotation["timestep"]
         frame_number = timestep * cfg.eval.annotation_stride
         frame_name = f"frame_{frame_number:06d}.png"
@@ -295,7 +313,7 @@ def graph_agent_feat_queries(
             sanitized_query = re.sub(r'[^\w\s-]', '', question)  # Remove special chars
             sanitized_query = re.sub(r'\s+', '_', sanitized_query)  # Replace whitespace with _
             sanitized_query = sanitized_query[:50]  # Limit length
-            rrd_filename = f"t{timestep:03d}_{query_id}_{sanitized_query}{'_semantics' if use_semantic_labels else ''}.rrd"
+            rrd_filename = f"{method_name}_t{timestep:03d}_{query_id}_{sanitized_query}.rrd"
             rrd_file = tool_viz_dir / rrd_filename
             graph_tools.start_recording(str(rrd_file))
 
@@ -400,6 +418,10 @@ def frame_direct_feat_queries(
 
     results = []
     for annotation in clip_gt:
+        query_id = annotation["id"]
+        method_name = "frame_direct"
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] Running [{query_id}] with method [{method_name}]")
         # prompt
         timestep = annotation["timestep"]
         frame_number = timestep * cfg.eval.annotation_stride
@@ -428,7 +450,7 @@ def frame_direct_feat_queries(
             px, py = float(px), float(py)
 
         results.append({
-            "id": annotation["id"],
+            "id": query_id,
             "timestep": timestep,
             "query": annotation["query"],
             "predicted": [px, py],

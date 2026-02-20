@@ -62,6 +62,7 @@ def evaluate_temporal(
         "multiframe": multiframe_queries,
         "graph_agent": graph_agent_queries,
         "graph_agent_semantics": graph_agent_queries,
+        "graph_agent_semantics_vision": graph_agent_queries,
     }
     
     # Collect predictions for all methods specified in config
@@ -83,7 +84,8 @@ def evaluate_temporal(
             annotations=annotations,
             clip=clip,
             cfg=cfg,
-            use_semantic_labels=(method_name == "graph_agent_semantics"),
+            use_semantic_labels=method_name in {"graph_agent_semantics", "graph_agent_semantics_vision"},
+            semantic_method_name=method_name,
         )
         all_results[method_name] = results
         
@@ -209,6 +211,19 @@ def evaluate_spatial(
             clip=clip,
             cfg=cfg,
             use_semantic_labels=True,
+            semantic_method_name="graph_agent_semantics",
+        )
+
+    if "graph_agent_semantics_vision" in methods_to_run:
+        all_results["graph_agent_semantics_vision"] = graph_agent_feat_queries(
+            model=model,
+            processor=processor,
+            graph_dir=graph_dir,
+            clip_gt=gt_data,
+            clip=clip,
+            cfg=cfg,
+            use_semantic_labels=True,
+            semantic_method_name="graph_agent_semantics_vision",
         )
 
     if "splat_grid" in methods_to_run:
@@ -234,6 +249,7 @@ def evaluate_spatial(
             "frame_direct": "frame_direct",
             "graph_agent": "graph_agent",
             "graph_agent_semantics": "graph_agent_semantics",
+            "graph_agent_semantics_vision": "graph_agent_semantics_vision",
             "splat_grid": "splat_grid",
         }
         for method_key, viz_name in viz_method_names.items():
@@ -263,7 +279,7 @@ def evaluate_directional(
     video_dir = Path(cfg.preprocessed_root) / str(clip.name)
 
     video_frames = None
-    if methods_to_run & {"multiframe", "graph_agent", "graph_agent_semantics"}:
+    if methods_to_run & {"multiframe", "graph_agent", "graph_agent_semantics", "graph_agent_semantics_vision"}:
         video_frames, _ = load_video_frames(video_dir, cfg.eval.paths.images_subdir)
 
     directional_anno_file = Path(cfg.eval.annotations_root) / "directional" / f"{clip.name}.json"
@@ -275,6 +291,7 @@ def evaluate_directional(
         "multiframe": multiframe_directional_queries,
         "graph_agent": graph_agent_directional_queries,
         "graph_agent_semantics": graph_agent_directional_queries,
+        "graph_agent_semantics_vision": graph_agent_directional_queries,
     }
 
     all_results = {}
@@ -291,7 +308,8 @@ def evaluate_directional(
             annotations=annotations,
             clip=clip,
             cfg=cfg,
-            use_semantic_labels=(method_name == "graph_agent_semantics"),
+            use_semantic_labels=method_name in {"graph_agent_semantics", "graph_agent_semantics_vision"},
+            semantic_method_name=method_name,
         )
         all_results[method_name] = results
 
@@ -336,21 +354,21 @@ def main(cfg: DictConfig):
 
     if cfg.eval is not None and cfg.eval.temporal is not None:
         temporal_methods = set(cfg.eval.temporal.methods)
-        if temporal_methods & {"multiframe", "graph_agent", "graph_agent_semantics"}:
+        if temporal_methods & {"multiframe", "graph_agent", "graph_agent_semantics", "graph_agent_semantics_vision"}:
             needs_normal_model = True
         if "splat_grid" in temporal_methods:
             needs_3d_model = True
 
     if cfg.eval is not None and cfg.eval.spatial is not None:
         spatial_methods = set(cfg.eval.spatial.methods)
-        if spatial_methods & {"frame_direct", "graph_agent", "graph_agent_semantics"}:
+        if spatial_methods & {"frame_direct", "graph_agent", "graph_agent_semantics", "graph_agent_semantics_vision"}:
             needs_normal_model = True
         if "splat_grid" in spatial_methods:
             needs_3d_model = True
 
     if cfg.eval is not None and cfg.eval.directional is not None:
         directional_methods = set(cfg.eval.directional.methods)
-        if directional_methods & {"multiframe", "graph_agent", "graph_agent_semantics"}:
+        if directional_methods & {"multiframe", "graph_agent", "graph_agent_semantics", "graph_agent_semantics_vision"}:
             needs_normal_model = True
 
     model, processor = None, None
