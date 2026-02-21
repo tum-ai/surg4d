@@ -9,7 +9,7 @@ import cv2
 import json
 import re
 
-from cholec_utils import get_clip_seg8k, parse_cholecseg8k_instance_mask
+from utils.cholec_utils import get_clip_seg8k, parse_cholecseg8k_instance_mask
 
 
 def extract_frame_number(filepath: Path) -> int:

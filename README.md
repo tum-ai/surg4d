@@ -11,21 +11,22 @@ pixi install
 pixi run setup
 pixi run test-install
 ```
-Note: Since we have to install vllm via uv, install all python packages with `pixi run uv pip install ...`
+Note: Since we have to install vllm via uv, install all further python packages with `pixi run uv pip install ...`,
+check the installed version and add them to the pixi task `install-python-deps`.
 
 ### Running the pipeline
-1. Download the Cholec80, CholecT50, and ColecSeg8k datasets and place
-them in `data/cholec80`, `data/cholect50`, and `data/cholecseg8k` respectively.
+1. Download the ColecSeg8k dataset and place it in `data/cholecseg8k`.
 
-2. Configure the pipeline via hydra configs in `conf`.
+2. Configure the pipeline via hydra in `conf`.
 
 3. Either run the steps for all clips independently
     ```bash
     pixi run python preprocess.py
-    pixi run python generate_qwen_features.py
-    pixi run python train_autoencoders.py
-    pixi run python train_splats.py
+    pixi run python extract_geometry.py
+    pixi run python track_objects.py
     pixi run python extract_graphs.py
+    pixi run python evaluate_benchmark.py
+    pixi run python compute_metrics.py
     ```
 
 4. Or run the whole pipeline in one go

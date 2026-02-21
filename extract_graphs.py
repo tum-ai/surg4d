@@ -11,7 +11,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from sklearn.neighbors import LocalOutlierFactor
 
-from rerun_utils import (
+from utils.rerun_utils import (
     log_points_through_time,
     log_graph_structure_through_time,
 )

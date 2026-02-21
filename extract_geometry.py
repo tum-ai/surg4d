@@ -4,13 +4,11 @@ import numpy as np
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 import hydra
-import torch
 from loguru import logger
-import cv2
 import re
 from depth_anything_3.api import DepthAnything3
 
-from da3_utils import filter_prediction_edge_artifacts
+from utils.da3_utils import filter_prediction_edge_artifacts
 
 
 def extract_frame_number(filepath: Path) -> int:

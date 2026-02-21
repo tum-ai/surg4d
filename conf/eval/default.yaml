@@ -1,12 +1,12 @@
 defaults:
   # - temporal: default
   - spatial: default
-  - directional: default
+  # - directional: default
   - _self_
 
 temporal: null
 # spatial: null
-# directional: null
+directional: null
 
 annotations_root: data/annotations
 

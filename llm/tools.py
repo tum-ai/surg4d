@@ -8,7 +8,7 @@ import rerun as rr
 from PIL import Image
 
 from benchmark.graph_utils import get_coord_transformations
-from rerun_utils import _compute_scene_extent
+from utils.rerun_utils import _compute_scene_extent
 
 
 IMAGE_PLACEHOLDER = "<image/>"
@@ -1030,7 +1030,7 @@ class GraphTools:
             label: Label text to display with the point
             entity_name: Entity name for the rerun log (default: "zz_final_prediction")
         """
-        from rerun_utils import _compute_scene_extent
+        from utils.rerun_utils import _compute_scene_extent
         
         # Ensure position is (1, 3) shape
         pos_arr = np.array(position, dtype=np.float32).reshape(1, 3)

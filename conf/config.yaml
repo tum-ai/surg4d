@@ -1,5 +1,5 @@
 defaults:
-  - clips: final_dataset_first
+  - clips: final_dataset
   - preprocess: qwen3
   - extract_geometry: qwen3
   - track_objects: qwen3
@@ -9,19 +9,11 @@ defaults:
   - _self_
   
 
-# for run_pipeline.py
-skip_preprocessing: true
-skip_graph_extraction: true
-skip_eval: true
-skip_compute_metrics: true
-
 cholec80_root: data/cholec80
 cholecseg8k_root: data/cholecseg8k
 cholect50_root: data/cholect50
 preprocessed_root: data/preprocessed/refactor
 output_root: output/refactor
-
-whole_pipeline_clips_sequentially: true
 
 config_dumps:
   # - ${output_root}/config.yaml

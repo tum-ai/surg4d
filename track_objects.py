@@ -21,7 +21,7 @@ from utils.cotracker_utils import (
     compute_gaussian_control_point_associations,
 )
 from utils.cotracker_interpolation import precompute_control_point_positions
-from cholec_utils import get_semantic_label_from_class_id
+from utils.cholec_utils import get_semantic_label_from_class_id
 
 
 def extract_frame_number(filepath: Path) -> int:
@@ -665,7 +665,7 @@ def track_objects(clip: DictConfig, cfg: DictConfig):
     
     # Visualize per-view instances in Rerun
     logger.info("Logging per-view instances to Rerun...")
-    from rerun_utils import init_and_save_rerun, log_per_view_instances, log_merged_instances
+    from utils.rerun_utils import init_and_save_rerun, log_per_view_instances, log_merged_instances
     
     rrd_path = cotracker_dir / "instance_assignment.rrd"
     init_and_save_rerun(str(rrd_path))
