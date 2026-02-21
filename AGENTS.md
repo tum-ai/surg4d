@@ -1,6 +1,5 @@
 # Dev Ops
-- This is a pixi project. Run all python commands with `pixi run python ...`
-- We are developing on the endpoint node of a slurm cluster without GPU. If you want me to run anything that does mid to heavy compute or needs a GPU just tell me the command and I'll run it on the cluster for you.
+- Because of cluster infra, you unfortunately don't have access to our pixi environment. If you need me to run shell commands for checking formats etc. just give me a shell command and ask me to run it for you and paste you the results.
 
 # Code Style
 - This is an ML project, so never code defensively. I want stuff to fail and fix the bug rather than fallbacks (etc. for argument types)

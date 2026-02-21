@@ -11,133 +11,7 @@ import rerun as rr
 import cv2
 from cotracker.predictor import CoTrackerPredictor
 from cotracker.utils.visualizer import Visualizer
-from utils.colmap_loader import (
-    read_intrinsics_binary,
-    read_extrinsics_binary,
-    read_intrinsics_text,
-    read_extrinsics_text,
-    qvec2rotmat,
-)
-import re
-
-
-def _load_colmap_data(colmap_dir: Path):
-    """
-    Load raw Colmap data (cameras and images) from sparse/0/ directory.
-    
-    Follows the same pattern as scene.dataset_readers.readColmapSceneInfo.
-    
-    Args:
-        colmap_dir: Directory containing sparse/0/ subdirectory with Colmap data
-    
-    Returns:
-        cam_intrinsics: Dictionary mapping camera_id to Camera objects
-        cam_extrinsics: Dictionary mapping image_id to Image objects
-    """
-    
-    # Try binary format first, fall back to text (same pattern as readColmapSceneInfo)
-    try:
-        cameras_intrinsic_file = colmap_dir / "cameras.bin"
-        images_extrinsic_file = colmap_dir / "images.bin"
-        cam_intrinsics = read_intrinsics_binary(str(cameras_intrinsic_file))
-        cam_extrinsics = read_extrinsics_binary(str(images_extrinsic_file))
-    except:
-        cameras_intrinsic_file = colmap_dir / "cameras.txt"
-        images_extrinsic_file = colmap_dir / "images.txt"
-        cam_intrinsics = read_intrinsics_text(str(cameras_intrinsic_file))
-        cam_extrinsics = read_extrinsics_text(str(images_extrinsic_file))
-    
-    return cam_intrinsics, cam_extrinsics
-
-
-def load_colmap_camera_parameters(
-    colmap_dir: Path,
-    image_files: List[Path],
-) -> Tuple[List[np.ndarray], List[np.ndarray]]:
-    """
-    Load Colmap camera intrinsics and extrinsics, matched to image files.
-    
-    Args:
-        colmap_dir: Directory containing sparse/0/ subdirectory with Colmap data
-        image_files: List of image file paths (sorted by frame number)
-    
-    Returns:
-        intrinsics: List of (3, 3) intrinsic matrices (K) for each image
-        c2w_matrices: List of (4, 4) camera-to-world transformation matrices for each image
-    """
-    # Load Colmap data (reuses the same file reading pattern as readColmapSceneInfo)
-    cam_intrinsics, cam_extrinsics = _load_colmap_data(colmap_dir)
-    
-    # Create mapping from image filename to Colmap image data
-    image_name_to_colmap = {}
-    for img_id, img_data in cam_extrinsics.items():
-        image_name_to_colmap[img_data.name] = img_data
-    
-    # Extract frame numbers from image files for matching
-    def extract_frame_number(filepath: Path) -> int:
-        match = re.search(r"frame_(\d+)", filepath.stem)
-        if match:
-            return int(match.group(1))
-        return 0
-    
-    intrinsics_list = []
-    c2w_matrices_list = []
-    
-    for img_path in image_files:
-        img_name = img_path.name
-        
-        # Find matching Colmap image
-        if img_name in image_name_to_colmap:
-            img_data = image_name_to_colmap[img_name]
-        else:
-            # Try without extension (e.g., "frame_000001.png" matches "frame_000001")
-            img_stem = img_path.stem
-            found = False
-            for colmap_name, colmap_data in image_name_to_colmap.items():
-                colmap_stem = Path(colmap_name).stem
-                if colmap_stem == img_stem or colmap_name == img_stem:
-                    img_data = colmap_data
-                    found = True
-                    break
-            if not found:
-                raise ValueError(f"Could not find Colmap data for image {img_name}")
-        
-        # Get camera intrinsics
-        camera = cam_intrinsics[img_data.camera_id]
-        
-        # Extract intrinsic parameters based on camera model
-        if camera.model == "PINHOLE":
-            fx, fy, cx, cy = camera.params
-        elif camera.model == "SIMPLE_PINHOLE":
-            f, cx, cy = camera.params
-            fx = fy = f
-        elif camera.model == "SIMPLE_RADIAL":
-            f, cx, cy, _ = camera.params
-            fx = fy = f
-        else:
-            logger.warning(f"Unsupported camera model {camera.model}, using default intrinsics")
-            fx = fy = camera.width / 2.0
-            cx = camera.width / 2.0
-            cy = camera.height / 2.0
-        
-        K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
-        intrinsics_list.append(K)
-        
-        # Convert Colmap extrinsics (world-to-camera) to camera-to-world
-        # Colmap stores qvec (quaternion) and tvec (translation) for world-to-camera
-        R_w2c = qvec2rotmat(img_data.qvec)  # (3, 3) rotation matrix
-        t_w2c = img_data.tvec  # (3,) translation
-        
-        # Build world-to-camera matrix
-        w2c = np.eye(4, dtype=np.float32)
-        w2c[:3, :3] = R_w2c
-        w2c[:3, 3] = t_w2c
-        
-        # Invert to get camera-to-world
-        c2w = np.linalg.inv(w2c)
-        c2w_matrices_list.append(c2w)
-    
-    return intrinsics_list, c2w_matrices_list
+from utils.da3_geometry_utils import load_da3_geometry
 
 
 def track_control_points(
@@ -232,8 +106,7 @@ def track_control_points(
 def lift_control_points_to_3d(
     control_points_2d: torch.Tensor,
     visibility: torch.Tensor,
-    depth_processed_dir: Path,
-    colmap_dir: Path,
+    geometry_npz_path: Path,
     image_files: List[Path],
     depth_jump_threshold: float,
     save_dir: Path = None,
@@ -251,8 +124,7 @@ def lift_control_points_to_3d(
     Args:
         control_points_2d: (T, N_points, 2) 2D pixel coordinates (torch.Tensor on GPU)
         visibility: (T, N_points) boolean array indicating visible/occluded tracked points
-        depth_processed_dir: Directory containing depth maps at processed resolution of the depth model (*.npy files)
-        colmap_dir: Directory containing sparse/0/ Colmap data with camera parameters
+        geometry_npz_path: Path to DA3 mini_npz geometry dump with depth/conf/extrinsics/intrinsics
         image_files: List of image file paths (sorted by frame number)
         depth_jump_threshold: Absolute depth change threshold (meters) for killing points that jump
                               between surfaces. Set to None to disable.
@@ -263,20 +135,16 @@ def lift_control_points_to_3d(
         control_points_2d: (T, N_valid, 2) 2D coordinates filtered to match valid 3D points
     """
     T, N_grid, _ = control_points_2d.shape
-    
-    # Load depth maps (already at processed resolution), used by the depth model
-    depth_files = sorted(depth_processed_dir.glob("*.npy"))
-    assert len(depth_files) == T, f"Mismatch: {len(depth_files)} depth files, {T} frames"
-    
-    # Load camera parameters
-    intrinsics_list, c2w_list = load_colmap_camera_parameters(colmap_dir, image_files)
+
+    # Load DA3 geometry and camera parameters
+    depth_all, _, _, intrinsics_list, w2c_list, c2w_list = load_da3_geometry(geometry_npz_path)
+    assert depth_all.shape[0] == T, f"Mismatch: {depth_all.shape[0]} depth frames, {T} frames"
     assert len(intrinsics_list) == T, f"Mismatch: {len(intrinsics_list)} camera parameters, {T} frames"
     
     # Pre-convert camera parameters to tensors for efficient access
     K_tensors = [torch.from_numpy(K).float().to("cuda") for K in intrinsics_list]
     c2w_tensors = [torch.from_numpy(c2w).float().to("cuda") for c2w in c2w_list]
-    # Compute w2c (world-to-camera) matrices for reprojection
-    w2c_tensors = [torch.inverse(c2w) for c2w in c2w_tensors]
+    w2c_tensors = [torch.from_numpy(w2c).float().to("cuda") for w2c in w2c_list]
     
     logger.info(f"Lifting {N_grid} control points to 3D world coordinates for {T} frames...")
     
@@ -284,8 +152,8 @@ def lift_control_points_to_3d(
     first_image = Image.open(image_files[0])
     orig_W, orig_H = first_image.size
     
-    # Get processed resolution from depth maps (already at processed resolution)
-    depth_map_0 = np.load(str(depth_files[0]))
+    # Get processed resolution from DA3 depth maps
+    depth_map_0 = depth_all[0]
     processed_H, processed_W = depth_map_0.shape
     
     # Compute scale factors from original to processed resolution
@@ -296,7 +164,7 @@ def lift_control_points_to_3d(
     # Pre-load all depth maps
     depth_maps = []
     for t in range(T):
-        depth_map = np.load(str(depth_files[t]))
+        depth_map = depth_all[t]
         depth_maps.append(torch.from_numpy(depth_map).to("cuda"))
     
     # Pre-load all images for color sampling
@@ -568,15 +436,12 @@ def _compute_processed_resolution(orig_w: int, orig_h: int, patch_size: int = 14
 def compute_gaussian_control_point_associations(
     control_points_2d_init: torch.Tensor,
     control_points_3d_init: torch.Tensor,
-    depth_processed_dir: Path,
-    colmap_dir: Path,
-    image_files: List[Path],
+    geometry_npz_path: Path,
     init_frame_idx: int,
     instance_mask: Optional[torch.Tensor],
     k_neighbors: int = 4,
     idw_power: float = 2.0,
     pixel_stride: int = 1,
-    confidence_dir: Optional[Path] = None,
     conf_thresh_percentile: float = 0.0,
 ) -> Dict[str, torch.Tensor]:
     """
@@ -585,15 +450,12 @@ def compute_gaussian_control_point_associations(
     Args:
         control_points_2d_init: (N_points, 2) 2D control points at init frame (for instance mask lookups)
         control_points_3d_init: (N_points, 3) 3D control points at init frame (for 3D distance computation)
-        depth_processed_dir: Directory containing depth maps at processed resolution
-        colmap_dir: Directory containing sparse/0/ Colmap data with camera parameters
-        image_files: List of image file paths (sorted by frame number)
+        geometry_npz_path: Path to DA3 mini_npz geometry dump with depth/conf/extrinsics/intrinsics
         init_frame_idx: Index of initialization frame
         instance_mask: (H, W) instance mask tensor (0=background, >0=instance IDs) on GPU
         k_neighbors: Number of nearest neighbors for association
         idw_power: Power parameter for inverse distance weighting
         pixel_stride: Stride for pixel subsampling
-        confidence_dir: Optional directory containing confidence maps
         conf_thresh_percentile: Confidence threshold percentile (0.0 = minimum, matches da3_to_single_view_colmap)
     
     Returns:
@@ -604,29 +466,22 @@ def compute_gaussian_control_point_associations(
             - instance_ids: (N_pixels,) instance ID per Gaussian (-1 for background if no mask)
     """
     device = control_points_3d_init.device
-    
+
+    # Load DA3 geometry and camera parameters
+    depth_all, conf_all, _, intrinsics_list, _, c2w_list = load_da3_geometry(geometry_npz_path)
+
     # Load depth map for init frame (already at processed resolution)
-    depth_files = sorted(depth_processed_dir.glob("*.npy"))
-    depth_map = np.load(str(depth_files[init_frame_idx]))  # (H, W) at processed resolution
+    depth_map = depth_all[init_frame_idx]
     processed_h, processed_w = depth_map.shape
-    
-    # Get original image resolution for coordinate scaling (COLMAP intrinsics are in original resolution)
-    first_image = Image.open(image_files[0])
-    W_original, H_original = first_image.size
+
+    # DA3 mini_npz depth is guaranteed to match original image resolution
+    W_original, H_original = processed_w, processed_h
     
     logger.info(f"Depth map at processed resolution ({processed_w}x{processed_h}), images at original ({W_original}x{H_original})")
     
-    # Compute confidence threshold if confidence maps are available
-    conf_thresh = None
-    if confidence_dir is not None and confidence_dir.exists():
-        # Load all confidence maps to compute percentile (matching da3_to_single_view_colmap)
-        conf_files = sorted(confidence_dir.glob("*.npy"))
-        if len(conf_files) > 0:
-            all_conf = np.stack([np.load(str(cf)) for cf in conf_files])  # (T, H, W)
-            print(f"max conf: {np.max(all_conf)}")
-            print(f"min conf: {np.min(all_conf)}")
-            conf_thresh = np.percentile(all_conf, conf_thresh_percentile)
-            logger.info(f"Computed confidence threshold: {conf_thresh} (percentile={conf_thresh_percentile})")
+    # Compute confidence threshold from DA3 confidence maps
+    conf_thresh = np.percentile(conf_all, conf_thresh_percentile)
+    logger.info(f"Computed confidence threshold: {conf_thresh} (percentile={conf_thresh_percentile})")
     
     # Resize instance mask to processed resolution to match depth map
     if instance_mask is not None:
@@ -661,22 +516,13 @@ def compute_gaussian_control_point_associations(
     # Use meshgrid to create coordinates in row-major order, then filter
     valid_pixels = (np.isfinite(depth_map) & (depth_map > 0))
     
-    # Apply confidence filtering if available (matching _depths_to_world_points_with_colors)
-    if conf_thresh is not None:
-        conf_files = sorted(confidence_dir.glob("*.npy"))
-        if init_frame_idx < len(conf_files):
-            conf_map_orig = np.load(str(conf_files[init_frame_idx]))  # (H_original, W_original) in original resolution
-            # Resize confidence map to processed resolution to match depth map
-            if (processed_w, processed_h) != (W_original, H_original):
-                conf_map = cv2.resize(
-                    conf_map_orig, (processed_w, processed_h), interpolation=cv2.INTER_NEAREST
-                )
-            else:
-                conf_map = conf_map_orig
-            # Apply same pixel stride subsampling as depth map
-            if pixel_stride > 1:
-                conf_map = conf_map[::pixel_stride, ::pixel_stride]
-            valid_pixels = valid_pixels & (conf_map >= conf_thresh)
+    # Apply confidence filtering (matching _depths_to_world_points_with_colors)
+    conf_map = conf_all[init_frame_idx]
+    if (processed_w, processed_h) != (W_original, H_original):
+        conf_map = cv2.resize(conf_map, (processed_w, processed_h), interpolation=cv2.INTER_NEAREST)
+    if pixel_stride > 1:
+        conf_map = conf_map[::pixel_stride, ::pixel_stride]
+    valid_pixels = valid_pixels & (conf_map >= conf_thresh)
     x_grid, y_grid = np.meshgrid(np.arange(W), np.arange(H))
     # Flatten to row-major order (same as reshape(-1))
     x_flat = x_grid.reshape(-1)
@@ -712,7 +558,6 @@ def compute_gaussian_control_point_associations(
     logger.info(f"Computing associations for {N_pixels} valid pixels (after pixel_stride={pixel_stride} subsampling, GPU-accelerated, 3D distances)...")
     
     # Load camera parameters for unprojecting pixels to 3D
-    intrinsics_list, c2w_list = load_colmap_camera_parameters(colmap_dir, image_files)
     K = torch.from_numpy(intrinsics_list[init_frame_idx]).float().to(device)  # (3, 3)
     c2w = torch.from_numpy(c2w_list[init_frame_idx]).float().to(device)  # (4, 4)
     

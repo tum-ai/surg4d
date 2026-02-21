@@ -188,7 +188,7 @@ def preprocess(clip: DictConfig, cfg: DictConfig):
     only_update_annotations = cfg.preprocess.only_update_annotations
 
     if not only_update_annotations:
-        out_images = clip_dir / "images"
+        out_images = clip_dir / cfg.preprocess.image_subdir
         out_images.mkdir(parents=True, exist_ok=True)
 
         out_sem_masks = clip_dir / cfg.preprocess.semantic_mask_subdir
@@ -205,6 +205,7 @@ def preprocess(clip: DictConfig, cfg: DictConfig):
         frame_stride=clip.frame_stride,
     )
 
+    # estimate crops to remove black borders
     top, bottom, left, right = estimate_crop_box(
         parse_cholecseg8k_instance_mask(Image.open(semantic_mask_files[0]))
     )

@@ -9,7 +9,6 @@ from typing import Dict, Any
 import cv2
 import re
 from PIL import Image
-import pycolmap
 
 from benchmark.graph_utils import get_coord_transformations
 from benchmark.serialization_utils import sanitize_tool_calls, parse_json
@@ -22,141 +21,55 @@ from llm.qwen_utils_vllm import (
     prompt_graph_agent_with_semantic_labels,
 )
 from llm.tools import GraphTools
-from utils.graphics_utils import getWorld2View2, getProjectionMatrix, focal2fov
+from utils.da3_geometry_utils import load_da3_geometry
 
 
 def project_3d_to_2d(
-    positions: np.ndarray, proj_matrix: torch.Tensor, img_width: int, img_height: int
+    positions: np.ndarray, intrinsic_matrix: torch.Tensor, w2c_matrix: torch.Tensor
 ) -> np.ndarray:
     # Expecting positions to be (N, 3)
     assert positions.shape[1] == 3, "Positions must be (N, 3)"
 
-    # Conver to homogeneous coordinates
+    # Convert world points to homogeneous coordinates
     positions = torch.tensor(
-        positions, device=proj_matrix.device, dtype=proj_matrix.dtype
+        positions, device=w2c_matrix.device, dtype=w2c_matrix.dtype
     )
     ones = torch.ones(
         (positions.shape[0], 1), dtype=positions.dtype, device=positions.device
     )
-    positions = torch.cat([positions, ones], dim=1)  # (N, 4)
+    positions_h = torch.cat([positions, ones], dim=1)  # (N, 4)
 
-    # Apply full projection transform: world to image space
-    # Apparently full_proj_transform is transposed, seems to be correct
-    coords = (proj_matrix.T @ positions.T).T  # (N, 4)
+    # World -> camera coordinates
+    points_cam_h = (w2c_matrix @ positions_h.T).T  # (N, 4)
+    points_cam = points_cam_h[:, :3]
 
-    # Perspective division to get NDC (Normalized Device Coordinates)
-    w = coords[:, 3]
-    ndc = coords[:, :3] / (w.unsqueeze(1) + 1e-7)  # (N, 3) [x, y, z] in [-1, 1]
+    # Camera -> pixel coordinates via intrinsics
+    fx = intrinsic_matrix[0, 0]
+    fy = intrinsic_matrix[1, 1]
+    cx = intrinsic_matrix[0, 2]
+    cy = intrinsic_matrix[1, 2]
 
-    # Convert NDC to pixel coordinates
-    # NDC: x, y in [-1, 1] → Pixel: u in [0, width], v in [0, height]
-    pixels_x = (ndc[:, 0] + 1.0) * 0.5 * img_width
-    pixels_y = (ndc[:, 1] + 1.0) * 0.5 * img_height
+    x_cam = points_cam[:, 0]
+    y_cam = points_cam[:, 1]
+    z_cam = points_cam[:, 2]
+
+    pixels_x = fx * (x_cam / z_cam) + cx
+    pixels_y = fy * (y_cam / z_cam) + cy
 
     pixels = np.stack([pixels_x, pixels_y], axis=-1)  # (N, 2)
     return pixels
 
 
-def project_3d_to_2d_and_mask(
-    positions: np.ndarray, proj_matrix: torch.Tensor, img_width: int, img_height: int
-) -> tuple[np.ndarray, np.ndarray]:
-    """Project 3D positions to pixels and return an in-frame visibility mask.
+def load_da3_projection_data(
+    geometry_npz_path: Path,
+) -> tuple[list[torch.Tensor], list[torch.Tensor], int, int]:
+    depth, _, _, intrinsics_list, w2c_list, _ = load_da3_geometry(geometry_npz_path)
+    h, w = int(depth.shape[1]), int(depth.shape[2])
 
-    Returns:
-        pixels: (N,2) float pixel coordinates (may fall outside if not masked)
-        in_frame_mask: (N,) boolean numpy array for points inside image and in front of camera
-    """
-    assert positions.shape[1] == 3, "Positions must be (N, 3)"
+    intrinsic_matrices = [torch.tensor(K, dtype=torch.float32) for K in intrinsics_list]
+    w2c_matrices = [torch.tensor(ext_w2c, dtype=torch.float32) for ext_w2c in w2c_list]
 
-    positions_t = torch.tensor(
-        positions, device=proj_matrix.device, dtype=proj_matrix.dtype
-    )
-    ones = torch.ones(
-        (positions_t.shape[0], 1), dtype=positions_t.dtype, device=positions_t.device
-    )
-    positions_h = torch.cat([positions_t, ones], dim=1)  # (N, 4)
-
-    coords = (proj_matrix.T @ positions_h.T).T  # (N, 4)
-    w = coords[:, 3]
-    ndc = coords[:, :3] / (w.unsqueeze(1) + 1e-7)
-
-    pixels_x = (ndc[:, 0] + 1.0) * 0.5 * img_width
-    pixels_y = (ndc[:, 1] + 1.0) * 0.5 * img_height
-    pixels = torch.stack([pixels_x, pixels_y], dim=-1)
-
-    in_front = w > 0
-    in_bounds_x = (pixels[..., 0] >= 0) & (pixels[..., 0] < img_width)
-    in_bounds_y = (pixels[..., 1] >= 0) & (pixels[..., 1] < img_height)
-    in_frame = (in_front & in_bounds_x & in_bounds_y).detach().cpu().numpy()
-
-    return pixels.detach().cpu().numpy(), in_frame
-
-
-def load_colmap_cams(colmap_sparse_dir: Path) -> dict:
-    reconstruction = pycolmap.Reconstruction(str(colmap_sparse_dir))
-    camera_index = {}
-
-    for _, image in reconstruction.images.items():
-        camera = reconstruction.cameras[image.camera_id]
-
-        model_name = str(camera.model)
-        params = np.asarray(camera.params)
-        if "PINHOLE" in model_name or "OPENCV" in model_name:
-            fx = float(params[0])
-            fy = float(params[1])
-        elif "SIMPLE_PINHOLE" in model_name or "SIMPLE_RADIAL" in model_name:
-            fx = float(params[0])
-            fy = float(params[0])
-        else:
-            raise ValueError(f"Unsupported COLMAP camera model: {model_name}")
-
-        fovx = focal2fov(fx, camera.width)
-        fovy = focal2fov(fy, camera.height)
-
-        cam_from_world = image.cam_from_world()
-        r_w2c = np.asarray(cam_from_world.rotation.matrix())
-        t_w2c = np.asarray(cam_from_world.translation)
-
-        camera_info = {
-            "R": r_w2c.T,
-            "T": t_w2c,
-            "FovX": fovx,
-            "FovY": fovy,
-            "width": int(camera.width),
-            "height": int(camera.height),
-        }
-
-        image_name = Path(image.name).name
-        image_stem = Path(image.name).stem
-        camera_index[image_name] = camera_info
-        camera_index[image_stem] = camera_info
-
-    return camera_index
-
-
-def get_proj_matrix_from_timestep(
-    timestep: int, camera_index: dict, frame: str
-) -> torch.Tensor:
-    del timestep
-    frame_stem = Path(frame).stem
-    camera_info = camera_index[frame] if frame in camera_index else camera_index[frame_stem]
-
-    world_view_transform = torch.tensor(
-        getWorld2View2(camera_info["R"], camera_info["T"]), dtype=torch.float32
-    ).transpose(0, 1)
-    projection_matrix = getProjectionMatrix(
-        znear=0.01,
-        zfar=100.0,
-        fovX=camera_info["FovX"],
-        fovY=camera_info["FovY"],
-    ).transpose(0, 1)
-
-    full_proj_matrix = (
-        world_view_transform.unsqueeze(0)
-        .bmm(projection_matrix.unsqueeze(0))
-        .squeeze(0)
-    )
-    return full_proj_matrix, camera_info["width"], camera_info["height"]
+    return intrinsic_matrices, w2c_matrices, w, h
 
 def qwen3_coords_to_pixels(
     x: float, y: float, img_width: int, img_height: int
@@ -271,9 +184,11 @@ def graph_agent_feat_queries(
     if len(tool_call_limits) == 0:
         tool_call_limits = None
 
-    # Cameras for projection (directly from COLMAP sparse/0)
-    colmap_sparse_dir = Path(cfg.preprocessed_root) / clip.name / "sparse" / "0"
-    camera_index = load_colmap_cams(colmap_sparse_dir)
+    # Cameras for projection (from DA3 mini_npz geometry export)
+    geometry_npz_path = (
+        Path(cfg.preprocessed_root) / clip.name / cfg.eval.spatial.geometry_npz_relpath
+    )
+    intrinsic_matrices, w2c_matrices, _, _ = load_da3_projection_data(geometry_npz_path)
 
     results = []
     for annotation in clip_gt:
@@ -284,10 +199,8 @@ def graph_agent_feat_queries(
         print(f"[{timestamp}] Running [{query_id}] with method [{method_name}]")
         timestep = annotation["timestep"]
         frame_number = timestep * cfg.eval.annotation_stride
-        frame_name = f"frame_{frame_number:06d}.png"
-        proj_matrix, img_width, img_height = get_proj_matrix_from_timestep(
-            int(frame_number), camera_index, frame_name
-        )
+        intrinsic_matrix = intrinsic_matrices[int(frame_number)]
+        w2c_matrix = w2c_matrices[int(frame_number)]
         question = annotation["query"]
         prompt = prompt_template.format(question=question)
         
@@ -338,7 +251,7 @@ def graph_agent_feat_queries(
                 graph_tools.stop_recording()
 
             # project to pixels
-            pixels = project_3d_to_2d(pos_arr_original, proj_matrix, img_width, img_height)
+            pixels = project_3d_to_2d(pos_arr_original, intrinsic_matrix, w2c_matrix)
             px, py = float(pixels[0, 0]), float(pixels[0, 1])
 
         results.append({

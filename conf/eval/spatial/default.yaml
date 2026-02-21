@@ -2,7 +2,8 @@ methods:
   - frame_direct
   - graph_agent_semantics
   - graph_agent_semantics_vision
-gt_filename: ${preprocessing.spatial_labels_output_filename}
+geometry_npz_relpath: ${extract_geometry.da3_subdir}/results.npz
+gt_filename: ${preprocess.spatial_labels_output_filename}
 output_dir: ${eval.output_dir}/spatial
 dump_visualizations: true
 visualizations_dir: ${eval.output_dir}/spatial_viz

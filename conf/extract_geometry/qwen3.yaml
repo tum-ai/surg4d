@@ -1,4 +1,7 @@
+image_subdir: ${preprocess.image_subdir}
+
 depth_subdir: depth
+da3_subdir: da3
 depth_processed_subdir: depth_processed
 confidence_subdir: confidence
 
@@ -7,6 +10,7 @@ da3_conf_thresh_percentile: 0.0
 da3_pc_pixel_stride: 3
 da3_densify_ratio: 1
 da3_edge_gradient_threshold: 0.1
+da3_vit_patch_size: 14
 
 verbose_output: false
 only_update_annotations: false

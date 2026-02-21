@@ -1,5 +1,6 @@
 semantic_mask_subdir: semantic_masks
 instance_mask_subdir: instance_masks
+image_subdir: images
 
 annotation_root: data/annotations
 annotation_stride: 4
@@ -7,7 +8,7 @@ spatial_labels_output_filename: spatial_annotations.json
 dump_label_visualizations: true
 label_viz_subdir: label_viz
 
-frames_divisor: 32
+frames_divisor: ${extract_geometry.da3_vit_patch_size}
 
 min_component_area: 5
 

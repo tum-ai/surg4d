@@ -10,7 +10,6 @@ from omegaconf import DictConfig
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from sklearn.neighbors import LocalOutlierFactor
-from utils.colmap_loader import read_points3D_binary
 
 from rerun_utils import (
     log_points_through_time,
@@ -273,17 +272,16 @@ def extract_graph(clip: DictConfig, cfg: DictConfig):
         torch.cuda.manual_seed_all(cfg.graph_extraction.random_seed)
 
     # load points
-    points_file = Path(cfg.preprocessed_root) / clip.name / cfg.graph_extraction.cotracker_subdir / "gaussian_positions_precomputed.pth"
-    points_through_time = torch.load(points_file).numpy()  # (T, N, 3)
+    points_file = Path(cfg.preprocessed_root) / clip.name / cfg.graph_extraction.cotracker_subdir / "point_positions_precomputed.npy"
+    points_through_time = np.load(points_file)  # (T, N, 3)
 
     # sumbsample temporally
     points_through_time = points_through_time[::cfg.graph_extraction.timestep_stride]
 
-    # load colors from COLMAP points3D.bin
-    points3d_bin_file = Path(cfg.preprocessed_root) / clip.name / "sparse" / "0" / "points3D.bin"
-    _, point_rgbs, _ = read_points3D_binary(points3d_bin_file)
-    ply_colors = point_rgbs.astype(np.float32) / 255.0
-    logger.info(f"Loaded {ply_colors.shape[0]} colors from {points3d_bin_file}")
+    # load point colors from CoTracker preprocessing
+    point_colors_file = Path(cfg.preprocessed_root) / clip.name / cfg.graph_extraction.cotracker_subdir / "point_colors.npy"
+    ply_colors = np.load(point_colors_file).astype(np.float32) / 255.0
+    logger.info(f"Loaded {ply_colors.shape[0]} point colors from {point_colors_file}")
     if points_through_time.shape[1] != ply_colors.shape[0]:
         logger.warning(
             f"number of colors ({ply_colors.shape[0]}) does not match number of gaussians ({points_through_time.shape[1]})"

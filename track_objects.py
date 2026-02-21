@@ -6,11 +6,11 @@ and computes Gaussian-to-control-point associations.
 from pathlib import Path
 import numpy as np
 import torch
+import json
+from PIL import Image
 from omegaconf import DictConfig
 from tqdm import tqdm
 import hydra
-from hydra.core.global_hydra import GlobalHydra
-import sys
 from loguru import logger
 
 
@@ -31,6 +31,33 @@ def extract_frame_number(filepath: Path) -> int:
     if match:
         return int(match.group(1))
     return 0
+
+
+def compute_point_colors(
+    image_files: list[Path],
+    point_pixel_coords: torch.Tensor,
+    point_frame_indices: torch.Tensor,
+) -> np.ndarray:
+    """Assign each point the RGB color at its source pixel in its source frame."""
+    point_coords_np = point_pixel_coords.cpu().numpy()
+    point_frame_indices_np = point_frame_indices.cpu().numpy()
+
+    n_points = point_coords_np.shape[0]
+    point_colors = np.zeros((n_points, 3), dtype=np.uint8)
+
+    for frame_idx in np.unique(point_frame_indices_np):
+        frame_idx = int(frame_idx)
+        frame_image = np.array(Image.open(image_files[frame_idx]).convert("RGB"))
+        h, w = frame_image.shape[:2]
+
+        frame_mask = point_frame_indices_np == frame_idx
+        frame_coords = point_coords_np[frame_mask]
+
+        x_coords = np.clip(frame_coords[:, 0].astype(np.int64), 0, w - 1)
+        y_coords = np.clip(frame_coords[:, 1].astype(np.int64), 0, h - 1)
+        point_colors[frame_mask] = frame_image[y_coords, x_coords]
+
+    return point_colors
 
 
 def compute_containment_ratio(
@@ -442,7 +469,7 @@ def track_objects(clip: DictConfig, cfg: DictConfig):
     """Process a single clip to extract CoTracker3 control points."""
     clip_dir = Path(cfg.preprocessed_root) / clip.name
     images_dir = clip_dir / "images"
-    depth_processed_dir = clip_dir / cfg.track_objects.depth_processed_subdir
+    geometry_npz_path = clip_dir / cfg.track_objects.geometry_npz_relpath
     instance_mask_dir = clip_dir / cfg.track_objects.instance_mask_subdir
     semantic_mask_dir = clip_dir / cfg.track_objects.semantic_mask_subdir
     
@@ -454,8 +481,8 @@ def track_objects(clip: DictConfig, cfg: DictConfig):
         logger.error(f"Images directory not found: {images_dir}")
         return
     
-    if not depth_processed_dir.exists():
-        logger.error(f"Processed depth directory not found: {depth_processed_dir}")
+    if not geometry_npz_path.exists():
+        logger.error(f"DA3 mini_npz geometry file not found: {geometry_npz_path}")
         return
     
     logger.info(f"Processing CoTracker3 for clip: {clip.name}")
@@ -490,13 +517,11 @@ def track_objects(clip: DictConfig, cfg: DictConfig):
     
     # Lift control points to 3D using DA3 depth and camera parameters
     logger.info("Lifting control points to 3D...")
-    colmap_dir = clip_dir / "sparse" / "0"
     depth_jump_threshold = cfg.track_objects.cotracker_depth_jump_threshold
     control_points_3d, control_points_2d = lift_control_points_to_3d(
         control_points_2d,
         visibility,
-        depth_processed_dir,
-        colmap_dir,
+        geometry_npz_path,
         image_files,
         depth_jump_threshold=depth_jump_threshold,
         save_dir=cotracker_dir,
@@ -505,8 +530,8 @@ def track_objects(clip: DictConfig, cfg: DictConfig):
     # control_points_2d: (T, N_valid, 2) - filtered to match
     
     # Save control point trajectories
-    control_points_3d_path = cotracker_dir / "control_points_3d.pth"
-    torch.save(control_points_3d.cpu(), control_points_3d_path)
+    control_points_3d_path = cotracker_dir / "control_points_3d.npy"
+    np.save(control_points_3d_path, control_points_3d.cpu().numpy())
     logger.info(f"Saved control points 3D: {control_points_3d_path}")
     
     # Compute Gaussian-to-control-point associations for multiple init frames
@@ -515,31 +540,25 @@ def track_objects(clip: DictConfig, cfg: DictConfig):
     init_frame_indices = [0, T // 2, T - 1]
     logger.info(f"Computing associations for init frames: {init_frame_indices}")
     
-    # Load confidence directory for filtering (matches da3_to_multi_view_colmap filtering)
-    confidence_dir = clip_dir / cfg.track_objects.confidence_subdir
-    
     # Compute associations for each init frame and concatenate
     all_indices = []
     all_weights = []
     all_instance_ids = []
     all_pixel_coords = []
     all_frame_indices = []
-    gaussians_per_frame = []
+    points_per_frame = []
     
     for init_frame_idx in init_frame_indices:
         logger.info(f"Computing associations for frame {init_frame_idx}...")
         associations = compute_gaussian_control_point_associations(
             control_points_2d[init_frame_idx],
             control_points_3d[init_frame_idx],
-            depth_processed_dir,
-            colmap_dir,
-            image_files,
+            geometry_npz_path,
             init_frame_idx,
             instance_masks[init_frame_idx] if instance_masks is not None else None,
             k_neighbors=cfg.track_objects.cotracker_k_neighbors,
             idw_power=cfg.track_objects.cotracker_idw_power,
             pixel_stride=cfg.track_objects.da3_pc_pixel_stride,
-            confidence_dir=confidence_dir,
             conf_thresh_percentile=cfg.track_objects.da3_conf_thresh_percentile,
         )
         
@@ -547,11 +566,11 @@ def track_objects(clip: DictConfig, cfg: DictConfig):
         all_weights.append(associations["weights"])
         all_instance_ids.append(associations["instance_ids"])
         all_pixel_coords.append(associations["valid_pixel_coords"])
-        # Store frame index for each gaussian
-        n_gaussians_frame = associations["indices"].shape[0]
-        all_frame_indices.append(torch.full((n_gaussians_frame,), init_frame_idx, dtype=torch.long))
-        gaussians_per_frame.append(n_gaussians_frame)
-        logger.info(f"Frame {init_frame_idx}: {n_gaussians_frame} Gaussians")
+        # Store frame index for each point
+        n_points_frame = associations["indices"].shape[0]
+        all_frame_indices.append(torch.full((n_points_frame,), init_frame_idx, dtype=torch.long))
+        points_per_frame.append(n_points_frame)
+        logger.info(f"Frame {init_frame_idx}: {n_points_frame} points")
     
     # Concatenate associations from all frames
     combined_indices = torch.cat(all_indices, dim=0)  # (N_total, K)
@@ -569,51 +588,60 @@ def track_objects(clip: DictConfig, cfg: DictConfig):
         combined_pixel_coords = combined_pixel_coords.repeat(cfg.track_objects.da3_densify_ratio, 1)
         combined_frame_indices = combined_frame_indices.repeat(cfg.track_objects.da3_densify_ratio)
 
-    total_gaussians = combined_indices.shape[0]
-    logger.info(f"Total Gaussians from all frames: {total_gaussians}")
-    logger.info(f"Gaussians per frame: {dict(zip(init_frame_indices, gaussians_per_frame))}")
-    
+    total_points = combined_indices.shape[0]
+    logger.info(f"Total points from all frames: {total_points}")
+    logger.info(f"Points per frame: {dict(zip(init_frame_indices, points_per_frame))}")
+
     # Save associations
-    indices_path = cotracker_dir / "gaussian_control_point_indices.pth"
-    weights_path = cotracker_dir / "gaussian_control_point_weights.pth"
-    
-    torch.save(combined_indices.cpu(), indices_path)
-    torch.save(combined_weights.cpu(), weights_path)
-    
-    # Also save the frame-wise counts for reference
-    frame_counts_path = cotracker_dir / "gaussians_per_init_frame.pth"
-    torch.save({
-        "init_frame_indices": init_frame_indices,
-        "gaussians_per_frame": gaussians_per_frame,
-    }, frame_counts_path)
-    
+    indices_path = cotracker_dir / "point_control_point_indices.npy"
+    weights_path = cotracker_dir / "point_control_point_weights.npy"
+
+    np.save(indices_path, combined_indices.cpu().numpy())
+    np.save(weights_path, combined_weights.cpu().numpy())
+
+    # Save frame-wise counts for reference
+    init_frame_indices_path = cotracker_dir / "init_frame_indices.npy"
+    points_per_init_frame_path = cotracker_dir / "points_per_init_frame.npy"
+    np.save(init_frame_indices_path, np.array(init_frame_indices, dtype=np.int64))
+    np.save(points_per_init_frame_path, np.array(points_per_frame, dtype=np.int64))
+
     logger.info(f"Saved associations: {indices_path}, {weights_path}")
+
+    # Save point colors in source frame/source pixel coordinates
+    point_colors = compute_point_colors(
+        image_files=image_files,
+        point_pixel_coords=combined_pixel_coords,
+        point_frame_indices=combined_frame_indices,
+    )
+    point_colors_path = cotracker_dir / "point_colors.npy"
+    np.save(point_colors_path, point_colors)
+    logger.info(f"Saved point colors: {point_colors_path} (shape: {point_colors.shape})")
     
-    # Precompute Gaussian positions for all timesteps
+    # Precompute point positions for all timesteps
     # control_points_3d stores 3D world coordinates (only valid points)
-    logger.info("Precomputing Gaussian positions...")
+    logger.info("Precomputing point positions...")
     
-    gaussian_positions = precompute_control_point_positions(
+    point_positions = precompute_control_point_positions(
         control_points_3d,
         combined_indices,
         combined_weights,
         save_dir=cotracker_dir,
     )
     
-    positions_path = cotracker_dir / "gaussian_positions_precomputed.pth"
-    torch.save(gaussian_positions.cpu(), positions_path)
+    positions_path = cotracker_dir / "point_positions_precomputed.npy"
+    np.save(positions_path, point_positions.cpu().numpy())
     logger.info(f"Saved precomputed positions: {positions_path}")
     
     # Save per-view instance assignments and positions for visualization
     per_view_data = []
     offset = 0
-    for frame_idx, n_gaussians_frame in zip(init_frame_indices, gaussians_per_frame):
+    for frame_idx, n_points_frame in zip(init_frame_indices, points_per_frame):
         # Account for densification
-        n_gaussians_densified = n_gaussians_frame * cfg.track_objects.da3_densify_ratio
+        n_points_densified = n_points_frame * cfg.track_objects.da3_densify_ratio
         
         # Extract data for this view
-        view_instance_ids = combined_instance_ids[offset:offset + n_gaussians_densified]
-        view_positions = gaussian_positions[:, offset:offset + n_gaussians_densified, :]  # (T, N_view, 3)
+        view_instance_ids = combined_instance_ids[offset:offset + n_points_densified]
+        view_positions = point_positions[:, offset:offset + n_points_densified, :]  # (T, N_view, 3)
         
         per_view_data.append({
             "frame_idx": frame_idx,
@@ -621,11 +649,18 @@ def track_objects(clip: DictConfig, cfg: DictConfig):
             "positions": view_positions.cpu(),
         })
         
-        offset += n_gaussians_densified
+        offset += n_points_densified
     
     # Save per-view data
-    per_view_path = cotracker_dir / "per_view_instances.pth"
-    torch.save(per_view_data, per_view_path)
+    per_view_path = cotracker_dir / "per_view_instances.npy"
+    per_view_data_serializable = []
+    for view_data in per_view_data:
+        per_view_data_serializable.append({
+            "frame_idx": int(view_data["frame_idx"]),
+            "instance_ids": view_data["instance_ids"].numpy(),
+            "positions": view_data["positions"].numpy(),
+        })
+    np.save(per_view_path, np.array(per_view_data_serializable, dtype=object), allow_pickle=True)
     logger.info(f"Saved per-view instance data: {per_view_path}")
     
     # Visualize per-view instances in Rerun
@@ -658,7 +693,7 @@ def track_objects(clip: DictConfig, cfg: DictConfig):
     )
     logger.info(f"Number of views: {len(per_view_data)}")
     for i, view_data in enumerate(per_view_data):
-        logger.info(f"  View {i}: frame {view_data['frame_idx']}, {view_data['instance_ids'].shape[0]} Gaussians")
+        logger.info(f"  View {i}: frame {view_data['frame_idx']}, {view_data['instance_ids'].shape[0]} points")
     
     reference_timestep = T // 2  # Use middle frame as reference
     logger.info(f"Using reference timestep {reference_timestep} of {T}")
@@ -672,12 +707,12 @@ def track_objects(clip: DictConfig, cfg: DictConfig):
     )
     
     logger.info(
-        f"Merge complete: {merged_instance_ids.shape[0]} Gaussians, "
+        f"Merge complete: {merged_instance_ids.shape[0]} points, "
         f"{len(np.unique(merged_instance_ids[merged_instance_ids >= 0]))} unique instances "
         f"(excluding background)"
     )
     
-    # Save merged instance IDs (one ID per Gaussian, joint for all views)
+    # Save merged instance IDs (one ID per point, joint for all views)
     merged_path = cotracker_dir / "merged_instance_ids.npy"
     np.save(merged_path, merged_instance_ids)
     logger.info(f"Saved merged instance IDs: {merged_path} (shape: {merged_instance_ids.shape})")
@@ -690,14 +725,13 @@ def track_objects(clip: DictConfig, cfg: DictConfig):
         combined_pixel_coords=combined_pixel_coords,
         combined_frame_indices=combined_frame_indices,
         init_frame_indices=init_frame_indices,
-        gaussians_per_frame=gaussians_per_frame,
+        gaussians_per_frame=points_per_frame,
         clip_dir=clip_dir,
         cfg=cfg,
     )
     
     # Save semantic labels dict
     semantic_labels_path = cotracker_dir / "merged_instance_semantic_labels.json"
-    import json
     with open(semantic_labels_path, "w") as f:
         json.dump(semantic_labels, f, indent=2)
     logger.info(f"Saved semantic labels: {semantic_labels_path}")
@@ -705,10 +739,10 @@ def track_objects(clip: DictConfig, cfg: DictConfig):
     
     # Log merged instances to Rerun (same file as per-view)
     logger.info("Logging merged instances to Rerun...")
-    gaussian_positions_numpy = gaussian_positions.cpu().numpy() if torch.is_tensor(gaussian_positions) else gaussian_positions
+    point_positions_numpy = point_positions.cpu().numpy() if torch.is_tensor(point_positions) else point_positions
     log_merged_instances(
         merged_instance_ids=merged_instance_ids,
-        positions_through_time=gaussian_positions_numpy,
+        positions_through_time=point_positions_numpy,
         timesteps=np.arange(T),
     )
     logger.info(f"Saved Rerun visualization to: {rrd_path}")
@@ -716,18 +750,8 @@ def track_objects(clip: DictConfig, cfg: DictConfig):
     logger.info(f"CoTracker preprocessing complete for {clip.name}")
 
 
-def main():
-    # do hydra init manually here to avoid conflicts
-    config_dir = Path(__file__).parent / "conf"
-    with hydra.initialize_config_dir(
-        config_dir=str(config_dir.resolve()), version_base="1.3"
-    ):
-        overrides = sys.argv[1:]
-        cfg = hydra.compose("config.yaml", overrides=overrides)
-    
-    # Clear after composing the main config
-    GlobalHydra.instance().clear()
-    
+@hydra.main(version_base="1.3", config_path="conf", config_name="config")
+def main(cfg: DictConfig):
     out_dir = Path(cfg.preprocessed_root)
     out_dir.mkdir(parents=True, exist_ok=True)
     

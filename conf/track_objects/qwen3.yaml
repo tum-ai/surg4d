@@ -1,7 +1,6 @@
 semantic_mask_subdir: ${preprocess.semantic_mask_subdir}
 instance_mask_subdir: ${preprocess.instance_mask_subdir}
-depth_processed_subdir: ${extract_geometry.depth_processed_subdir}
-confidence_subdir: ${extract_geometry.confidence_subdir}
+geometry_npz_relpath: ${extract_geometry.da3_subdir}/results.npz
 da3_densify_ratio: ${extract_geometry.da3_densify_ratio}
 da3_pc_pixel_stride: ${extract_geometry.da3_pc_pixel_stride}
 da3_conf_thresh_percentile: ${extract_geometry.da3_conf_thresh_percentile}

@@ -1,5 +1,5 @@
 graph_output_subdir: graph
-cotracker_subdir: ${preprocessing.cotracker_subdir}
+cotracker_subdir: ${preprocess.cotracker_subdir}
 
 # gaussian model params
 language_feature_hiddendim: ${splat.language_feature_hiddendim}

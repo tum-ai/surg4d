@@ -1,4 +1,4 @@
-gt_filename: ${preprocessing.spatial_labels_output_filename}
+gt_filename: ${preprocess.spatial_labels_output_filename}
 pred_root: ${eval.output_dir}/spatial
 output_dir: ${compute_metrics.output_dir}/spatial
 aggregated_output_filename: ${compute_metrics.spatial.output_dir}/aggregated.json

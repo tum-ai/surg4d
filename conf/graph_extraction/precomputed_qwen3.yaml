@@ -1,5 +1,5 @@
 graph_output_subdir: graph_precomputed
-cotracker_subdir: ${preprocessing.cotracker_subdir}
+cotracker_subdir: ${track_objects.cotracker_subdir}
 
 min_cluster_size: 50
 

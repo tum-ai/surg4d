@@ -3,6 +3,7 @@ Utilities for integrating CoTracker3 control points with GaussianModel.
 This module handles loading control point data and managing control-point-driven Gaussians.
 """
 from pathlib import Path
+import numpy as np
 import torch
 from typing import Optional, Tuple, Dict
 from loguru import logger
@@ -28,10 +29,10 @@ def load_cotracker_data(clip_dir: Path, cotracker_subdir: str) -> Dict[str, torc
         return None
     
     data = {
-        "control_points_3d": torch.load(cotracker_dir / "control_points_3d.pth"),
-        "gaussian_control_point_indices": torch.load(cotracker_dir / "gaussian_control_point_indices.pth"),
-        "gaussian_control_point_weights": torch.load(cotracker_dir / "gaussian_control_point_weights.pth"),
-        "gaussian_positions_precomputed": torch.load(cotracker_dir / "gaussian_positions_precomputed.pth"),
+        "control_points_3d": torch.from_numpy(np.load(cotracker_dir / "control_points_3d.npy")),
+        "gaussian_control_point_indices": torch.from_numpy(np.load(cotracker_dir / "point_control_point_indices.npy")),
+        "gaussian_control_point_weights": torch.from_numpy(np.load(cotracker_dir / "point_control_point_weights.npy")),
+        "gaussian_positions_precomputed": torch.from_numpy(np.load(cotracker_dir / "point_positions_precomputed.npy")),
     }
     
     logger.info(f"Loaded CoTracker data from {cotracker_dir}")
