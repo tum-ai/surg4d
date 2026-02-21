@@ -19,7 +19,7 @@ check the installed version and add them to the pixi task `install-python-deps`.
 
 2. Configure the pipeline via hydra in `conf`.
 
-3. Either run the steps for all clips independently
+3. Run all steps of the pipeline
     ```bash
     pixi run python preprocess.py
     pixi run python extract_geometry.py
@@ -27,9 +27,4 @@ check the installed version and add them to the pixi task `install-python-deps`.
     pixi run python extract_graphs.py
     pixi run python evaluate_benchmark.py
     pixi run python compute_metrics.py
-    ```
-
-4. Or run the whole pipeline in one go
-    ```bash
-    pixi run python run_pipeline.py
     ```
