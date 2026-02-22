@@ -313,7 +313,7 @@ def frame_direct_feat_queries(
 
         # parse and convert to pixels
         json_data = parse_json(response)
-        if json_data is None:
+        if json_data is None or "x" not in json_data or "y" not in json_data:
             px, py = None, None
             x, y = None, None
         else:

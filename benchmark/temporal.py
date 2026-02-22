@@ -174,17 +174,22 @@ def multiframe_queries(
         # parse answer and convert to timestep
         json_data = parse_json(response)
         if query_type == 'pit':
-            second = json_data.get("second", None)
+            second = json_data.get("second", None) if json_data is not None else None
             prediction = seconds_to_timestep(second, cfg.eval.n_timesteps, effective_fps)
         elif query_type == 'range':
-            second_ranges = json_data.get("second_ranges", None)
-            prediction = []
-            if second_ranges is not None:
+            second_ranges = json_data.get("second_ranges", None) if json_data is not None else None
+            if not isinstance(second_ranges, list):
+                prediction = None
+            else:
+                prediction = []
                 for second_range in second_ranges:
                     if not isinstance(second_range, list) or len(second_range) != 2:
                         prediction = None
-                        continue
-                    prediction.append([seconds_to_timestep(second_range[0], cfg.eval.n_timesteps, effective_fps), seconds_to_timestep(second_range[1], cfg.eval.n_timesteps, effective_fps)])
+                        break
+                    prediction.append([
+                        seconds_to_timestep(second_range[0], cfg.eval.n_timesteps, effective_fps),
+                        seconds_to_timestep(second_range[1], cfg.eval.n_timesteps, effective_fps),
+                    ])
         else:
             raise ValueError(f"Unsupported query type for {clip.name} {query_anno['id']}: {query_type}")
 
@@ -365,14 +370,16 @@ def graph_agent_queries(
         # Extract response (agent_result is a dict when tools are used)
         json_data = parse_json(agent_result["final_answer"])
         if query_type == 'pit':
-            prediction = json_data.get("timestep", None)
+            prediction = json_data.get("timestep", None) if json_data is not None else None
         elif query_type == 'range':
-            prediction = json_data.get("ranges", None)
+            prediction = json_data.get("ranges", None) if json_data is not None else None
             if not isinstance(prediction, list):
                 prediction = None
-            for range in prediction:
-                if not isinstance(range, list) or len(range) != 2:
-                    prediction = None
+            else:
+                for predicted_range in prediction:
+                    if not isinstance(predicted_range, list) or len(predicted_range) != 2:
+                        prediction = None
+                        break
         else:
             raise ValueError(f"Unsupported query type for {clip.name} {query_anno['id']}: {query_type}")
 

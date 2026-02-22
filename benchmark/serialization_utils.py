@@ -1,5 +1,5 @@
 """Utilities for JSON serialization of benchmark results."""
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import json
 
 
@@ -27,7 +27,7 @@ def sanitize_tool_calls(tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]
         sanitized.append(clean_tc)
     return sanitized
 
-def parse_json(response: str) -> Dict[str, Any]:
+def parse_json(response: str) -> Optional[Dict[str, Any]]:
     """Extract last valid JSON object from response.
     
     Tries to find the last valid JSON object by trying different starting positions.

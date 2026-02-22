@@ -13,7 +13,6 @@ import numpy as np
 import torch
 from PIL import Image
 from transformers import Qwen3VLProcessor
-from vllm import LLM, SamplingParams
 
 from .tools import IMAGE_PLACEHOLDER
 
@@ -23,7 +22,7 @@ NEW_TOKEN_LIMIT = 10000
 
 @dataclass
 class VLLMQwen3Model:
-    llm: LLM
+    llm: Any
     model_path: str
 
 
@@ -113,17 +112,25 @@ def get_qwen3(
     size: Literal["8B", "32B"] = "8B",
     use_fp8: bool = False,
     torch_dtype: torch.dtype = torch.bfloat16,
+    worker_multiproc_method: Literal["spawn", "fork"] = "spawn",
+    execute_model_timeout_seconds: int = 120,
+    gpu_memory_utilization: float = 0.9,
 ):
     model_path = _build_model_path(size=size, use_fp8=use_fp8)
-    os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-    _configure_runtime_build_env()
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = worker_multiproc_method
+    os.environ["VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"] = str(execute_model_timeout_seconds)
+    _configure_runtime_build_env() # need to do this before import
     _patch_video_metadata_for_vllm()
+    from vllm import LLM
 
     dtype_str = "auto" if use_fp8 else ("bfloat16" if torch_dtype == torch.bfloat16 else "float16")
 
     llm = LLM(
         model=model_path,
         dtype=dtype_str,
+        gpu_memory_utilization=gpu_memory_utilization,
+        enable_prefix_caching=True,
+        enable_chunked_prefill=True,
     )
 
     processor = Qwen3VLProcessor.from_pretrained(model_path)
@@ -143,7 +150,9 @@ def _set_generation_seed(seed: int) -> None:
 def _sampling_params(
     seed: int,
     max_new_tokens: int,
-) -> SamplingParams:
+) -> Any:
+    from vllm import SamplingParams
+
     kwargs: Dict[str, Any] = {
         "temperature": 0.8,
         "top_p": 0.95,

@@ -13,6 +13,9 @@ annotations_root: data/annotations
 # qwen
 qwen3_size: 32B
 qwen3_use_fp8: true
+vllm_worker_multiproc_method: spawn
+vllm_execute_model_timeout_seconds: 600
+vllm_gpu_memory_utilization: 0.75
 
 # Video metadata for all evaluations
 video_fps: 25  # Original video framerate (Cholec80 is 25 fps)

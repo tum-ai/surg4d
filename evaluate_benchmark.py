@@ -328,6 +328,9 @@ def main(cfg: DictConfig):
     model, processor = get_qwen3(
         size=cfg.eval.qwen3_size,
         use_fp8=cfg.eval.qwen3_use_fp8,
+        worker_multiproc_method=cfg.eval.vllm_worker_multiproc_method,
+        execute_model_timeout_seconds=cfg.eval.vllm_execute_model_timeout_seconds,
+        gpu_memory_utilization=cfg.eval.vllm_gpu_memory_utilization,
     )
 
     for clip in tqdm(cfg.clips, desc="Evaluating clips", unit="clip"):

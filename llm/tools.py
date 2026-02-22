@@ -12,6 +12,7 @@ from utils.rerun_utils import _compute_scene_extent
 
 
 IMAGE_PLACEHOLDER = "<image/>"
+RERUN_INITIALIZED = False
 
 # Percentile used to select boundary gaussians for KDTree contact/overlap calculations.
 # Lower values (e.g. 2) make the "boundary" smaller and reduce influence from outliers.
@@ -983,8 +984,11 @@ class GraphTools:
         self.call_counter = 0
         self.recording_active = True
         
-        # Initialize rerun and set output file
-        rr.init("tool_calls")
+        # Initialize rerun once globally and only switch output file per query
+        global RERUN_INITIALIZED
+        if not RERUN_INITIALIZED:
+            rr.init("tool_calls")
+            RERUN_INITIALIZED = True
         rr.save(rrd_file)
         
         # Log initial graph structure through all timesteps (use original coordinates)
