@@ -21,6 +21,8 @@ if str(SASVI_ROOT) not in sys.path:
     sys.path.insert(0, str(SASVI_ROOT))
 
 from train_scripts.train_mask2former_cholecseg import train as train_mask2former_cholecseg
+from train_scripts.train_maskrcnn_cholecseg import train as train_maskrcnn_cholecseg
+from train_scripts.train_DETR_cholecseg import train as train_detr_cholecseg
 
 
 def _as_absolute(path_like: str) -> Path:
@@ -46,9 +48,7 @@ def _build_training_root(cfg: DictConfig):
     train_root = _as_absolute(cfg.segment.train_data_root)
     excluded_clip_names = {clip.name for clip in cfg.clips}
 
-    if train_root.exists():
-        shutil.rmtree(train_root)
-    train_root.mkdir(parents=True, exist_ok=False)
+    train_root.mkdir(parents=True, exist_ok=True)
 
     all_clip_dirs = _collect_cholecseg8k_clip_dirs(source_root)
     included_clip_dirs = [
@@ -58,11 +58,13 @@ def _build_training_root(cfg: DictConfig):
     for clip_dir in tqdm(included_clip_dirs, desc="Preparing segment training clips", unit="clip"):
         rel_parent = clip_dir.parent.relative_to(source_root)
         target_clip_dir = train_root / rel_parent / clip_dir.name
-        target_clip_dir.mkdir(parents=True, exist_ok=False)
+        target_clip_dir.mkdir(parents=True, exist_ok=True)
 
         source_files = [path for path in clip_dir.iterdir() if path.is_file()]
         for source_file in tqdm(source_files, desc=f"Copying files for {clip_dir.name}", unit="file", leave=False):
             target_file = target_clip_dir / source_file.name
+            if target_file.exists():
+                continue
             shutil.copy2(source_file, target_file)
 
         watershed_files = sorted(clip_dir.glob("frame_*_endo_watershed_mask.png"))
@@ -74,6 +76,29 @@ def _build_training_root(cfg: DictConfig):
 
             class_ids = seg8k_endo_watershed_to_class_ids(Image.open(watershed_file))
             Image.fromarray(class_ids.astype(np.uint8)).save(id_mask_file)
+
+
+def _sync_tree_missing_files(source_root: Path, target_root: Path):
+    target_root.mkdir(parents=True, exist_ok=True)
+
+    source_files = [path for path in source_root.rglob("*") if path.is_file()]
+    for source_file in tqdm(source_files, desc=f"Syncing files to {target_root}", unit="file"):
+        rel_path = source_file.relative_to(source_root)
+        target_file = target_root / rel_path
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        if target_file.exists():
+            continue
+        shutil.copy2(source_file, target_file)
+
+
+def _resolve_training_data_dir(cfg: DictConfig) -> Path:
+    tmp_train_root = _as_absolute(cfg.segment.train_data_root)
+    if not cfg.segment.data_staging.use_ram:
+        return tmp_train_root
+
+    ram_train_root = Path(cfg.segment.data_staging.ram_train_data_root)
+    _sync_tree_missing_files(tmp_train_root, ram_train_root)
+    return ram_train_root
 
 
 def _latest_experiment_dir(log_dir: Path) -> Path:
@@ -105,15 +130,15 @@ def _resolve_checkpoint(cfg: DictConfig) -> Path:
 
 def _train_overseer(cfg: DictConfig):
     _build_training_root(cfg)
+    training_data_dir = _resolve_training_data_dir(cfg)
 
-    train_mask2former_cholecseg(
+    common_kwargs = dict(
         epochs=cfg.segment.train.epochs,
         steps=cfg.segment.train.steps,
         val_freq=cfg.segment.train.val_freq,
         batch_size=cfg.segment.train.batch_size,
         num_workers=cfg.segment.train.num_workers,
         weighted_sampling=cfg.segment.train.weighted_sampling,
-        weighted_loss=cfg.segment.train.weighted_loss,
         initial_lr=cfg.segment.train.initial_lr,
         betas=tuple(cfg.segment.train.betas),
         weight_decay=cfg.segment.train.weight_decay,
@@ -125,12 +150,34 @@ def _train_overseer(cfg: DictConfig):
         shift_ids_by_1=cfg.segment.train.shift_ids_by_1,
         components=cfg.segment.train.components,
         min_comp_fraction=cfg.segment.train.min_comp_fraction,
-        backbone=cfg.segment.backbone,
-        num_queries=cfg.segment.num_queries,
-        data_dir=_as_absolute(cfg.segment.train_data_root),
+        data_dir=training_data_dir,
         log_dir=Path(cfg.segment.log_dir),
         device=cfg.segment.device,
     )
+
+    if cfg.segment.sasvi.overseer_type == "Mask2Former":
+        train_mask2former_cholecseg(
+            **common_kwargs,
+            weighted_loss=cfg.segment.train.weighted_loss,
+            backbone=cfg.segment.backbone,
+            num_queries=cfg.segment.num_queries,
+        )
+    elif cfg.segment.sasvi.overseer_type == "MaskRCNN":
+        train_maskrcnn_cholecseg(
+            **common_kwargs,
+            hidden_ft=cfg.segment.hidden_ft,
+            backbone=cfg.segment.backbone,
+            trainable_backbone_layers=cfg.segment.trainable_backbone_layers,
+        )
+    elif cfg.segment.sasvi.overseer_type == "DETR":
+        train_detr_cholecseg(
+            **common_kwargs,
+            weighted_loss=cfg.segment.train.weighted_loss,
+            backbone=cfg.segment.backbone,
+            num_queries=cfg.segment.num_queries,
+        )
+    else:
+        raise ValueError(f"Unsupported overseer type for training: {cfg.segment.sasvi.overseer_type}")
 
 
 def _prepare_sasvi_base_video_dir(cfg: DictConfig):

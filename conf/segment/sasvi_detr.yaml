@@ -2,7 +2,7 @@ train_data_root: /tmp/surgery-scene-graphs/cholecseg8k_sasvi_train
 data_staging:
   use_ram: true
   ram_train_data_root: /dev/shm/surgery-scene-graphs/cholecseg8k_sasvi_train
-log_dir: output/segment/mask2former_cholecseg
+log_dir: output/segment/detr_cholecseg
 checkpoint_filename: best_val_dice.pth
 
 prediction_subdir: semantic_masks_sasvi_orig_res
@@ -10,9 +10,9 @@ prediction_subdir: semantic_masks_sasvi_orig_res
 run_training: true
 run_inference: true
 
-checkpoint_path: output/segment/mask2former_cholecseg/[latest]/best_val_dice.pth
+checkpoint_path: output/segment/detr_cholecseg/[latest]/best_val_dice.pth
 
-backbone: swin-base-coco-instance
+backbone: ResNet50
 num_queries: 20
 num_train_classes: 13
 
@@ -24,12 +24,12 @@ train:
   num_workers: 4
   weighted_sampling: false
   weighted_loss: false
-  initial_lr: 0.0001
+  initial_lr: 0.00001
   betas: [0.9, 0.999]
   weight_decay: 0.05
   scheduler_step_size: 200
   scheduler_gamma: 0.5
-  img_size: [299, 299]
+  img_size: [200, 200]
   img_norm: [0.0, 1.0]
   ignore_ids: [0]
   shift_ids_by_1: true
@@ -39,7 +39,7 @@ train:
 sasvi:
   sam2_cfg: configs/sam2.1_hiera_l.yaml
   sam2_checkpoint: submodules/SASVi/src/sam2/checkpoints/sam2.1_hiera_large.pt
-  overseer_type: Mask2Former
+  overseer_type: DETR
   dataset_type: CHOLECSEG8K
   base_video_dir: output/segment/sasvi/base_video_dir
   output_mask_dir: output/segment/sasvi/output_masks
