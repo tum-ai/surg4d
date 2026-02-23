@@ -325,6 +325,7 @@ def compute_directional_metrics(cfg: DictConfig):
     aggregated_file.parent.mkdir(parents=True, exist_ok=True)
 
     method_all_errors: dict[str, list[float]] = {}
+    method_all_non_neutral_axis_errors: dict[str, list[float]] = {}
     method_all_axis_errors: dict[str, dict[str, list[float]]] = {}
     method_all_axis_errors_by_gt_value: dict[str, dict[str, dict[int, list[float]]]] = {}
     method_all_parse_failures: dict[str, list[str]] = {}
@@ -350,6 +351,7 @@ def compute_directional_metrics(cfg: DictConfig):
         for method_name, method_preds in methods_preds.items():
             if method_name not in method_all_errors:
                 method_all_errors[method_name] = []
+                method_all_non_neutral_axis_errors[method_name] = []
                 method_all_axis_errors[method_name] = {"x": [], "y": [], "z": []}
                 method_all_axis_errors_by_gt_value[method_name] = {
                     "x": {-1: [], 0: [], 1: []},
@@ -359,6 +361,7 @@ def compute_directional_metrics(cfg: DictConfig):
                 method_all_parse_failures[method_name] = []
 
             method_errors: list[float] = []
+            method_non_neutral_axis_errors: list[float] = []
             method_axis_errors = {"x": [], "y": [], "z": []}
             method_axis_errors_by_gt_value = {
                 "x": {-1: [], 0: [], 1: []},
@@ -428,8 +431,21 @@ def compute_directional_metrics(cfg: DictConfig):
                 gy_int = int(gy)
                 gz_int = int(gz)
 
+                non_neutral_axis_errors: list[float] = []
+                if gx_int != 0:
+                    non_neutral_axis_errors.append(x_abs_error)
+                if gy_int != 0:
+                    non_neutral_axis_errors.append(y_abs_error)
+                if gz_int != 0:
+                    non_neutral_axis_errors.append(z_abs_error)
+                mean_non_neutral_axis_l1_distance = (
+                    float(np.mean(non_neutral_axis_errors)) if non_neutral_axis_errors else None
+                )
+
                 method_errors.append(l1_per_axis_mean)
                 method_all_errors[method_name].append(l1_per_axis_mean)
+                method_non_neutral_axis_errors.extend(non_neutral_axis_errors)
+                method_all_non_neutral_axis_errors[method_name].extend(non_neutral_axis_errors)
                 method_axis_errors["x"].append(x_abs_error)
                 method_axis_errors["y"].append(y_abs_error)
                 method_axis_errors["z"].append(z_abs_error)
@@ -457,14 +473,27 @@ def compute_directional_metrics(cfg: DictConfig):
                             "z": round(z_abs_error, 3),
                         },
                         "mean_axis_l1_distance": round(l1_per_axis_mean, 3),
+                        "mean_non_neutral_axis_l1_distance": (
+                            round(mean_non_neutral_axis_l1_distance, 3)
+                            if mean_non_neutral_axis_l1_distance is not None
+                            else None
+                        ),
                     }
                 )
 
             clip_results[method_name] = {
                 "queries": query_results,
                 "num_queries": len(query_results),
-                "mean_axis_l1_distance": round(float(np.mean(method_errors)), 3) if method_errors else None,
-                "std_axis_l1_distance": round(float(np.std(method_errors)), 3) if method_errors else None,
+                "mean_axis_l1_distance": (
+                    round(float(np.mean(method_non_neutral_axis_errors)), 3)
+                    if method_non_neutral_axis_errors
+                    else None
+                ),
+                "std_axis_l1_distance": (
+                    round(float(np.std(method_non_neutral_axis_errors)), 3)
+                    if method_non_neutral_axis_errors
+                    else None
+                ),
                 "mean_axis_l1_distance_per_axis": {
                     axis_name: (
                         round(float(np.mean(axis_errors)), 3) if axis_errors else None
@@ -494,9 +523,18 @@ def compute_directional_metrics(cfg: DictConfig):
 
     aggregated: dict[str, dict] = {}
     for method_name, errors in method_all_errors.items():
+        non_neutral_axis_errors = method_all_non_neutral_axis_errors[method_name]
         aggregated[method_name] = {
-            "mean_axis_l1_distance": round(float(np.mean(errors)), 3) if errors else None,
-            "std_axis_l1_distance": round(float(np.std(errors)), 3) if errors else None,
+            "mean_axis_l1_distance": (
+                round(float(np.mean(non_neutral_axis_errors)), 3)
+                if non_neutral_axis_errors
+                else None
+            ),
+            "std_axis_l1_distance": (
+                round(float(np.std(non_neutral_axis_errors)), 3)
+                if non_neutral_axis_errors
+                else None
+            ),
             "mean_axis_l1_distance_per_axis": {
                 axis_name: (
                     round(float(np.mean(axis_errors)), 3) if axis_errors else None
@@ -513,6 +551,7 @@ def compute_directional_metrics(cfg: DictConfig):
                 for axis_name, by_gt in method_all_axis_errors_by_gt_value[method_name].items()
             },
             "num_queries": len(errors),
+            "num_non_neutral_axes": len(non_neutral_axis_errors),
             "num_parsing_failures": len(method_all_parse_failures[method_name]),
             "parsing_failure_query_ids": method_all_parse_failures[method_name],
         }
