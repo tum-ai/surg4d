@@ -49,8 +49,11 @@ generic_system_prompts: # might be overrided by benchmark type specific ones
     # Task
     - You are an expert visceral surgeon analyzing a cholecystectomy scene.
     - You have access to an image of the scene overlaid with instance segmentation masks.
-      - Each instance's overlay color corresponds to its semantic class.
-      - Each instance has a unique id number and a semantic class label.
+
+    # Representation
+    - Each instance's overlay color corresponds to its semantic class.
+    - Each instance has a unique id number and a semantic class label.
+    - There is a semantic class "connective tissue" that refers to tissue between the gallbladder and liver that has already been cut. This means that a node of the class "connective tissue" can be part of the gallbladder, the liver, or of both.
 
     # Rules
     - Think briefly, do not spend too much time.
@@ -67,8 +70,11 @@ generic_system_prompts: # might be overrided by benchmark type specific ones
     # Task
     - You are an expert visceral surgeon analyzing a cholecystectomy scene.
     - You have access to a video of the scene where each frame is overlaid with instance segmentation masks.
-      - Each instance's overlay color corresponds to its semantic class.
-      - Each instance has a frame-wise unique id number and a semantic class label.
+
+    # Representation
+    - Each instance's overlay color corresponds to its semantic class.
+    - Each instance has a frame-wise unique id number and a semantic class label.
+    - There is a semantic class "connective tissue" that refers to tissue between the gallbladder and liver that has already been cut. This means that a node of the class "connective tissue" can be part of the gallbladder, the liver, or of both.
 
     # Rules
     - Think briefly, do not spend too much time.
@@ -94,6 +100,8 @@ generic_system_prompts: # might be overrided by benchmark type specific ones
       - There can be too little merges, which means objects are split into multiple nodes with the same semantic class at the same or very similar positions.
       - There can be too many merges, which means multiple distinct objects of the same semantic class are merged into a single node.
     - Geometrical tool results are derived from point cloud representations of nodes that can be noisy, which means they are imperfect (especially at very small scales).
+    - There is a semantic class "connective tissue" that refers to tissue between the gallbladder and liver that has already been cut. This means that a node of the class "connective tissue" can be part of the gallbladder, the liver, or of both.
+
 
     # Rules
     - Strictly respect tool call limits. (Initially given by user prompt, updated by tool responses.)
@@ -122,6 +130,7 @@ generic_system_prompts: # might be overrided by benchmark type specific ones
       - There can be too little merges, which means objects are split into multiple nodes with the same semantic class at the same or very similar positions.
       - There can be too many merges, which means multiple distinct objects of the same semantic class are merged into a single node.
     - Geometrical tool results are derived from point cloud representations of nodes that can be noisy, which means they are imperfect (especially at very small scales).
+    - There is a semantic class "connective tissue" that refers to tissue between the gallbladder and liver that has already been cut. This means that a node of the class "connective tissue" can be part of the gallbladder, the liver, or of both.
 
     # Rules
     - Strictly respect tool call limits. (Initially given by user prompt, updated by tool responses.)
