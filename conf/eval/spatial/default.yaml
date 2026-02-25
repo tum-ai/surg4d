@@ -1,6 +1,6 @@
 methods:
-  - frame_direct
-  - frame_direct_masks
+  # - frame_direct
+  # - frame_direct_masks
   - graph_agent_semantics
   - graph_agent_semantics_vision
 geometry_npz_relpath: ${extract_geometry.da3_subdir}/results.npz

@@ -23,7 +23,7 @@ annotation_stride: 4
 n_timesteps: 20
 
 # Required output directory for benchmark results
-output_dir: ${output_root}/pred_tmp
+output_dir: ${output_root}/predictions_final
 
 # Path configuration for evaluations
 # These define the directory structure for preprocessed data and outputs

@@ -1,0 +1,149 @@
+- name: video01_00240
+  video_id: 1
+  first_frame: 240
+  last_frame: 320
+  frame_stride: 1
+
+- name: video01_15019
+  video_id: 1
+  first_frame: 15019
+  last_frame: 15099
+  frame_stride: 1
+
+- name: video01_28580
+  video_id: 1
+  first_frame: 28580
+  last_frame: 28660
+  frame_stride: 1
+
+- name: video12_19500
+  video_id: 12
+  first_frame: 19500
+  last_frame: 19580
+  frame_stride: 1
+
+- name: video12_19660
+  video_id: 12
+  first_frame: 19660
+  last_frame: 19740
+  frame_stride: 1
+
+- name: video12_19740
+  video_id: 12
+  first_frame: 19740
+  last_frame: 19820
+  frame_stride: 1
+
+- name: video12_19980
+  video_id: 12
+  first_frame: 19980
+  last_frame: 20060
+  frame_stride: 1
+
+- name: video17_01563
+  video_id: 17
+  first_frame: 1563
+  last_frame: 1643
+  frame_stride: 1
+
+- name: video17_01803
+  video_id: 17
+  first_frame: 1803
+  last_frame: 1883
+  frame_stride: 1
+
+- name: video18_00979
+  video_id: 18
+  first_frame: 979
+  last_frame: 1059
+  frame_stride: 1
+
+- name: video20_03260
+  video_id: 20
+  first_frame: 3260
+  last_frame: 3340
+  frame_stride: 1
+
+# - name: video24_09676
+#   video_id: 24
+#   first_frame: 9676
+#   last_frame: 9756
+#   frame_stride: 1
+
+# - name: video24_09836
+#   video_id: 24
+#   first_frame: 9836
+#   last_frame: 9916
+#   frame_stride: 1
+
+# - name: video24_09916
+#   video_id: 24
+#   first_frame: 9916
+#   last_frame: 9996
+#   frame_stride: 1
+
+# - name: video25_00162
+#   video_id: 25
+#   first_frame: 162
+#   last_frame: 242
+#   frame_stride: 1
+
+# - name: video25_00402
+#   video_id: 25
+#   first_frame: 402
+#   last_frame: 482
+#   frame_stride: 1
+
+# - name: video25_00482
+#   video_id: 25
+#   first_frame: 482
+#   last_frame: 562
+#   frame_stride: 1
+
+# - name: video27_00640
+#   video_id: 27
+#   first_frame: 640
+#   last_frame: 720
+#   frame_stride: 1
+
+# - name: video28_00320
+#   video_id: 28
+#   first_frame: 320
+#   last_frame: 400
+#   frame_stride: 1
+
+# - name: video35_00940
+#   video_id: 35
+#   first_frame: 940
+#   last_frame: 1020
+#   frame_stride: 1
+
+# - name: video43_00787
+#   video_id: 43
+#   first_frame: 787
+#   last_frame: 867
+#   frame_stride: 1
+
+# - name: video48_00641
+#   video_id: 48
+#   first_frame: 641
+#   last_frame: 721
+#   frame_stride: 1
+
+# - name: video52_00160
+#   video_id: 52
+#   first_frame: 160
+#   last_frame: 240
+#   frame_stride: 1
+
+# - name: video52_02826
+#   video_id: 52
+#   first_frame: 2826
+#   last_frame: 2906
+#   frame_stride: 1
+
+# - name: video55_00588
+#   video_id: 55
+#   first_frame: 588
+#   last_frame: 668
+#   frame_stride: 1

@@ -1,6 +1,6 @@
 methods:
-  - multiframe
-  - multiframe_masks
+  # - multiframe
+  # - multiframe_masks
   - graph_agent_semantics
   - graph_agent_semantics_vision
 output_dir: ${eval.output_dir}/directional

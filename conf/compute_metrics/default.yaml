@@ -15,4 +15,4 @@ annotation_stride: ${eval.annotation_stride}
 n_timesteps: ${eval.n_timesteps}
 
 # Required output directory for benchmark results
-output_dir: ${output_root}/metrics_tmp
+output_dir: ${output_root}/metrics_final

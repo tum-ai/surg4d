@@ -12,7 +12,7 @@ defaults:
 cholecseg8k_root: data/cholecseg8k
 
 preprocessed_root: data/preprocessed/clean
-output_root: output/clean
+output_root: output/final
 
 seed: 1234
 

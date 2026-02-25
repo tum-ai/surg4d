@@ -1,4 +1,4 @@
-graph_output_subdir: graph_precomputed_sasvi_nodepthmaintenance
+graph_output_subdir: graph_final
 cotracker_subdir: ${track_objects.cotracker_subdir}
 
 min_cluster_size: 50

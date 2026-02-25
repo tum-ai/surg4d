@@ -5,16 +5,16 @@ da3_densify_ratio: ${extract_geometry.da3_densify_ratio}
 da3_pc_pixel_stride: ${extract_geometry.da3_pc_pixel_stride}
 da3_conf_thresh_percentile: ${extract_geometry.da3_conf_thresh_percentile}
 
-cotracker_subdir: cotracker_semantics_sasvi_nodepthmaintenance
+cotracker_subdir: cotracker_final
 cotracker_n_points_per_frame: 4096
 cotracker_depth_jump_threshold: 0.1
 cotracker_k_neighbors: 3
 cotracker_idw_power: 2.0
 
-# ablations
+# ablations - settings here are top performing method
 cotracker_filter_depth_jumps: true
-cotracker_init_from_multiple_frames: true
-cotracker_fill_occlusions: false
+cotracker_init_from_multiple_frames: false
+cotracker_fill_occlusions: true
 
 instance_merge_containment_threshold: 0.2
 instance_merge_containment_radius: 2.5
