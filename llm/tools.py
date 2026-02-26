@@ -24,7 +24,7 @@ spec_node_distances_through_time = {
     "type": "function",
     "function": {
         "name": "node_distances_through_time",
-        "description": f"Returns the distances between two nodes for all timesteps. The distances are computed as percentile(distances_ascending(points_node_1, points_node_2), {BOUNDARY_PERCENTILE}), which means they are approximative. Relative distances can be compared across timesteps, but absolute distance values should be interpreted with caution.",
+        "description": f"Returns the distances between two nodes for all timesteps. The distances are computed as percentile(distances_ascending(points_node_1, points_node_2), {BOUNDARY_PERCENTILE}), which means they are approximative. **Interpretation:** Relative distances can be compared across timesteps, but absolute distance values should be interpreted with caution, especially at sub 1cm scales.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -205,7 +205,7 @@ spec_node_overlap_scores_through_time = {
     "type": "function",
     "function": {
         "name": "node_overlap_scores_through_time",
-        "description": "Returns the spatial overlap scores (Bhattacharyya coefficients) between two graph nodes at all timesteps. Higher values (closer to 1) indicate greater spatial overlap between the nodes' gaussian distributions; lower values (closer to 0) indicate the nodes are spatially separated. Note that Bhattacharyya coefficients are computed for a single Gaussian approximation of each node, so the scores are only a rough estimate of true spatial overlap. Relative overlap scores can be compared across timesteps, but absolute values should be interpreted with caution.",
+        "description": "Returns Bhattacharyya coefficients between two graph nodes at all timesteps. Higher values (closer to 1) indicate greater spatial overlap, lower values (closer to 0) indicate the nodes are spatially separated. **Interpretation:** Bhattacharyya coefficients approximate the pointcloud of each node as a single Gaussian, so the scores are only a rough estimate of true spatial overlap. Relative overlap scores can be compared across timesteps, but absolute values should be interpreted with caution. For example, you will often have small, positive Bhattacharyya coefficients even for nodes that do not touch.",
         "parameters": {
             "type": "object",
             "properties": {
