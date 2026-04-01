@@ -1,8 +1,15 @@
 """Build project-page Rerun .rrd assets without touching preprocessed data or ``output/`` graphs.
 
-1) **Graph clips** (interactive triptych): recomputes the same graph + point cloud pipeline as
-   ``extract_graphs.py`` from preprocessed numpy (points, colors, instance ids), then logs only
-   to ``project_page/assets/rrd/<clip>/graph_final/visualization.rrd`` — no ``.npy`` writes.
+1) **Graph clips** (interactive triptych): recomputes the same point-cloud pipeline as
+   ``extract_graphs.py`` from preprocessed numpy (points, colors, instance ids), then writes **two**
+   recordings under ``<repo>/project_page/assets/rrd/<clip>/<graph_subdir>/``:
+   ``visualization_rgb.rrd`` (RGB point cloud) and ``visualization_semantic.rrd`` (per-cluster
+   semantic colors). No graph edges, cluster means, or ``.npy`` writes.
+
+   Config paths ``preprocessed_root`` / ``output_root`` are resolved against the **dataset checkout**
+   (see ``_dataset_checkout_root()``): set env ``SURG4D_DATA_CHECKOUT`` to that repo, or place a
+   ``surgery-scene-graphs`` sibling next to this repo; otherwise paths are relative to the surg4d
+   repo root.
 
 2) **Tool-viz recordings** (spatial / temporal / directional): replays ``tool_calls`` from the
    per-clip prediction JSONs under ``output_root/predictions_final/{spatial|temporal|directional}/``
@@ -10,18 +17,28 @@
    existing ``output_root`` ``.rrd`` at the same relative path as the asset (e.g.
    ``predictions_final/tool_viz/...``).
 
-Uses Hydra ``conf/config.yaml`` (same stack as the project: ``graph_extraction: sasvi_masks``, etc.).
+Uses Hydra ``conf/config.yaml`` at the surg4d repo root (``config_path`` is relative to this file).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
+
+# This file lives under project_page/; repo-root packages (benchmark, extract_graphs, llm, …)
+# are imported from the surg4d parent directory.
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _SCRIPT_DIR.parent
+_repo_root_str = str(_REPO_ROOT)
+if _repo_root_str not in sys.path:
+    sys.path.insert(0, _repo_root_str)
 
 import hydra
 import numpy as np
@@ -31,20 +48,39 @@ from benchmark.serialization_utils import parse_json
 from extract_graphs import (
     filter_and_reindex_clusters,
     load_precomputed_instance_clusters,
-    properties_through_time,
     temporal_lof_outlier_mask,
-    timestep_graph,
 )
-from hydra.utils import get_original_cwd
 from llm.tools import GraphTools
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from rerun.blueprint import Blueprint, Spatial3DView, TimePanel
-from rerun.blueprint.components import LoopMode
 from rerun.blueprint.archetypes import Background, LineGrid3D
 
 logger = logging.getLogger(__name__)
 
-# Clips used in index.html for graph_final/visualization.rrd
+
+def _dataset_checkout_root() -> Path:
+    """Root where ``data/`` and ``output/`` from config.yaml live (often full surgery-scene-graphs checkout)."""
+    env = os.environ.get("SURG4D_DATA_CHECKOUT")
+    if env:
+        return Path(env).expanduser().resolve()
+    for candidate in (
+        _REPO_ROOT.parent / "surgery-scene-graphs",
+        _REPO_ROOT.parent.parent / "surgery-scene-graphs",
+    ):
+        if candidate.is_dir():
+            return candidate.resolve()
+    return _REPO_ROOT.resolve()
+
+
+def resolve_dataset_path(cfg: DictConfig, key: str) -> Path:
+    """Resolve ``cfg.preprocessed_root`` / ``cfg.output_root`` against the dataset checkout."""
+    p = Path(cfg[key])
+    if p.is_absolute():
+        return p
+    return _dataset_checkout_root() / p
+
+
+# Clips used in index.html for graph_final visualization .rrd files
 GRAPH_CLIP_NAMES: frozenset[str] = frozenset(
     {"video01_28580", "video12_19500", "video17_01563"}
 )
@@ -60,78 +96,78 @@ class ToolVizReplaySpec:
 
 
 TOOL_VIZ_REPLAY_SPECS: tuple[ToolVizReplaySpec, ...] = (
-    ToolVizReplaySpec(
-        "predictions_final/tool_viz/spatial/video24_09676/graph_agent_semantics_t015_video24_09676_spatial_0_Where_is_the_grasper_in_the_back_gripping_the_gall.rrd",
-        "spatial",
-        "video24_09676",
-        "video24_09676_spatial_0",
-    ),
-    ToolVizReplaySpec(
-        "predictions_final/tool_viz/spatial/video12_19980/graph_agent_semantics_t018_video12_19980_spatial_0_Where_is_the_l-hook_coagulating_the_gallbladder.rrd",
-        "spatial",
-        "video12_19980",
-        "video12_19980_spatial_0",
-    ),
-    ToolVizReplaySpec(
-        "predictions_final/tool_viz/spatial/video12_19500/graph_agent_semantics_t007_video12_19500_spatial_1_Where_is_the_grasper_behind_the_l-hook_holding_the.rrd",
-        "spatial",
-        "video12_19500",
-        "video12_19500_spatial_1",
-    ),
-    ToolVizReplaySpec(
-        "predictions_final/tool_viz/spatial/video17_01803/graph_agent_semantics_t013_video17_01803_spatial_0_Where_does_the_grasper_grip_the_gallbladder.rrd",
-        "spatial",
-        "video17_01803",
-        "video17_01803_spatial_0",
-    ),
-    ToolVizReplaySpec(
-        "predictions_final/tool_viz/spatial/video55_00588/graph_agent_semantics_t016_video55_00588_spatial_2_Where_is_the_l-hook_hooked_into_the_connective_tis.rrd",
-        "spatial",
-        "video55_00588",
-        "video55_00588_spatial_2",
-    ),
-    ToolVizReplaySpec(
-        "predictions_final/tool_viz/spatial/video52_02826/graph_agent_semantics_t004_video52_02826_spatial_0_Where_is_the_front_grasper_gripping_the_gallbladde.rrd",
-        "spatial",
-        "video52_02826",
-        "video52_02826_spatial_0",
-    ),
-    ToolVizReplaySpec(
-        "predictions_final/tool_viz/spatial/video52_02826/graph_agent_semantics_t004_video52_02826_spatial_1_Where_is_the_back_grasper_gripping_the_gallbladder.rrd",
-        "spatial",
-        "video52_02826",
-        "video52_02826_spatial_1",
-    ),
-    ToolVizReplaySpec(
-        "predictions_final/tool_viz/temporal/video01_28580/graph_agent_semantics_video01_28580_temporal_rng_1_When_is_the_l-hook_touching_the_gallbladder.rrd",
-        "temporal",
-        "video01_28580",
-        "video01_28580_temporal_rng_1",
-    ),
-    ToolVizReplaySpec(
-        "predictions_final/tool_viz/directional/video25_00402/graph_agent_semantics_video25_00402_directional_1_In_which_direction_is_the_liver_moving.rrd",
-        "directional",
-        "video25_00402",
-        "video25_00402_directional_1",
-    ),
-    ToolVizReplaySpec(
-        "predictions_final/tool_viz/directional/video52_00160/graph_agent_semantics_video52_00160_directional_1_In_which_direction_is_the_gallbladder_moving.rrd",
-        "directional",
-        "video52_00160",
-        "video52_00160_directional_1",
-    ),
-    ToolVizReplaySpec(
-        "predictions_final/tool_viz/directional/video52_00160/graph_agent_semantics_video52_00160_directional_2_In_which_direction_is_the_liver_moving.rrd",
-        "directional",
-        "video52_00160",
-        "video52_00160_directional_2",
-    ),
-    ToolVizReplaySpec(
-        "predictions_final/tool_viz/directional/video43_00787/graph_agent_semantics_video43_00787_directional_0_In_which_direction_is_the_grasper_pulling_the_gall.rrd",
-        "directional",
-        "video43_00787",
-        "video43_00787_directional_0",
-    ),
+    # ToolVizReplaySpec(
+    #     "predictions_final/tool_viz/spatial/video24_09676/graph_agent_semantics_t015_video24_09676_spatial_0_Where_is_the_grasper_in_the_back_gripping_the_gall.rrd",
+    #     "spatial",
+    #     "video24_09676",
+    #     "video24_09676_spatial_0",
+    # ),
+    # ToolVizReplaySpec(
+    #     "predictions_final/tool_viz/spatial/video12_19980/graph_agent_semantics_t018_video12_19980_spatial_0_Where_is_the_l-hook_coagulating_the_gallbladder.rrd",
+    #     "spatial",
+    #     "video12_19980",
+    #     "video12_19980_spatial_0",
+    # ),
+    # ToolVizReplaySpec(
+    #     "predictions_final/tool_viz/spatial/video12_19500/graph_agent_semantics_t007_video12_19500_spatial_1_Where_is_the_grasper_behind_the_l-hook_holding_the.rrd",
+    #     "spatial",
+    #     "video12_19500",
+    #     "video12_19500_spatial_1",
+    # ),
+    # ToolVizReplaySpec(
+    #     "predictions_final/tool_viz/spatial/video17_01803/graph_agent_semantics_t013_video17_01803_spatial_0_Where_does_the_grasper_grip_the_gallbladder.rrd",
+    #     "spatial",
+    #     "video17_01803",
+    #     "video17_01803_spatial_0",
+    # ),
+    # ToolVizReplaySpec(
+    #     "predictions_final/tool_viz/spatial/video55_00588/graph_agent_semantics_t016_video55_00588_spatial_2_Where_is_the_l-hook_hooked_into_the_connective_tis.rrd",
+    #     "spatial",
+    #     "video55_00588",
+    #     "video55_00588_spatial_2",
+    # ),
+    # ToolVizReplaySpec(
+    #     "predictions_final/tool_viz/spatial/video52_02826/graph_agent_semantics_t004_video52_02826_spatial_0_Where_is_the_front_grasper_gripping_the_gallbladde.rrd",
+    #     "spatial",
+    #     "video52_02826",
+    #     "video52_02826_spatial_0",
+    # ),
+    # ToolVizReplaySpec(
+    #     "predictions_final/tool_viz/spatial/video52_02826/graph_agent_semantics_t004_video52_02826_spatial_1_Where_is_the_back_grasper_gripping_the_gallbladder.rrd",
+    #     "spatial",
+    #     "video52_02826",
+    #     "video52_02826_spatial_1",
+    # ),
+    # ToolVizReplaySpec(
+    #     "predictions_final/tool_viz/temporal/video01_28580/graph_agent_semantics_video01_28580_temporal_rng_1_When_is_the_l-hook_touching_the_gallbladder.rrd",
+    #     "temporal",
+    #     "video01_28580",
+    #     "video01_28580_temporal_rng_1",
+    # ),
+    # ToolVizReplaySpec(
+    #     "predictions_final/tool_viz/directional/video25_00402/graph_agent_semantics_video25_00402_directional_1_In_which_direction_is_the_liver_moving.rrd",
+    #     "directional",
+    #     "video25_00402",
+    #     "video25_00402_directional_1",
+    # ),
+    # ToolVizReplaySpec(
+    #     "predictions_final/tool_viz/directional/video52_00160/graph_agent_semantics_video52_00160_directional_1_In_which_direction_is_the_gallbladder_moving.rrd",
+    #     "directional",
+    #     "video52_00160",
+    #     "video52_00160_directional_1",
+    # ),
+    # ToolVizReplaySpec(
+    #     "predictions_final/tool_viz/directional/video52_00160/graph_agent_semantics_video52_00160_directional_2_In_which_direction_is_the_liver_moving.rrd",
+    #     "directional",
+    #     "video52_00160",
+    #     "video52_00160_directional_2",
+    # ),
+    # ToolVizReplaySpec(
+    #     "predictions_final/tool_viz/directional/video43_00787/graph_agent_semantics_video43_00787_directional_0_In_which_direction_is_the_grasper_pulling_the_gall.rrd",
+    #     "directional",
+    #     "video43_00787",
+    #     "video43_00787_directional_0",
+    # ),
 )
 
 
@@ -171,26 +207,16 @@ def _project_page_blueprint() -> Blueprint:
     )
 
 
-def log_points_through_time_project_page(
-    clusters: np.ndarray,
-    cluster_colors: np.ndarray,
+def log_rgb_points_through_time(
     pos_through_time: np.ndarray,
     point_colors: np.ndarray,
-    cluster_pos_through_time: np.ndarray,
-    semantic_labels: dict[int, str] | None,
 ) -> None:
-    """Same structure as ``utils.rerun_utils.log_points_through_time`` (project-page variant)."""
-    cluster_ids = np.unique(clusters)
-
+    """Log only the RGB-colored point cloud at ``rgb``."""
     for i in range(len(pos_through_time)):
         rr.set_time("timestep", sequence=i)
         pos = pos_through_time[i]
-        cluster_means = cluster_pos_through_time[i]
-
         scene_extent = _compute_scene_extent(pos)
         point_radius = max(scene_extent * 0.005, 1e-5)
-        mean_radius = max(scene_extent * 0.015, point_radius * 3.0)
-
         rr.log(
             "rgb",
             rr.Points3D(
@@ -200,9 +226,22 @@ def log_points_through_time_project_page(
             ),
         )
 
+
+def log_semantic_points_through_time(
+    clusters: np.ndarray,
+    cluster_colors: np.ndarray,
+    pos_through_time: np.ndarray,
+) -> None:
+    """Log per-cluster semantic-colored points under ``semantic/points/{id}`` (no means/edges)."""
+    cluster_ids = np.unique(clusters)
+    for i in range(len(pos_through_time)):
+        rr.set_time("timestep", sequence=i)
+        pos = pos_through_time[i]
+        scene_extent = _compute_scene_extent(pos)
+        point_radius = max(scene_extent * 0.005, 1e-5)
         for c in cluster_ids:
             rr.log(
-                f"clusters/points/{c}",
+                f"semantic/points/{c}",
                 rr.Points3D(
                     positions=pos[clusters == c],
                     colors=cluster_colors[clusters == c],
@@ -210,87 +249,42 @@ def log_points_through_time_project_page(
                 ),
             )
 
-        mean_colors = np.stack([cluster_colors[clusters == c][0] for c in cluster_ids])
-        mean_labels = None
-        if semantic_labels is not None:
-            mean_labels = []
-            for c in cluster_ids:
-                if c in semantic_labels:
-                    mean_labels.append(f"Semantic: {semantic_labels[c]}")
-                else:
-                    mean_labels.append(None)
 
-        means_viz = rr.Points3D(
-            positions=cluster_means,
-            colors=mean_colors,
-            radii=mean_radius,
-            labels=mean_labels,
-            show_labels=False,
-        )
-        rr.log("clusters/means", means_viz)
+def _disconnect_rerun_recording() -> None:
+    try:
+        rr.disconnect()
+    except Exception:
+        pass
 
 
-def log_graph_structure_through_time_project_page(
-    cluster_pos_through_time: np.ndarray,
-    graphs_through_time: np.ndarray,
+def _write_single_graph_rrd(rrd_path: Path, log_fn: Callable[[], None]) -> None:
+    rrd_path.parent.mkdir(parents=True, exist_ok=True)
+    if rrd_path.exists():
+        rrd_path.unlink()
+    rr.init("graph_export")
+    rr.send_blueprint(_project_page_blueprint())
+    rr.save(str(rrd_path))
+    rr.log("/", rr.ViewCoordinates.RDF, static=True)
+    log_fn()
+    _disconnect_rerun_recording()
+
+
+def recompute_graph_and_log_rrds(
+    clip: DictConfig,
+    cfg: DictConfig,
+    rrd_rgb_out: Path,
+    rrd_semantic_out: Path,
 ) -> None:
-    """Same structure as ``utils.rerun_utils.log_graph_structure_through_time``."""
-    num_timesteps = len(graphs_through_time)
-    for i in range(num_timesteps):
-        rr.set_time("timestep", sequence=i)
-        cluster_means = cluster_pos_through_time[i]
-        A = graphs_through_time[i]
-
-        if A.shape[0] == 0:
-            continue
-
-        rr.log("clusters/edges", rr.Clear(recursive=True))
-
-        edge_indices = np.where(A > 0)
-        if len(edge_indices[0]) == 0:
-            continue
-
-        edge_weights = A[edge_indices]
-
-        scene_extent = _compute_scene_extent(cluster_means)
-
-        if len(edge_weights) > 1:
-            min_weight = edge_weights.min()
-            max_weight = edge_weights.max()
-            if max_weight > min_weight:
-                normalized_weights = (edge_weights - min_weight) / (max_weight - min_weight)
-            else:
-                normalized_weights = np.ones_like(edge_weights)
-        else:
-            normalized_weights = np.ones_like(edge_weights)
-
-        for idx, (u, v) in enumerate(zip(edge_indices[0], edge_indices[1])):
-            if u < v:
-                start_pos = cluster_means[u]
-                end_pos = cluster_means[v]
-                weight = normalized_weights[idx]
-
-                color = [0, 0, 0]
-                thickness = max(scene_extent * (0.002 + 0.008 * weight), 1e-5)
-
-                edge_line = rr.LineStrips3D(
-                    strips=[[start_pos, end_pos]],
-                    colors=[color],
-                    radii=[thickness],
-                )
-                rr.log(f"clusters/edges/edge_{idx}", edge_line)
-
-
-def recompute_graph_and_log_rrd(clip: DictConfig, cfg: DictConfig, rrd_out: Path) -> None:
-    """Mirror ``extract_graphs.extract_graph`` but only write ``rrd_out`` (no graph_final npy)."""
+    """Recompute point cloud from preprocessed numpy; write RGB and semantic .rrd files (no graph npy)."""
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(cfg.seed)
 
+    pre_root = resolve_dataset_path(cfg, "preprocessed_root")
     points_file = (
-        Path(cfg.preprocessed_root)
+        pre_root
         / clip.name
         / cfg.graph_extraction.cotracker_subdir
         / "point_positions_precomputed.npy"
@@ -299,7 +293,7 @@ def recompute_graph_and_log_rrd(clip: DictConfig, cfg: DictConfig, rrd_out: Path
     points_through_time = points_through_time[:: cfg.graph_extraction.timestep_stride]
 
     point_colors_file = (
-        Path(cfg.preprocessed_root)
+        pre_root
         / clip.name
         / cfg.graph_extraction.cotracker_subdir
         / "point_colors.npy"
@@ -307,7 +301,7 @@ def recompute_graph_and_log_rrd(clip: DictConfig, cfg: DictConfig, rrd_out: Path
     ply_colors = np.load(point_colors_file).astype(np.float32) / 255.0
 
     clusters = load_precomputed_instance_clusters(clip, cfg)
-    clip_dir = Path(cfg.preprocessed_root) / clip.name
+    clip_dir = pre_root / clip.name
     semantic_labels_path = (
         clip_dir / cfg.graph_extraction.cotracker_subdir / "merged_instance_semantic_labels.json"
     )
@@ -315,7 +309,7 @@ def recompute_graph_and_log_rrd(clip: DictConfig, cfg: DictConfig, rrd_out: Path
         semantic_labels_raw = json.load(f)
         semantic_labels = {int(k): v for k, v in semantic_labels_raw.items()}
 
-    clusters, semantic_labels = filter_and_reindex_clusters(
+    clusters, _semantic_labels = filter_and_reindex_clusters(
         clusters=clusters,
         min_cluster_size=cfg.graph_extraction.min_cluster_size,
         semantic_labels=semantic_labels,
@@ -337,46 +331,21 @@ def recompute_graph_and_log_rrd(clip: DictConfig, cfg: DictConfig, rrd_out: Path
         clusters = clusters[keep_mask]
         ply_colors = ply_colors[keep_mask]
 
-    cluster_pos_through_time, _, _ = properties_through_time(points_through_time, clusters)
-
-    graph_results = [
-        timestep_graph(points_through_time[i], clusters, cfg)
-        for i in range(len(points_through_time))
-    ]
-    graphs = np.stack([g[0] for g in graph_results])
-
-    rrd_out.parent.mkdir(parents=True, exist_ok=True)
-    if rrd_out.exists():
-        rrd_out.unlink()
-
-    rr.init("clusters")
-    rr.send_blueprint(_project_page_blueprint())
-    rr.save(str(rrd_out))
-    # Make coordinates timeless; otherwise they can get tied to a single timestep.
-    rr.log("/", rr.ViewCoordinates.RDF, static=True)
-
     cluster_colors = clusters_to_rgb(clusters)
-    log_points_through_time_project_page(
-        clusters=clusters,
-        cluster_colors=cluster_colors,
-        pos_through_time=points_through_time,
-        point_colors=ply_colors,
-        cluster_pos_through_time=cluster_pos_through_time,
-        semantic_labels=semantic_labels,
+
+    _write_single_graph_rrd(
+        rrd_rgb_out,
+        lambda: log_rgb_points_through_time(points_through_time, ply_colors),
     )
-    log_graph_structure_through_time_project_page(
-        cluster_pos_through_time=cluster_pos_through_time,
-        graphs_through_time=graphs,
+    _write_single_graph_rrd(
+        rrd_semantic_out,
+        lambda: log_semantic_points_through_time(
+            clusters, cluster_colors, points_through_time
+        ),
     )
 
-    logger.info("Wrote %s", rrd_out)
-
-
-def resolve_path(cfg: DictConfig, project_root: Path, key: str) -> Path:
-    p = Path(cfg[key])
-    if not p.is_absolute():
-        p = project_root / p
-    return p
+    logger.info("Wrote %s", rrd_rgb_out)
+    logger.info("Wrote %s", rrd_semantic_out)
 
 
 _INT_TOOL_KEYS = frozenset(
@@ -419,9 +388,9 @@ def _load_graph_agent_semantics_list(pred_file: Path) -> list[dict[str, Any]] | 
     return None
 
 
-def _predictions_json_path(cfg: DictConfig, project_root: Path, kind: str, clip_name: str) -> Path:
+def _predictions_json_path(cfg: DictConfig, kind: str, clip_name: str) -> Path:
     """Single canonical prediction JSON: ``output_root/predictions_final/<kind>/<clip>.json``."""
-    fb_root = resolve_path(cfg, project_root, "output_root") / "predictions_final"
+    fb_root = resolve_dataset_path(cfg, "output_root") / "predictions_final"
     sub = {"spatial": "spatial", "temporal": "temporal", "directional": "directional"}[kind]
     return fb_root / sub / f"{clip_name}.json"
 
@@ -448,11 +417,10 @@ def _tool_names_for_kind(cfg: DictConfig, kind: str) -> list[str]:
 def build_graph_tools_for_clip(
     clip_name: str,
     cfg: DictConfig,
-    project_root: Path,
     *,
     recording_rerun_minimal: bool = False,
 ) -> GraphTools:
-    graph_dir = resolve_path(cfg, project_root, "output_root") / clip_name / cfg.eval.paths.graph_subdir
+    graph_dir = resolve_dataset_path(cfg, "output_root") / clip_name / cfg.eval.paths.graph_subdir
     centers_path = graph_dir / "c_centers.npy"
     centroids_path = graph_dir / "c_centroids.npy"
     extents_path = graph_dir / "c_extents.npy"
@@ -469,7 +437,7 @@ def build_graph_tools_for_clip(
     adjacency = np.load(adjacency_path)
     bhattacharyya_coeffs = np.load(bhattacharyya_path)
 
-    images_dir = Path(cfg.preprocessed_root) / clip_name / cfg.eval.paths.images_subdir
+    images_dir = resolve_dataset_path(cfg, "preprocessed_root") / clip_name / cfg.eval.paths.images_subdir
     video_frames = sorted(list(images_dir.glob("*.jpg")) + list(images_dir.glob("*.png")))
 
     return GraphTools(
@@ -525,14 +493,13 @@ def _spatial_final_prediction(
 
 def replay_tool_viz_to_rrd(
     cfg: DictConfig,
-    project_root: Path,
     spec: ToolVizReplaySpec,
     dst_rrd: Path,
 ) -> None:
     """Replay one tool-viz job from prediction JSON into ``dst_rrd``."""
     pred_path: Path | None = None
     entries: list[dict[str, Any]] | None = None
-    pred_path = _predictions_json_path(cfg, project_root, spec.kind, spec.clip_name)
+    pred_path = _predictions_json_path(cfg, spec.kind, spec.clip_name)
     entries = _load_graph_agent_semantics_list(pred_path)
     if not entries:
         raise FileNotFoundError(
@@ -561,7 +528,6 @@ def replay_tool_viz_to_rrd(
     graph_tools = build_graph_tools_for_clip(
         spec.clip_name,
         cfg,
-        project_root,
         recording_rerun_minimal=spec.kind in ("spatial", "temporal"),
     )
     tool_names = _tool_names_for_kind(cfg, spec.kind)
@@ -592,13 +558,13 @@ def replay_tool_viz_to_rrd(
         graph_tools.stop_recording()
 
 
-def export_tool_viz_rrds(cfg: DictConfig, project_root: Path) -> None:
-    out_root = resolve_path(cfg, project_root, "output_root")
-    asset_root = project_root / "project_page" / "assets" / "rrd"
+def export_tool_viz_rrds(cfg: DictConfig) -> None:
+    out_root = resolve_dataset_path(cfg, "output_root")
+    asset_root = _REPO_ROOT / "project_page" / "assets" / "rrd"
     for spec in TOOL_VIZ_REPLAY_SPECS:
         dst = asset_root / spec.rrd_relpath
         try:
-            replay_tool_viz_to_rrd(cfg, project_root, spec, dst)
+            replay_tool_viz_to_rrd(cfg, spec, dst)
             logger.info("Replayed tool viz -> %s", dst)
             print("tool_viz replay ok:", dst.resolve(), flush=True)
         except Exception as e:
@@ -614,27 +580,44 @@ def export_tool_viz_rrds(cfg: DictConfig, project_root: Path) -> None:
             logger.info("Copied fallback %s -> %s", src, dst)
 
 
-@hydra.main(config_path="conf", config_name="config", version_base="1.3")
+@hydra.main(config_path="../conf", config_name="config", version_base="1.3")
 def main(cfg: DictConfig) -> None:
     logging.basicConfig(level=logging.INFO)
-    project_root = Path(get_original_cwd())
+    # Make preprocessed/output absolute so extract_graphs helpers (and eval paths) hit the dataset checkout.
+    OmegaConf.update(
+        cfg,
+        "preprocessed_root",
+        str(resolve_dataset_path(cfg, "preprocessed_root")),
+        merge=False,
+    )
+    OmegaConf.update(
+        cfg,
+        "output_root",
+        str(resolve_dataset_path(cfg, "output_root")),
+        merge=False,
+    )
+    logger.info("Dataset checkout root: %s", _dataset_checkout_root())
+    logger.info("cfg.preprocessed_root -> %s", cfg.preprocessed_root)
+    logger.info("cfg.output_root -> %s", cfg.output_root)
+    logger.info("Project assets root: %s", _REPO_ROOT / "project_page")
 
     for clip in cfg.clips:
         if clip.name not in GRAPH_CLIP_NAMES:
             continue
-        rrd_out = (
-            project_root
+        rrd_dir = (
+            _REPO_ROOT
             / "project_page"
             / "assets"
             / "rrd"
             / clip.name
             / cfg.graph_extraction.graph_output_subdir
-            / "visualization.rrd"
         )
-        logger.info("Graph RRD for clip %s -> %s", clip.name, rrd_out)
-        recompute_graph_and_log_rrd(clip, cfg, rrd_out)
+        rrd_rgb = rrd_dir / "visualization_rgb.rrd"
+        rrd_sem = rrd_dir / "visualization_semantic.rrd"
+        logger.info("Graph RRDs for clip %s -> %s , %s", clip.name, rrd_rgb, rrd_sem)
+        recompute_graph_and_log_rrds(clip, cfg, rrd_rgb, rrd_sem)
 
-    export_tool_viz_rrds(cfg, project_root)
+    export_tool_viz_rrds(cfg)
     logger.info("Done.")
 
 

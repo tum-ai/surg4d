@@ -230,12 +230,38 @@ pre.reasoning-trace-below.reasoning-trace-raw::after {
   font-size: 0.95rem;
 }
 
+.rerun-overview-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2.5rem;
+  width: 95%;
+  max-width: 1800px;
+  margin: 1.5rem auto 0;
+  text-align: left;
+}
+
 .rerun-overview-row {
   display: flex;
   gap: 1rem;
-  width: 95%;
-  max-width: 1800px;
+  width: 100%;
   margin: 0 auto;
+}
+
+.rerun-overview-triple {
+  align-items: stretch;
+}
+
+.rerun-overview-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.rerun-overview-triple .rerun-overview-video-tile {
+  min-height: clamp(360px, 70vh, 900px);
+  height: clamp(360px, 70vh, 900px);
 }
 
 .rerun-overview-row .rerun-cell {
@@ -275,6 +301,11 @@ pre.reasoning-trace-below.reasoning-trace-raw::after {
   }
 
   .rerun-overview-row .rerun-cell {
+    min-height: 50vh;
+    height: 50vh;
+  }
+
+  .rerun-overview-triple .rerun-overview-video-tile {
     min-height: 50vh;
     height: 50vh;
   }

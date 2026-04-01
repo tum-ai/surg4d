@@ -126,9 +126,9 @@
           <div class="container has-text-centered" style="max-width: 100%; width: 100%;">
             <h2 class="cover-unified__authors is-2 is-size-4-mobile myfont">
               <span class="myfont"><a href="https://scholar.google.com/citations?user=YHRYsjAAAAAJ&amp;hl=en">Maximilian Fehrentz*<sup class="is-size-6-mobile">1,2,4</sup></a>, </span>
-              <span class="myfont">Nicolas Stellwag*<sup class="is-size-6-mobile">2</sup>, </span>
-              <span class="myfont">Robert Wiebe<sup class="is-size-6-mobile">2</sup>, </span>
-              <span class="myfont">Nicole Thorisch<sup class="is-size-6-mobile">2</sup>, </span>
+              <span class="myfont"><a href="https://www.linkedin.com/in/nicolasstellwag/">Nicolas Stellwag*<sup class="is-size-6-mobile">2</sup></a>, </span>
+              <span class="myfont"><a href="https://www.linkedin.com/in/robert-wiebe/">Robert Wiebe<sup class="is-size-6-mobile">2</sup></a>, </span>
+              <span class="myfont"><a href="https://www.linkedin.com/in/nicole-thorisch/">Nicole Thorisch<sup class="is-size-6-mobile">2</sup></a>, </span>
               <span class="myfont"><a href="https://scholar.google.com/citations?user=eMgwc9gAAAAJ&amp;hl=en">Fabian Grob<sup class="is-size-6-mobile">2</sup></a>, </span>
               <span class="myfont"><a href="https://scholar.google.com/citations?user=VKRaSnAAAAAJ&amp;hl=en">Patrick Remerscheid<sup class="is-size-6-mobile">2</sup></a>, </span>
               <span class="myfont"><a href="https://scholar.google.com/citations?user=zUu5nOAAAAAJ&amp;hl=en">Ken-Joel Simmoteit<sup class="is-size-6-mobile">2</sup></a>, </span>
@@ -266,17 +266,68 @@
       </div>
       <h3 class="reasoning-nav-subhead"><em>How To Navigate Below 4D Scenes</em></h3>
       <p class="reasoning-nav-text">
-        The 4D visualizations below are interactive. For optimized usage: pan by holding left-click and moving your cursor, translate the camera by holding left- and right-click, rotate around the camera axis by holding option, and zoom by scrolling. With space, you can start and stop the video. With the arrow keys, you can additionally move frame by frame. You may also use the control bar below to loop sequences or directly scroll through the timeline yourself. Be advised that loading the files may take a moment.
+        Each row below shows the monocular input clip (left), the RGB 4D reconstruction (center), and the same geometry with semantic instance colors (right). The 4D viewers are interactive: pan by holding left-click and moving your cursor, translate the camera by holding left- and right-click, rotate around the camera axis by holding option, and zoom by scrolling. With space, you can start and stop playback. With the arrow keys, you can step frame by frame. You may also use the control bar to loop or scrub the timeline. Loading the Rerun files may take a moment.
       </p>
 
       <div style="text-align: center; margin-top: 3rem;">
         <h2 class="reasoning-subhead reasoning-subhead-center reasoning-task-header">
           Interactive Examples of Tracked 4D Reconstructions from Unposed 2D Monocular Video
         </h2>
-        <div class="rerun-overview-row">
-          <div class="rerun-cell" id="rerun-1" data-rrd-url="./project_page/assets/rrd/video01_28580/graph_final/visualization.rrd"></div>
-          <div class="rerun-cell" id="rerun-2" data-rrd-url="./project_page/assets/rrd/video12_19500/graph_final/visualization.rrd"></div>
-          <div class="rerun-cell" id="rerun-3" data-rrd-url="./project_page/assets/rrd/video17_01563/graph_final/visualization.rrd"></div>
+        <div class="rerun-overview-stack">
+          <div class="rerun-overview-row rerun-overview-triple">
+            <div class="rerun-overview-col">
+              <div class="reasoning-col-label">Monocular video</div>
+              <div class="reasoning-media reasoning-viz-tile rerun-overview-video-tile">
+                <video playsinline controls muted loop preload="metadata">
+                  <source src="./project_page/reasoning_media/video01_28580_25fps.mp4" type="video/mp4">
+                </video>
+              </div>
+            </div>
+            <div class="rerun-overview-col">
+              <div class="reasoning-col-label">RGB point cloud</div>
+              <div class="rerun-cell" id="rerun-1" data-rrd-url="./project_page/assets/rrd/video01_28580/graph_final/visualization_rgb.rrd"></div>
+            </div>
+            <div class="rerun-overview-col">
+              <div class="reasoning-col-label">Semantic instance colors</div>
+              <div class="rerun-cell" id="rerun-1-sem" data-rrd-url="./project_page/assets/rrd/video01_28580/graph_final/visualization_semantic.rrd"></div>
+            </div>
+          </div>
+          <div class="rerun-overview-row rerun-overview-triple">
+            <div class="rerun-overview-col">
+              <div class="reasoning-col-label">Monocular video</div>
+              <div class="reasoning-media reasoning-viz-tile rerun-overview-video-tile">
+                <video playsinline controls muted loop preload="metadata">
+                  <source src="./project_page/reasoning_media/video12_19500_25fps.mp4" type="video/mp4">
+                </video>
+              </div>
+            </div>
+            <div class="rerun-overview-col">
+              <div class="reasoning-col-label">RGB point cloud</div>
+              <div class="rerun-cell" id="rerun-2" data-rrd-url="./project_page/assets/rrd/video12_19500/graph_final/visualization_rgb.rrd"></div>
+            </div>
+            <div class="rerun-overview-col">
+              <div class="reasoning-col-label">Semantic instance colors</div>
+              <div class="rerun-cell" id="rerun-2-sem" data-rrd-url="./project_page/assets/rrd/video12_19500/graph_final/visualization_semantic.rrd"></div>
+            </div>
+          </div>
+          <div class="rerun-overview-row rerun-overview-triple">
+            <div class="rerun-overview-col">
+              <div class="reasoning-col-label">Monocular video</div>
+              <div class="reasoning-media reasoning-viz-tile rerun-overview-video-tile">
+                <video playsinline controls muted loop preload="metadata">
+                  <source src="./project_page/reasoning_media/video17_01563_25fps.mp4" type="video/mp4">
+                </video>
+              </div>
+            </div>
+            <div class="rerun-overview-col">
+              <div class="reasoning-col-label">RGB point cloud</div>
+              <div class="rerun-cell" id="rerun-3" data-rrd-url="./project_page/assets/rrd/video17_01563/graph_final/visualization_rgb.rrd"></div>
+            </div>
+            <div class="rerun-overview-col">
+              <div class="reasoning-col-label">Semantic instance colors</div>
+              <div class="rerun-cell" id="rerun-3-sem" data-rrd-url="./project_page/assets/rrd/video17_01563/graph_final/visualization_semantic.rrd"></div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -545,6 +596,9 @@ So the direction vector should be {&quot;x&quot;: 1, &quot;y&quot;: -1, &quot;z&
         <div class="columns is-centered">
           <div class="column is-8">
             <div class="content">
+              <p>
+                We thank the authors of CholecSeg8k and Cholec80 for providing the public datasets on which we build.
+              </p>
               <p>
                 Website template modified from <a href="https://www.guangzhaohe.com/canor/#">Category-Agnostic Neural Object Rigging</a>.
               </p>
