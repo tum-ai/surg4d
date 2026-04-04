@@ -39,7 +39,7 @@ def extract_geometry(clip: DictConfig, cfg: DictConfig, model: DepthAnything3):
     processing_res = max(
         orig_w, orig_h
     )  # by setting this + upper bound resize we ensure processing res is equal to original image size, since we already make it divisible by da3 vit patch size in preprocess step
-
+    print(processing_res)
     # da3 inference
     prediction = model.inference(
         image=image_filenames,
@@ -82,7 +82,10 @@ def main(cfg: DictConfig):
         Path(config_dump).parent.mkdir(parents=True, exist_ok=True)
         OmegaConf.save(cfg, config_dump)
 
-    model = DepthAnything3.from_pretrained("depth-anything/DA3NESTED-GIANT-LARGE")
+    # model = DepthAnything3.from_pretrained("depth-anything/DA3NESTED-GIANT-LARGE")
+    # model = DepthAnything3.from_pretrained("depth-anything/da3-giant")
+    model = DepthAnything3.from_pretrained("depth-anything/DA3-LARGE-1.1")
+    # model = DepthAnything3.from_pretrained("depth-anything/DA3-SMALL")
     model = model.to("cuda:0")
 
     for clip in tqdm(cfg.clips, desc="Processing clips", unit="clip"):

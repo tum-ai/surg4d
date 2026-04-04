@@ -1,0 +1,5 @@
+- name: video01_00000
+  video_id: 1
+  first_frame: 0
+  last_frame: 1700
+  frame_stride: 1

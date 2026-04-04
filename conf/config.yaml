@@ -1,5 +1,5 @@
 defaults:
-  - clips: final_dataset
+  - clips: cholec80_clip #final_dataset_first
   - segment: sasvi_maskrcnn
   - preprocess: sasvi_masks
   - extract_geometry: default
@@ -9,10 +9,10 @@ defaults:
   - compute_metrics: default
   - _self_
   
-cholecseg8k_root: data/cholecseg8k
+cholecseg8k_root: /home/data/long_form_surgery_Cholec80/1fps_samples/  # /home/data/tumai/splatgraph/data/cholecseg8k
 
-preprocessed_root: data/preprocessed/clean
-output_root: output/final
+preprocessed_root: /home/data/tumai/splatgraph/data/preprocessed/clean/test_output
+output_root: /home/data/tumai/splatgraph/data/output/
 
 seed: 1234
 

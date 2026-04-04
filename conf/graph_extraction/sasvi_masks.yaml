@@ -10,6 +10,6 @@ temporal_lof_outlier_filter:
   min_cluster_points: 20
   strong_negative_outlier_factor_threshold: -1.0
 
-timestep_stride: 4
+timestep_stride: 2 #4
 
 graph_edge_threshold: 0.05 # edge if bhattacharyya coefficient >= threshold

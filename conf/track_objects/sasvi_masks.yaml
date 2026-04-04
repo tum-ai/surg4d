@@ -6,7 +6,7 @@ da3_pc_pixel_stride: ${extract_geometry.da3_pc_pixel_stride}
 da3_conf_thresh_percentile: ${extract_geometry.da3_conf_thresh_percentile}
 
 cotracker_subdir: cotracker_final
-cotracker_n_points_per_frame: 4096
+cotracker_n_points_per_frame: 2500 #2048 #4096
 cotracker_depth_jump_threshold: 0.1
 cotracker_k_neighbors: 3
 cotracker_idw_power: 2.0

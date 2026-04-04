@@ -10,7 +10,8 @@ prediction_subdir: semantic_masks_sasvi_orig_res
 run_training: false
 run_inference: true
 
-checkpoint_path: output/segment/maskrcnn_cholecseg/[latest]/best_val_dice.pth
+# checkpoint_path: output/segment/maskrcnn_cholecseg/[latest]/best_val_dice.pth
+checkpoint_path: output/segment/maskrcnn_cholecseg/best_val_dice.pth
 
 backbone: ResNet50
 hidden_ft: 64
