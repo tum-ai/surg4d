@@ -241,11 +241,36 @@ const scrollContainer = document.querySelector('.scroll-container');
 const sections = document.querySelectorAll(".section");
 const dots = document.querySelectorAll(".section-nav .dot");
 let current = "cover";
+let chromeVisible = true;
 
-// Slider control
-scrollContainer.addEventListener("scroll", () => {
-    // let current = "cover";
-    console.log('hello scrolling');
+function setChromeVisibility(show) {
+    if (chromeVisible === show) {
+        return;
+    }
+    chromeVisible = show;
+
+    const opacity = show ? '1' : '0';
+    const pointerEvents = show ? 'auto' : 'none';
+    const menuFooter = document.getElementById('menu-footer');
+    const topBar = document.getElementById('top-bar');
+    const mobileMenu = document.getElementById('mobile-menu');
+    const mobileTopBar = document.getElementById('mobile-top-bar');
+
+    [menuFooter, topBar, mobileMenu, mobileTopBar].forEach((el) => {
+        if (!el) return;
+        el.style.opacity = opacity;
+        el.style.pointerEvents = pointerEvents;
+        el.style.transition = 'opacity 0.3s ease';
+    });
+}
+
+let scrollTicking = false;
+
+function handleScroll() {
+    if (!scrollContainer) {
+        return;
+    }
+    scrollTicking = false;
 
     // Loop through each section to find the one in view
     sections.forEach(section => {
@@ -270,25 +295,20 @@ scrollContainer.addEventListener("scroll", () => {
         }
     });
 
-    const menuFooter = document.getElementById('menu-footer');
-    const topBar = document.getElementById('top-bar');
-    const mobileMenu = document.getElementById('mobile-menu');
-    const mobileTopBar = document.getElementById('mobile-top-bar');
-    const onCover = current === 'cover';
-    const showChrome = 'opacity: 1; pointer-events: auto; transition: opacity 0.3s ease;';
-    const hideChrome = 'opacity: 0; pointer-events: none; transition: opacity 0.3s ease;';
-    if (onCover) {
-        if (menuFooter) menuFooter.style.cssText += showChrome;
-        if (topBar) topBar.style.cssText += showChrome;
-        if (mobileMenu) mobileMenu.style.cssText += showChrome;
-        if (mobileTopBar) mobileTopBar.style.cssText += showChrome;
-    } else {
-        if (menuFooter) menuFooter.style.cssText += hideChrome;
-        if (topBar) topBar.style.cssText += hideChrome;
-        if (mobileMenu) mobileMenu.style.cssText += hideChrome;
-        if (mobileTopBar) mobileTopBar.style.cssText += hideChrome;
-    }
-});
+    setChromeVisibility(current === 'cover');
+}
+
+// Slider control
+if (scrollContainer) {
+    scrollContainer.addEventListener("scroll", () => {
+        if (scrollTicking) {
+            return;
+        }
+        scrollTicking = true;
+        requestAnimationFrame(handleScroll);
+    }, { passive: true });
+    handleScroll();
+}
 
 // return mesh paths for all 4 viewers, indexed by global vars
 function getMeshPaths() {
@@ -662,6 +682,20 @@ function mergeClose(list1, list2) {
   }
 
 async function prefetchMeshes() {
+    const isTouchDevice = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+    const isMobileUA = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent || '');
+    const hasLowDeviceMemory = typeof navigator.deviceMemory === 'number' && navigator.deviceMemory <= 4;
+
+    // On mobile/low-memory devices this can aggressively consume memory and crash Safari tabs.
+    if (isTouchDevice || isMobileUA || hasLowDeviceMemory) {
+        console.log('Skipping mesh prefetch on mobile or low-memory device');
+        return;
+    }
+
+    if (!('caches' in window) || typeof caches.open !== 'function') {
+        return;
+    }
+
     const quad_mesh_paths = generateMeshPaths("assets/meshes/quad/mesh", 10, 10, 10);
     // console.log('qua mesdh paths', quad_mesh_paths);
     const quad_blob_paths = generateMeshPaths("assets/meshes/quad/blob", 10, 10, 10);
@@ -675,7 +709,7 @@ async function prefetchMeshes() {
 
     const glasses_mesh_paths = generateMeshPaths("assets/meshes/glasses/mesh", 10, 10, 1);
     const glasses_blob_paths = generateMeshPaths("assets/meshes/glasses/blob", 10, 10, 1);
-    glasses_paths = mergeClose(glasses_blob_paths, glasses_mesh_paths);
+    const glasses_paths = mergeClose(glasses_blob_paths, glasses_mesh_paths);
     await preloadMeshes(glasses_paths, 'mesh-cache-glasses');
 }
 
